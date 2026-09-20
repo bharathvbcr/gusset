@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.0] - 2026-09-20
+## [0.0.1] - 2026-09-20
 
 ### Phase 0 · Seed Reproduction & Firewall Baseline
 - Confirmed the audited document's firewall failure: `rs_guarded_doc` uses `CString::new(msg).unwrap()`, leading to double panic and `SIGABRT` under embedded NUL byte.

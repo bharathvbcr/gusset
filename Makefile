@@ -19,7 +19,7 @@ install: build
 	@chmod 644 $(LIBDIR)/libgusset.a
 	@cp internal/ffi/gusset.h $(INCLUDEDIR)/gusset.h
 	@chmod 644 $(INCLUDEDIR)/gusset.h
-	@sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@VERSION@|0.1.0|g' gusset.pc.in > $(PKGCONFIGDIR)/gusset.pc
+	@sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@VERSION@|0.0.1|g' gusset.pc.in > $(PKGCONFIGDIR)/gusset.pc
 	@chmod 644 $(PKGCONFIGDIR)/gusset.pc
 	@go build -o $(BINDIR)/gussetvet ./tools/gussetvet
 	@chmod 755 $(BINDIR)/gussetvet
