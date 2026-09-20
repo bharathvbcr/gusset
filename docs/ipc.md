@@ -101,5 +101,5 @@ sequenceDiagram
 1. **Shared Memory Ring:** Requests and responses pass through bounded lock-free shared memory channels.
 2. **Heartbeats:** The supervisor exchanges microsecond heartbeats with worker processes.
 3. **Fault Containment:** If a Metal kernel aborts the worker, only the worker sub-process terminates. The Go service remains alive and healthy.
-4. **Restart Budget:** The supervisor restarts workers up to $N$ times within window $T$. If the budget is exhausted, circuit breaker opens.
+4. **Restart Budget:** The supervisor restarts workers up to N times within window T. If the budget is exhausted, circuit breaker opens.
 5. **Transparency:** To the Go caller, `gusset-ipc.Handle` exposes the identical `Call(ctx, in)` and `Submit`/`Wait` semantics.

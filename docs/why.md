@@ -62,8 +62,8 @@ flowchart TD
 ### Collision 2: Concurrency & Thread Exhaustion (Invariant I4)
 
 **The Problem:**
-- Go goroutines are lightweight $M:N$ green threads (millions can exist concurrently).
-- To the Go scheduler, a cgo call is treated as a blocking system call. The operating system thread ($M$) is pinned to the goroutine. If the call does not return within ~20 µs, the scheduler hands off the logical processor ($P$) and spawns or wakes a new OS thread to service remaining goroutines.
+- Go goroutines are lightweight M:N green threads (millions can exist concurrently).
+- To the Go scheduler, a cgo call is treated as a blocking system call. The operating system thread (M) is pinned to the goroutine. If the call does not return within ~20 µs, the scheduler hands off the logical processor (P) and spawns or wakes a new OS thread to service remaining goroutines.
 - If a burst of 1,000 goroutines calls a Rust engine simultaneously (e.g. incoming HTTP/gRPC requests), the Go runtime spawns 1,000 OS threads.
 - When the thread count reaches Go's hard limit (default 10,000 threads), the Go runtime fatally terminates the process:
   ```
@@ -101,9 +101,9 @@ sequenceDiagram
 **How Gusset Solves It:**
 - Callers acquire a permit from a Go channel semaphore before entering cgo.
 - Bounded concurrency: In-flight calls per handle can never exceed the configured pool size, capped at `gusset.MaxPoolSize` (1024). Requests exceeding the ceiling are refused, not clamped.
-- Submissions are strictly non-blocking (`gusset_submit` copies or references the input and returns a ticket ID in $< 5\ \mu\text{s}$, well below the 20 µs $P$-handoff threshold).
+- Submissions are strictly non-blocking (`gusset_submit` copies or references the input and returns a ticket ID in `< 5 µs`, well below the 20 µs P-handoff threshold).
 - Waiters park on Go's Netpoller via an `os.Pipe`, consuming 0 OS threads while awaiting completion.
-- Verified by the soak test (`TestSoak_ThreadCapUnderTenThousandCalls`), asserting that `/sched/threads:threads` stays under $\text{pool\_size} + GOMAXPROCS + 8$.
+- Verified by the soak test (`TestSoak_ThreadCapUnderTenThousandCalls`), asserting that `/sched/threads:threads` stays under `pool_size + GOMAXPROCS + 8`.
 
 ---
 
@@ -156,7 +156,7 @@ sequenceDiagram
 - Furthermore, passing Go pointers to Rust that outlive the call violates Go's runtime pointer-passing contract (R6), resulting in unrecoverable `cgocheck` panics.
 
 **How Gusset Solves It:**
-- **Dual-Path Memory Model (R6/R16):** Small inputs ($\le 4\text{ KiB}$) are copied during `gusset_submit`. Larger payloads are allocated in 64-byte aligned Rust memory via `gusset_buf_alloc` and wrapped in Go as `[]byte` via `unsafe.Slice`. Go pointers never outlive the FFI call.
+- **Dual-Path Memory Model (R6/R16):** Small inputs (`<= 4 KiB`) are copied during `gusset_submit`. Larger payloads are allocated in 64-byte aligned Rust memory via `gusset_buf_alloc` and wrapped in Go as `[]byte` via `unsafe.Slice`. Go pointers never outlive the FFI call.
 - **Allocator Accounting:** Gusset provides `gusset::alloc::Counting<A>`, a non-allocating wrapper around the global allocator that tracks live and peak bytes with relaxed atomics.
 - **Dynamic Limit Advisory:** Go exposes `gusset.AdviseMemoryLimit(containerBudget)`, which reads live Rust memory and updates Go's `debug.SetMemoryLimit(max(budget - rustLive, floor))`, ensuring Go collects garbage proactively before the container limit is breached.
 
@@ -181,7 +181,7 @@ sequenceDiagram
 | Failure Mode | Naive cgo / bindgen | uniffi-bindgen-go | rust2go | Gusset Runtime Contract |
 | :--- | :--- | :--- | :--- | :--- |
 | **Rust Panic Recovery** | `SIGABRT` / Crash | `catch_unwind` (vulnerable to NUL-byte abort) | `catch_unwind` | **Guaranteed**: 5-case Panic Zoo verified; `FfiStatus` ptr+len |
-| **Thread Scaling** | Unbounded OS thread spawning | Unbounded OS thread spawning | Async, but disables `cgocheck` | **Bounded**: Go semaphore queue $\le \text{pool\_size} \le 1024$ |
+| **Thread Scaling** | Unbounded OS thread spawning | Unbounded OS thread spawning | Async, but disables `cgocheck` | **Bounded**: Go semaphore queue (`<= pool_size <= 1024`) |
 | **musl / Docker Stack** | Crash on 128 KiB default | Crash on 128 KiB default | Dependent on host stack | **Guaranteed**: Explicit 8 MiB worker stack + `sigaltstack` |
 | **Deadline Cancellation** | Hangs until native return | Hangs until native return | Async callback | **Cooperative**: Relative `timeout_ns` + `AtomicBool` flag |
 | **Memory Accounting** | Go blind to Rust heap | Go blind to Rust heap | Pre-computed buffers | **Integrated**: `Counting<A>` + `AdviseMemoryLimit` |
@@ -201,5 +201,5 @@ sequenceDiagram
 
 ### You Do Not Need Gusset When:
 1. **Stateless math operations**: Trivial, microsecond C calculations that never allocate, never block, never recurse, and never panic.
-2. **Separate microservices**: Workloads where network latency ($> 500\ \mu\text{s}$) is acceptable and components run in separate processes communicating via gRPC, HTTP, or Unix domain sockets.
+2. **Separate microservices**: Workloads where network latency (`> 500 µs`) is acceptable and components run in separate processes communicating via gRPC, HTTP, or Unix domain sockets.
 3. **Pure Go implementations**: Where Go's native standard library or third-party packages already meet performance requirements.
