@@ -79,7 +79,7 @@ sequenceDiagram
     critical Hardware Driver Reset Fault
         Worker->>OS: GPU Hang / Invalid Kernel Address
         OS->>Worker: Kernel driver terminates process (SIGABRT / SIGKILL)
-        Note over Worker: Worker process dies immediately.<br/>In-process cgo would destroy entire Go process!
+        Note over Worker: Worker process dies immediately (in-process cgo would destroy entire Go process)
     end
 
     Note over Go: Go Service remains healthy & serving

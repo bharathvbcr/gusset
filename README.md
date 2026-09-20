@@ -89,16 +89,16 @@ sequenceDiagram
 
     Caller->>Handle: Call(ctx, input)
     Handle->>Sem: Acquire permit (pool bounded)
-    Note over Sem: Callers queue in Go runtime;<br/>never pin an OS thread in cgo (I4)
+    Note over Sem: Callers queue in Go runtime (never pin OS thread in cgo - I4)
     Handle->>CGO: gusset_submit(handle, header, input, &ticket)
-    Note over CGO: 40-byte CallHeader:<br/>relative timeout_ns + trace/span IDs
+    Note over CGO: 40-byte CallHeader (relative timeout_ns + trace/span IDs)
     CGO->>Pool: Enqueue job to worker channel
     CGO-->>Handle: Return ticket ID immediately
     Handle->>Handle: Register ticket channel in pending map
 
     par Rust Worker Execution
         Pool->>Pool: Worker dequeues job
-        Note over Pool: Runs under catch_unwind (I2)<br/>Worker has explicit 8 MiB stack (I5)
+        Note over Pool: Runs under catch_unwind (I2) with explicit 8 MiB stack (I5)
         Pool->>Pool: ctx.check() (timeout & cancel flag)
         Pool->>Pool: Execute registered engine
         Pool->>Pipe: Write 8-byte ticket ID to write fd
