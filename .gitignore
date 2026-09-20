@@ -1,0 +1,12 @@
+target/
+*.a
+*.test
+bench/results/*.tmp
+
+# macOS
+.DS_Store
+
+# DevCouncil (ignore state, caches, databases; track config.yaml)
+.devcouncil/*
+!.devcouncil/
+!.devcouncil/config.yaml

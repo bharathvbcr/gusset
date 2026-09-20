@@ -1,0 +1,9 @@
+gates:
+  mode: off
+execution:
+  hook_gate:
+    mode: off
+project:
+  default_branch: main
+  name: gusset
+  root: .

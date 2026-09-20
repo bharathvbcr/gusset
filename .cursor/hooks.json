@@ -1,0 +1,28 @@
+{
+  "generatedBy": "devmap",
+  "hooks": {
+    "afterFileEdit": [
+      {
+        "command": "\"devmap\" hook post-tool-use"
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "\"devmap\" hook pre-tool-use",
+        "matcher": "Read|Grep"
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "\"devmap\" hook session-end",
+        "timeout": 3
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "\"devmap\" hook session-start"
+      }
+    ]
+  },
+  "version": 1
+}

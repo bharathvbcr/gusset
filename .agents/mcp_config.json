@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "devcouncil": {
+      "args": [
+        "mcp-server"
+      ],
+      "command": "devcouncil",
+      "cwd": "/Users/bharath/Code/devtools/gusset",
+      "env": {
+        "DEVCOUNCIL_PROJECT_ROOT": "/Users/bharath/Code/devtools/gusset"
+      }
+    },
+    "devmap": {
+      "args": [
+        "--root",
+        "/Users/bharath/Code/devtools/gusset",
+        "mcp"
+      ],
+      "command": "devmap",
+      "type": "stdio"
+    }
+  }
+}
