@@ -20,15 +20,23 @@ var (
 )
 
 // Expected ABI constants compiled into Go (I6).
+//
+// AllocStats joined the verified set in ABI version 2. gusset_alloc_stats writes it
+// directly into Go memory, so a size or alignment disagreement corrupts the Go heap;
+// before version 2 nothing checked it. internal/ffi/gusset.h is hand-maintained
+// rather than generated, which makes this runtime check the only guard against the
+// header drifting from the Rust structs.
 const (
-	ExpectedAbiVersion = 1
+	ExpectedAbiVersion = 2
 	ExpectedHeaderSize = 40
 	ExpectedStatusSize = 48
-	ExpectedLayoutSize = 28
+	ExpectedLayoutSize = 36
+	ExpectedStatsSize  = 24
 
 	ExpectedHeaderAlign = 8
 	ExpectedStatusAlign = 8
 	ExpectedLayoutAlign = 4
+	ExpectedStatsAlign  = 8
 )
 
 func init() {
@@ -42,8 +50,12 @@ func init() {
 		))
 	}
 
-	expectedSizes := [3]uint32{ExpectedHeaderSize, ExpectedStatusSize, ExpectedLayoutSize}
-	expectedAligns := [3]uint32{ExpectedHeaderAlign, ExpectedStatusAlign, ExpectedLayoutAlign}
+	expectedSizes := [ffi.AbiTypeCount]uint32{
+		ExpectedHeaderSize, ExpectedStatusSize, ExpectedLayoutSize, ExpectedStatsSize,
+	}
+	expectedAligns := [ffi.AbiTypeCount]uint32{
+		ExpectedHeaderAlign, ExpectedStatusAlign, ExpectedLayoutAlign, ExpectedStatsAlign,
+	}
 
 	if layout.Sizes != expectedSizes || layout.Aligns != expectedAligns {
 		panic(fmt.Sprintf(
@@ -53,6 +65,23 @@ func init() {
 			layout.Sizes,
 			layout.Aligns,
 		))
+	}
+
+	// Second, independent check: what Rust reports against what cgo actually
+	// compiled from the hand-maintained header. The constants above would agree
+	// with Rust while the header disagreed with both, and nothing else would
+	// notice until a struct write landed at the wrong offset in the Go heap.
+	localSizes, localAligns := ffi.LocalLayout()
+	for i := 0; i < ffi.AbiTypeCount; i++ {
+		if localSizes[i] != layout.Sizes[i] || localAligns[i] != layout.Aligns[i] {
+			panic(fmt.Sprintf(
+				"gusset: ABI layout drift for %s: Rust reports size %d align %d, "+
+					"cgo compiled size %d align %d from internal/ffi/gusset.h",
+				ffi.AbiTypeNames[i],
+				layout.Sizes[i], layout.Aligns[i],
+				localSizes[i], localAligns[i],
+			))
+		}
 	}
 
 	if err := ffi.Init(); err != nil {
@@ -81,9 +110,30 @@ func DrainLogs(buf []byte) int {
 	return ffi.DrainLogs(buf)
 }
 
-// extractCallHeader extracts timeout and OpenTelemetry trace/span context if present.
-func extractCallHeader(ctx context.Context) ffi.CallHeader {
-	var header ffi.CallHeader
+// SpanContextKey is the context key Gusset reads trace correlation from.
+//
+// It is an unexported-type key rather than the bare string "spanContext": a string
+// key collides with any other package using the same literal, and go vet flags it.
+// Callers attach a value implementing TraceID() [16]byte and SpanID() [8]byte:
+//
+//	ctx = context.WithValue(ctx, gusset.SpanContextKey, mySpanContext)
+//
+// OpenTelemetry's own span context is stored under OTel's private key, which no
+// third party can read, so propagation is explicit by design rather than magic that
+// silently never fires.
+var SpanContextKey = spanContextKey{}
+
+type spanContextKey struct{}
+
+// TraceCarrier is the shape Gusset reads trace correlation from (R9).
+type TraceCarrier interface {
+	TraceID() [16]byte
+	SpanID() [8]byte
+}
+
+// extractCallHeader extracts timeout and trace/span context if present.
+func extractCallHeader(ctx context.Context, flags uint32) ffi.CallHeader {
+	header := ffi.CallHeader{Flags: flags}
 
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
@@ -94,13 +144,7 @@ func extractCallHeader(ctx context.Context) ffi.CallHeader {
 		}
 	}
 
-	// Extract trace_id and span_id if OpenTelemetry span context is in ctx
-	type traceContextGetter interface {
-		TraceID() [16]byte
-		SpanID() [8]byte
-	}
-
-	if sc, ok := ctx.Value("spanContext").(traceContextGetter); ok {
+	if sc, ok := ctx.Value(SpanContextKey).(TraceCarrier); ok {
 		header.TraceID = sc.TraceID()
 		header.SpanID = sc.SpanID()
 	}

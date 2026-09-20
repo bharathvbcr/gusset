@@ -14,3 +14,4 @@ gusset = { path = "../gusset" }
 libc = "0.2"
 
 [dev-dependencies]
+libc = "0.2"

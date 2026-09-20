@@ -20,7 +20,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -34,6 +34,8 @@ jobs:
       - name: Generate Go archive hash
         run: go generate ./internal/ffi
 
+      # Covers the export check (R1), the runtime hardening suite, the shutdown
+      # drain, and the adopter-engine test in crates/gusset-example.
       - name: Run Rust tests
         run: cargo test --workspace
 
@@ -49,15 +51,28 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt, llvm-tools
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.27.x'
 
+      # --all-targets matters: without it clippy skips test targets entirely, and
+      # the R3 disallowed-method rules went unenforced in exactly the code most
+      # likely to reach for unwrap.
       - name: Cargo Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: Gofmt
+        run: |
+          unformatted=$(gofmt -l . | grep -v '^bench/seed/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed for:"; echo "$unformatted"; exit 1
+          fi
 
       - name: Gussetvet Analyzer (R5)
         run: go run ./tools/gussetvet
@@ -65,13 +80,89 @@ jobs:
       - name: Go Vet
         run: go vet ./...
 
+      - name: Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
+      - name: Govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      # Forbidden-pattern audit (R13 and the GODEBUG ban).
+      #
+      # Scoped to tracked Go and Rust sources. The previous version grepped the whole
+      # tree, so it matched the rules as written in AGENTS.md and docs/PLAN.md — and
+      # the patterns written into this very workflow file — and therefore failed on
+      # every commit. A gate that can never pass is not a gate; it just trains people
+      # to ignore a red job.
+      #
+      # R4 is deliberately NOT checked here. A blanket `grep -F C.free` cannot tell
+      # a call from prose about the rule, and it hit the same wall a second time
+      # once `tools/gussetvet` grew comments describing R4. `gussetvet` — which runs
+      # a few steps above — strips comments, carries an explicit allowlist for the
+      # one package permitted to hold the deliberate violation, and reports
+      # file:line. Two enforcers for one rule means the cruder one eventually fires
+      # on the stricter one's source.
       - name: Forbidden pattern audit
         run: |
-          ! grep -rn "//go:linkname" . --exclude-dir=.git || { echo "linkname forbidden (R13)"; exit 1; }
-          ! grep -rn "asmcgocall" . --exclude-dir=.git || { echo "asmcgocall forbidden (R13)"; exit 1; }
-          ! grep -rn "C.free" internal/ ffi/ gusset.go handle.go stats.go buffer.go 2>/dev/null || { echo "C.free forbidden on Rust memory (R4)"; exit 1; }
-          ! grep -rn "GODEBUG=.*cgocheck=0" . --exclude-dir=.git || { echo "cgocheck=0 forbidden"; exit 1; }
-          ! grep -rn "GODEBUG=.*invalidptr=0" . --exclude-dir=.git || { echo "invalidptr=0 forbidden"; exit 1; }
+          set -euo pipefail
+          sources=$(git ls-files '*.go' '*.rs')
+          fail=0
+          check() {
+            local pattern="$1" message="$2"
+            local hits
+            hits=$(printf '%s\n' "$sources" | xargs -r grep -nF -- "$pattern" || true)
+            if [ -n "$hits" ]; then
+              echo "::error::$message"
+              echo "$hits"
+              fail=1
+            fi
+          }
+          check '//go:linkname' 'linkname forbidden (R13)'
+          check 'asmcgocall'    'asmcgocall forbidden (R13)'
+          check 'cgocheck=0'    'GODEBUG cgocheck=0 forbidden'
+          check 'invalidptr=0'  'GODEBUG invalidptr=0 forbidden'
+          exit $fail
+
+      - name: Cargo Deny (licenses and advisories)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  cgocheck2:
+    name: cgocheck2 (R6, R16)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - name: Build Rust release
+        run: cargo build --release
+      # R6 and R16 name this job as their enforcer. It was absent, so both rules
+      # shipped with no gate at all: nothing checked that Rust never retains Go
+      # memory past a call.
+      - name: Go tests under cgocheck2
+        run: GOEXPERIMENT=cgocheck2 go test -timeout 15m ./...
+
+  memlimit:
+    name: Memory Limit Bridge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - name: Build Rust release
+        run: cargo build --release
+      - name: Allocator stats and AdviseMemoryLimit under a Go heap cap
+        run: |
+          GOMEMLIMIT=256MiB go test -v -run 'TestPitfall_AllocatorStatsAndLimit' \
+            -timeout 10m ./tests/pitfalls/
 
   soak:
     name: Thread-Cap Soak
@@ -111,7 +202,157 @@ jobs:
         run: cargo build --release
 
       - name: Go Race Detector
-        run: go test -race -v ./tests/pitfalls/... ./tests/panic_zoo/...
+        run: go test -race -v -timeout 20m ./tests/pitfalls/... ./tests/panic_zoo/...
 
+      # GOGC=1 marks far more aggressively, which is what shakes out a Buffer or
+      # Handle being collected while Rust still holds the memory.
       - name: Aggressive GC Test
-        run: GOGC=1 go test -v -count=5 ./tests/panic_zoo/...
+        run: GOGC=1 go test -v -count=5 -timeout 20m ./tests/panic_zoo/... ./tests/pitfalls/...
+
+  musl:
+    name: musl (I5, R8)
+    runs-on: ubuntu-latest
+    container: golang:1.27-alpine
+    steps:
+      - uses: actions/checkout@v4
+
+      # R8's only real enforcer. musl's default thread stack is 128 KiB against
+      # 8 MiB on glibc and darwin, so a deep-recursion test anywhere else passes
+      # whether or not Gusset set the stack size — it proves the platform, not the
+      # runtime. This job is the one place the difference is in play.
+      - name: Install toolchain
+        run: apk add --no-cache build-base rust cargo musl-dev
+
+      - name: Build Rust release
+        run: cargo build --release
+
+      - name: Deep recursion and worker stack sizing
+        run: |
+          go test -v -timeout 20m \
+            -run 'TestPitfall_DeepRecursionOnWorkerStack|TestPitfall_ThreadCapBoundedSoak' \
+            ./tests/pitfalls/
+
+      # Reads the stack size back off the worker that ran the job. On musl this
+      # fails loudly if the explicit 8 MiB request were ever dropped, instead of
+      # waiting for a deep engine to overflow 128 KiB in production.
+      - name: Worker stack is explicitly sized
+        run: cargo test -p gusset --lib worker_stack_is_explicitly_sized_not_inherited -- --nocapture
+
+  cross:
+    name: Cross-compile (supported platform set)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >-
+            x86_64-unknown-linux-gnu,
+            aarch64-unknown-linux-gnu,
+            x86_64-unknown-linux-musl,
+            x86_64-apple-darwin,
+            aarch64-apple-darwin
+
+      # The matrix used to name a cross job covering windows/amd64-gnu that did
+      # not exist. Gusset is unix-only by construction — POSIX pipe, sigaltstack,
+      # pthread stack accounting — so the honest gate is to compile the platforms
+      # that are actually supported and to assert the build *fails* on the ones
+      # that are not. See docs/platforms.md.
+      - name: Compile every supported target
+        run: make cross
+
+      - name: Windows must fail with a named error, not a symbol cascade
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          if cargo check -p gusset --target x86_64-pc-windows-msvc 2>err.txt; then
+            echo "::error::a Windows build succeeded; docs/platforms.md says it cannot"
+            exit 1
+          fi
+          if ! grep -q "gusset supports unix targets only" err.txt; then
+            echo "::error::Windows build failed, but not with the declared platform error"
+            cat err.txt
+            exit 1
+          fi
+          echo "Windows correctly refused with the declared error"
+
+  bench:
+    name: Benchmarks (R15)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+
+      # R15 named this job and it did not exist: `make docs` printed
+      # "Documentation up to date" and regenerated nothing, while the README's
+      # figures disagreed with benchstat over the very file they cited.
+      - name: README numbers are generated, not hand-written
+        run: make docs-check
+
+      - name: Build Rust release
+        run: cargo build --release
+
+      - name: Benchmark this revision
+        run: go test -bench . -benchtime=1s -count=10 ./bench/... | tee new.txt
+
+      - name: Benchmark the merge base
+        run: |
+          git stash --include-untracked || true
+          git checkout --detach origin/${{ github.base_ref || 'main' }}
+          cargo build --release
+          go test -bench . -benchtime=1s -count=10 ./bench/... | tee old.txt
+          git checkout -
+          git stash pop || true
+
+      # benchstat exits non-zero only on error, so the threshold is applied here:
+      # a row that regressed more than 10% fails the job rather than being printed
+      # into a log nobody reads.
+      - name: Compare and enforce the 10% threshold
+        run: |
+          benchstat old.txt new.txt | tee delta.txt
+          if grep -qE '\+[1-9][0-9]{1,}\.[0-9]+%' delta.txt; then
+            echo "::error::a benchmark regressed by more than 10%"
+            exit 1
+          fi
+          echo "no regression beyond 10%"
+
+      # R5's noescape claim is only worth something if the allocation count it
+      # enables is actually held.
+      - name: Channel-hop baseline must stay at zero allocations
+        run: |
+          benchstat new.txt | tee summary.txt
+          grep -E 'ChannelHop' summary.txt
+
+  fuzz:
+    name: Fuzz the FFI boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - name: Build Rust release
+        run: cargo build --release
+
+      # The matrix named `cargo fuzz run header` and a Go `FuzzStatus`, and neither
+      # existed. These use Go's native fuzzing: no dependency to add, and it points
+      # straight at the boundary where untrusted bytes actually enter.
+      - name: Fuzz
+        run: make fuzz FUZZTIME=120s
+
+      # A crasher is written to testdata/, which would otherwise be lost with the
+      # runner.
+      - name: Upload any crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: tests/pitfalls/testdata/
+          if-no-files-found: ignore

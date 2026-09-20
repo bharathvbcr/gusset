@@ -10,6 +10,21 @@
     missing_docs
 )]
 
+// Supported platform set, enforced rather than described.
+//
+// The completion path is a POSIX pipe, I5's signal protection is `sigaltstack`,
+// and the worker stack read-back is pthread. None of the three has a Windows
+// counterpart in this crate, so a Windows build would fail deep inside `pool::sys`
+// with errors about `libc::sigaltstack` and leave an adopter guessing whether the
+// port was intended. Failing here says what is actually true: Gusset is unix-only
+// today, and `docs/platforms.md` records what a Windows port would have to add.
+#[cfg(not(unix))]
+compile_error!(
+    "gusset supports unix targets only (linux-gnu, linux-musl, macos). The completion \
+     pipe, sigaltstack and pthread stack accounting have no Windows implementation; \
+     see docs/platforms.md."
+);
+
 pub mod alloc;
 pub mod ffi;
 pub mod header;

@@ -25,10 +25,22 @@ type callResult struct {
 type Option func(*handleConfig)
 
 type handleConfig struct {
-	poolSize uint32
+	poolSize  uint32
+	callFlags uint32
 }
 
+// MaxPoolSize mirrors gusset::pool::MAX_POOL_SIZE.
+//
+// Each worker is an OS thread with an 8 MiB stack, so the pool size is a bounded
+// resource request, not a free dial. Rust refuses anything larger; this constant
+// lets callers check before they ask.
+const MaxPoolSize = 1024
+
 // WithPoolSize sets the worker thread pool size for this handle.
+//
+// Values above MaxPoolSize are not silently clamped: Open returns an error, because
+// a caller who asked for 10,000 workers and quietly received 1024 would keep the
+// wrong capacity model.
 func WithPoolSize(n int) Option {
 	return func(c *handleConfig) {
 		if n > 0 {
@@ -37,18 +49,42 @@ func WithPoolSize(n int) Option {
 	}
 }
 
+// WithDiagnosticEngine routes this handle's calls to Gusset's built-in diagnostic
+// engine when no adopter engine is registered in Rust.
+//
+// The diagnostic engine selects its behaviour from the first input byte, including
+// several deliberate panics, so it must never see untrusted data. Gusset's own panic
+// zoo and pitfall suite use it; production callers must not. Without this option a
+// handle with no registered engine refuses every submission instead of falling back
+// to an implicit echo-or-panic engine.
+func WithDiagnosticEngine() Option {
+	return func(c *handleConfig) {
+		c.callFlags |= ffi.FlagDiagnosticEngine
+	}
+}
+
+// handleState owns the active Gusset runtime session resources (I4).
+// Keeping state decoupled from Handle ensures runtime.AddCleanup on Handle
+// can collect unreachable handles without a reference cycle with the drainPipe goroutine.
+type handleState struct {
+	ptr        unsafe.Pointer
+	callFlags  uint32
+	sem        chan struct{}
+	poisoned   atomic.Bool
+	closed     atomic.Bool
+	pipe       *os.File
+	drainDone  chan struct{}
+	mu         sync.Mutex
+	cgoMu      sync.RWMutex
+	pending    map[uint64]chan callResult
+	completed  map[uint64]callResult
+	semTickets map[uint64]struct{}
+}
+
 // Handle represents an active Gusset runtime session (I4).
 type Handle struct {
-	ptr       unsafe.Pointer
-	sem       chan struct{}
-	poisoned  atomic.Bool
-	closed    atomic.Bool
-	pipe      *os.File
-	drainDone chan struct{}
-	mu        sync.Mutex
-	pending   map[uint64]chan callResult
-	completed map[uint64]callResult
-	cleanup   runtime.Cleanup
+	state   *handleState
+	cleanup runtime.Cleanup
 }
 
 // Open opens a new Gusset handle with bounded concurrency (I4).
@@ -79,53 +115,73 @@ func Open(opts ...Option) (*Handle, error) {
 		return nil, err
 	}
 
-	h := &Handle{
-		ptr:       hPtr,
-		sem:       make(chan struct{}, cfg.poolSize),
-		pipe:      r,
-		drainDone: make(chan struct{}),
-		pending:   make(map[uint64]chan callResult),
-		completed: make(map[uint64]callResult),
+	state := &handleState{
+		ptr:        hPtr,
+		callFlags:  cfg.callFlags,
+		sem:        make(chan struct{}, cfg.poolSize),
+		pipe:       r,
+		drainDone:  make(chan struct{}),
+		pending:    make(map[uint64]chan callResult),
+		completed:  make(map[uint64]callResult),
+		semTickets: make(map[uint64]struct{}),
 	}
 
-	// Register AddCleanup backstop (logs if app forgot to close)
-	h.cleanup = runtime.AddCleanup(h, func(p unsafe.Pointer) {
+	h := &Handle{state: state}
+
+	// Register AddCleanup backstop (logs if app forgot to close).
+	// Because drainPipe receives state and not h, h can be garbage collected
+	// if the application drops all references to it without calling Close().
+	h.cleanup = runtime.AddCleanup(h, func(s *handleState) {
 		slog.Warn("gusset: handle was garbage collected without explicit Close()")
-		_ = ffi.HandleClose(p)
-	}, hPtr)
+		_ = s.close()
+	}, state)
 
 	// Start pipe reader goroutine (parks on netpoller)
-	go h.drainPipe()
+	go drainPipe(state)
 
 	return h, nil
 }
 
 // drainPipe reads 8-byte completion tickets from the pipe.
-func (h *Handle) drainPipe() {
-	defer close(h.drainDone)
+func drainPipe(s *handleState) {
+	defer close(s.drainDone)
 	var buf [8]byte
 
 	for {
-		_, err := io.ReadFull(h.pipe, buf[:])
+		_, err := io.ReadFull(s.pipe, buf[:])
 		if err != nil {
 			// Pipe closed on handle shutdown or EOF
-			h.mu.Lock()
-			for _, ch := range h.pending {
+			s.mu.Lock()
+			for _, ch := range s.pending {
 				ch <- callResult{err: errors.New("gusset: handle closed")}
 			}
-			h.pending = make(map[uint64]chan callResult)
-			h.mu.Unlock()
+			s.pending = make(map[uint64]chan callResult)
+			s.completed = make(map[uint64]callResult)
+			s.mu.Unlock()
 			return
 		}
 
 		ticket := binary.NativeEndian.Uint64(buf[:])
 
+		// Synchronize with handle close to eliminate UAF on s.ptr
+		s.cgoMu.RLock()
+		if s.closed.Load() || s.ptr == nil {
+			s.cgoMu.RUnlock()
+			s.mu.Lock()
+			if ch, exists := s.pending[ticket]; exists {
+				delete(s.pending, ticket)
+				ch <- callResult{err: errors.New("gusset: handle closed")}
+			}
+			s.mu.Unlock()
+			continue
+		}
+
 		// Retrieve result from Rust
-		bufID, outBytes, takeErr := ffi.Take(h.ptr, ticket)
+		bufID, outBytes, takeErr := ffi.Take(s.ptr, ticket)
 		var res callResult
 		if takeErr != nil {
 			if errors.Is(takeErr, ErrPanic) {
-				h.poisoned.Store(true)
+				s.poisoned.Store(true)
 			}
 			res = callResult{err: takeErr}
 		} else {
@@ -135,103 +191,172 @@ func (h *Handle) drainPipe() {
 				copy(out, outBytes)
 			}
 			if bufID > 0 {
-				_ = ffi.BufFree(h.ptr, bufID)
+				_ = ffi.BufFree(s.ptr, bufID)
 			}
 			res = callResult{data: out}
 		}
+		s.cgoMu.RUnlock()
 
-		h.mu.Lock()
-		ch, exists := h.pending[ticket]
+		s.mu.Lock()
+		ch, exists := s.pending[ticket]
 		if exists {
-			delete(h.pending, ticket)
+			delete(s.pending, ticket)
 			ch <- res
 		} else {
-			h.completed[ticket] = res
+			s.completed[ticket] = res
 		}
-		h.mu.Unlock()
+		s.mu.Unlock()
 	}
 }
 
 // Close gracefully cancels pending work, shuts down the pool, and releases resources.
 func (h *Handle) Close() error {
-	if h.closed.Swap(true) {
+	h.cleanup.Stop()
+	err := h.state.close()
+	runtime.KeepAlive(h)
+	return err
+}
+
+func (s *handleState) close() error {
+	if s.closed.Swap(true) {
 		return nil
 	}
 
-	h.cleanup.Stop()
-	_ = ffi.CancelAll(h.ptr)
-	err := ffi.HandleClose(h.ptr)
-	// Wait for pipe drain reader to receive EOF from closed write fd
-	<-h.drainDone
-	_ = h.pipe.Close()
+	// 1. Cancel in-flight jobs in Rust memory (R9, I3)
+	s.cgoMu.RLock()
+	if s.ptr != nil {
+		_ = ffi.CancelAll(s.ptr)
+	}
+	s.cgoMu.RUnlock()
 
-	runtime.KeepAlive(h)
+	// 2. Wait for all active CGO operations to finish before deallocating handle
+	s.cgoMu.Lock()
+	err := ffi.HandleClose(s.ptr)
+	s.ptr = nil
+	s.cgoMu.Unlock()
+
+	// 3. Wait for pipe drain reader to receive EOF from closed write fd
+	<-s.drainDone
+	_ = s.pipe.Close()
+
+	// 4. Drain any remaining permits from untaken submitted tickets
+	s.mu.Lock()
+	for ticket := range s.semTickets {
+		delete(s.semTickets, ticket)
+		<-s.sem
+	}
+	s.mu.Unlock()
+
 	return err
+}
+
+func (s *handleState) releaseSem(ticket uint64) {
+	s.mu.Lock()
+	if _, ok := s.semTickets[ticket]; ok {
+		delete(s.semTickets, ticket)
+		<-s.sem
+	}
+	s.mu.Unlock()
 }
 
 // Call executes a unit of work synchronously within the caller's context deadline.
 //
 // Invariant: callers park on the Go semaphore, never blocking on an OS thread (I4).
 func (h *Handle) Call(ctx context.Context, in []byte) ([]byte, error) {
-	if h.poisoned.Load() {
+	res, err := h.state.call(ctx, in)
+	runtime.KeepAlive(h)
+	return res, err
+}
+
+func (s *handleState) call(ctx context.Context, in []byte) ([]byte, error) {
+	if s.poisoned.Load() {
 		return nil, ErrPoisoned
 	}
-	if h.closed.Load() {
+	if s.closed.Load() {
 		return nil, errors.New("gusset: handle is closed")
 	}
 
 	// Acquire semaphore bounded by pool size (I4)
 	select {
-	case h.sem <- struct{}{}:
+	case s.sem <- struct{}{}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	defer func() { <-h.sem }()
+	defer func() { <-s.sem }()
 
-	header := extractCallHeader(ctx)
-	ticket, err := ffi.Submit(h.ptr, header, in, 0)
+	if s.closed.Load() {
+		return nil, errors.New("gusset: handle is closed")
+	}
+
+	header := extractCallHeader(ctx, s.callFlags)
+	s.cgoMu.RLock()
+	if s.closed.Load() || s.ptr == nil {
+		s.cgoMu.RUnlock()
+		return nil, errors.New("gusset: handle is closed")
+	}
+	ticket, err := ffi.Submit(s.ptr, header, in, 0)
+	s.cgoMu.RUnlock()
+
 	if err != nil {
 		if errors.Is(err, ErrPanic) {
-			h.poisoned.Store(true)
+			s.poisoned.Store(true)
 		}
-		runtime.KeepAlive(h)
 		return nil, err
 	}
 
 	ticketCh := make(chan callResult, 1)
 
-	h.mu.Lock()
-	if res, done := h.completed[ticket]; done {
-		delete(h.completed, ticket)
-		h.mu.Unlock()
-		runtime.KeepAlive(h)
+	s.mu.Lock()
+	if res, done := s.completed[ticket]; done {
+		delete(s.completed, ticket)
+		s.mu.Unlock()
 		return res.data, res.err
 	}
-	h.pending[ticket] = ticketCh
-	h.mu.Unlock()
+	if s.closed.Load() {
+		s.mu.Unlock()
+		return nil, errors.New("gusset: handle is closed")
+	}
+	s.pending[ticket] = ticketCh
+	s.mu.Unlock()
 
 	select {
 	case res := <-ticketCh:
-		runtime.KeepAlive(h)
 		return res.data, res.err
 	case <-ctx.Done():
-		// R9: Cancel task and drain ticket so result is never leaked
-		_ = ffi.Cancel(h.ptr, ticket)
-		select {
-		case <-ticketCh:
-		default:
+		// R9: Cancel task and wait for ticket to drain before releasing semaphore (I4)
+		if !s.closed.Load() {
+			s.cgoMu.RLock()
+			if s.ptr != nil {
+				_ = ffi.Cancel(s.ptr, ticket)
+			}
+			s.cgoMu.RUnlock()
 		}
-		runtime.KeepAlive(h)
+		res := <-ticketCh
+		if res.err != nil && errors.Is(res.err, ErrPanic) {
+			s.poisoned.Store(true)
+			return nil, res.err
+		}
 		return nil, ctx.Err()
 	}
 }
 
 // Submit submits a job asynchronously (accepts either []byte or *Buffer) and returns a ticket.
 func (h *Handle) Submit(ctx context.Context, in any) (uint64, error) {
-	if h.poisoned.Load() {
+	ticket, err := h.state.submit(ctx, in)
+	runtime.KeepAlive(h)
+	// A *Buffer argument is consumed for its id alone, so after that read nothing
+	// references it and its AddCleanup backstop becomes eligible to run — freeing
+	// the Rust buffer while, or before, Rust resolves the id. Keeping it alive until
+	// submit has returned closes that window.
+	runtime.KeepAlive(in)
+	return ticket, err
+}
+
+func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
+	if s.poisoned.Load() {
 		return 0, ErrPoisoned
 	}
-	if h.closed.Load() {
+	if s.closed.Load() {
 		return 0, errors.New("gusset: handle is closed")
 	}
 
@@ -250,52 +375,112 @@ func (h *Handle) Submit(ctx context.Context, in any) (uint64, error) {
 
 	// Acquire semaphore slot
 	select {
-	case h.sem <- struct{}{}:
+	case s.sem <- struct{}{}:
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
 
-	header := extractCallHeader(ctx)
-	ticket, err := ffi.Submit(h.ptr, header, rawInput, bufferID)
+	if s.closed.Load() {
+		<-s.sem
+		return 0, errors.New("gusset: handle is closed")
+	}
+
+	header := extractCallHeader(ctx, s.callFlags)
+	s.cgoMu.RLock()
+	if s.closed.Load() || s.ptr == nil {
+		s.cgoMu.RUnlock()
+		<-s.sem
+		return 0, errors.New("gusset: handle is closed")
+	}
+	ticket, err := ffi.Submit(s.ptr, header, rawInput, bufferID)
+	s.cgoMu.RUnlock()
+
 	if err != nil {
-		<-h.sem
+		<-s.sem
 		if errors.Is(err, ErrPanic) {
-			h.poisoned.Store(true)
+			s.poisoned.Store(true)
 		}
-		runtime.KeepAlive(h)
 		return 0, err
 	}
 
-	runtime.KeepAlive(h)
+	s.mu.Lock()
+	s.semTickets[ticket] = struct{}{}
+	s.mu.Unlock()
+
 	return ticket, nil
 }
 
 // Wait waits for completion of an asynchronously submitted job ticket.
 func (h *Handle) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
-	defer func() { <-h.sem }()
+	res, err := h.state.wait(ctx, ticket)
+	runtime.KeepAlive(h)
+	return res, err
+}
 
-	h.mu.Lock()
-	if res, done := h.completed[ticket]; done {
-		delete(h.completed, ticket)
-		h.mu.Unlock()
-		runtime.KeepAlive(h)
+// ErrUnknownTicket reports a ticket this handle is not waiting on: never submitted
+// here, already awaited, or issued by a different handle.
+var ErrUnknownTicket = errors.New("gusset: unknown or already-awaited ticket")
+
+// ErrTicketBusy reports that another goroutine is already waiting on this ticket.
+var ErrTicketBusy = errors.New("gusset: ticket already has a waiter")
+
+func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
+	defer s.releaseSem(ticket)
+
+	s.mu.Lock()
+	if res, done := s.completed[ticket]; done {
+		delete(s.completed, ticket)
+		s.mu.Unlock()
 		return res.data, res.err
 	}
+	if s.closed.Load() {
+		s.mu.Unlock()
+		return nil, errors.New("gusset: handle is closed")
+	}
+
+	// Refuse a ticket this handle is not holding.
+	//
+	// Wait used to register any ticket in the pending map and then, on ctx.Done,
+	// block unconditionally for a completion that was never coming. A ticket that
+	// was never submitted here — a typo, a stale id, one from another handle — parked
+	// the caller forever and its context deadline did nothing at all. semTickets is
+	// exactly the set of live tickets this handle issued and has not yet handed back.
+	if _, live := s.semTickets[ticket]; !live {
+		s.mu.Unlock()
+		return nil, ErrUnknownTicket
+	}
+
+	// Refuse a second waiter rather than displacing the first.
+	//
+	// Assigning s.pending[ticket] unconditionally replaced the first waiter's
+	// channel. The completion was then delivered to the second waiter and the first
+	// blocked forever, because nothing held a reference to its channel any more. A
+	// result can be moved out exactly once, so a ticket can have exactly one waiter.
+	if _, busy := s.pending[ticket]; busy {
+		s.mu.Unlock()
+		return nil, ErrTicketBusy
+	}
+
 	ticketCh := make(chan callResult, 1)
-	h.pending[ticket] = ticketCh
-	h.mu.Unlock()
+	s.pending[ticket] = ticketCh
+	s.mu.Unlock()
 
 	select {
 	case res := <-ticketCh:
-		runtime.KeepAlive(h)
 		return res.data, res.err
 	case <-ctx.Done():
-		_ = ffi.Cancel(h.ptr, ticket)
-		select {
-		case <-ticketCh:
-		default:
+		if !s.closed.Load() {
+			s.cgoMu.RLock()
+			if s.ptr != nil {
+				_ = ffi.Cancel(s.ptr, ticket)
+			}
+			s.cgoMu.RUnlock()
 		}
-		runtime.KeepAlive(h)
+		res := <-ticketCh
+		if res.err != nil && errors.Is(res.err, ErrPanic) {
+			s.poisoned.Store(true)
+			return nil, res.err
+		}
 		return nil, ctx.Err()
 	}
 }

@@ -8,12 +8,20 @@ pub mod status;
 use crate::header::CallHeader;
 use crate::pool::{Handle, JobResult};
 use alloc::{get_alloc_stats, AllocStats};
-use guard::{ffi_guard, install_panic_hook};
+use guard::{ffi_guard, install_panic_hook, FfiError};
 use static_assertions::{assert_eq_align, assert_eq_size};
 use status::{FfiStatus, FFI_BAD_ARG, FFI_ERR, FFI_OK, FFI_PANIC, FFI_POISONED};
 use std::mem::{align_of, size_of};
 use std::ptr;
 use std::sync::{Arc, Mutex};
+
+/// Number of `#[repr(C)]` types whose layout crosses the boundary and is verified.
+///
+/// Every type Go reads or writes through the ABI must appear here. `AllocStats` was
+/// missing from version 1: `gusset_alloc_stats` writes it straight into Go memory,
+/// so a size or alignment disagreement corrupted the Go heap with nothing to catch
+/// it, which is exactly the failure R12/I6 exists to prevent.
+pub const ABI_TYPE_COUNT: usize = 4;
 
 /// ABI version and type layout definition for cross-boundary integrity check (R12).
 #[repr(C)]
@@ -21,29 +29,73 @@ use std::sync::{Arc, Mutex};
 pub struct AbiLayout {
     /// ABI contract version. Go init() checks for match.
     pub version: u32,
-    /// Byte sizes of CallHeader, FfiStatus, and AbiLayout.
-    pub sizes: [u32; 3],
-    /// Alignments of CallHeader, FfiStatus, and AbiLayout.
-    pub aligns: [u32; 3],
+    /// Byte sizes of CallHeader, FfiStatus, AbiLayout, and AllocStats, in that order.
+    pub sizes: [u32; ABI_TYPE_COUNT],
+    /// Alignments of CallHeader, FfiStatus, AbiLayout, and AllocStats, in that order.
+    pub aligns: [u32; ABI_TYPE_COUNT],
 }
 
-assert_eq_size!(AbiLayout, [u8; 28]);
+assert_eq_size!(AbiLayout, [u8; 36]);
 assert_eq_align!(AbiLayout, u32);
 
 /// Current Gusset ABI version.
-pub const GUSSET_ABI_VERSION: u32 = 1;
+///
+/// Bumped to 2 when `AllocStats` joined the verified set and `AbiLayout` itself grew
+/// from 28 to 36 bytes. A Go binary built against version 1 refuses to start against
+/// this library, which is the intended outcome: its `AbiLayout` is the wrong size.
+pub const GUSSET_ABI_VERSION: u32 = 2;
+
+/// Byte budget for the log ring.
+const LOG_RING_CAPACITY: usize = 65536;
 
 static LOG_BUFFER: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
 /// Appends a log line to the bounded internal ring buffer.
+///
+/// Evicts whole lines from the front until the new line fits, rather than clearing
+/// the ring: an overflow used to discard every diagnostic collected so far, which is
+/// exactly the moment those diagnostics matter. A line longer than the whole budget
+/// is truncated instead of being appended wholesale, which previously let one
+/// oversized message push the buffer past its cap without limit.
+///
+/// Uses `try_lock`: the panic hook logs through here, and a panic raised while this
+/// lock was held would otherwise re-enter it on the same thread and deadlock.
 pub fn log_event(line: &str) {
-    if let Ok(mut buf) = LOG_BUFFER.lock() {
-        if buf.len() + line.len() > 65536 {
-            buf.clear();
+    let mut buf = match LOG_BUFFER.try_lock() {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    // Reserve one byte for the newline. Truncate on a char boundary so the ring
+    // never hands Go a partial UTF-8 sequence.
+    let max_payload = LOG_RING_CAPACITY - 1;
+    let bytes = if line.len() > max_payload {
+        let mut end = max_payload;
+        while end > 0 && !line.is_char_boundary(end) {
+            end -= 1;
         }
-        buf.extend_from_slice(line.as_bytes());
-        buf.push(b'\n');
+        &line.as_bytes()[..end]
+    } else {
+        line.as_bytes()
+    };
+    let needed = bytes.len() + 1;
+
+    while buf.len() + needed > LOG_RING_CAPACITY {
+        match buf.iter().position(|&b| b == b'\n') {
+            // Drop the oldest complete line, newline included.
+            Some(nl) => {
+                buf.drain(..=nl);
+            }
+            // No line boundary left: the remainder is a single partial line.
+            None => {
+                buf.clear();
+                break;
+            }
+        }
     }
+
+    buf.extend_from_slice(bytes);
+    buf.push(b'\n');
 }
 
 // ----------------------------------------------------------------------------
@@ -64,11 +116,13 @@ pub unsafe extern "C" fn gusset_abi_layout(out: *mut AbiLayout) {
                 size_of::<CallHeader>() as u32,
                 size_of::<FfiStatus>() as u32,
                 size_of::<AbiLayout>() as u32,
+                size_of::<AllocStats>() as u32,
             ],
             aligns: [
                 align_of::<CallHeader>() as u32,
                 align_of::<FfiStatus>() as u32,
                 align_of::<AbiLayout>() as u32,
+                align_of::<AllocStats>() as u32,
             ],
         };
         unsafe {
@@ -85,17 +139,35 @@ pub unsafe extern "C" fn gusset_abi_layout(out: *mut AbiLayout) {
 #[no_mangle]
 pub unsafe extern "C" fn gusset_init() -> i32 {
     install_panic_hook();
+    // Re-arm after a previous shutdown so init/shutdown is a reversible pair.
+    crate::pool::rearm();
     FFI_OK
 }
 
-/// 3. Shuts down the Gusset runtime.
+/// 3. Shuts down the Gusset runtime, draining in-flight work.
+///
+/// Refuses new submissions, cancels every job on every live handle, then waits up
+/// to `drain_ms` for the work already running to finish. Returns `FFI_OK` on a
+/// clean drain and `FFI_ERR` when work was still in flight at the deadline —
+/// cancellation is cooperative, so a work unit that never calls
+/// `JobContext::check` cannot be drained, and the caller is told rather than
+/// handed a success it can't rely on.
 ///
 /// # Safety
 ///
 /// Safe to call across FFI.
 #[no_mangle]
-pub unsafe extern "C" fn gusset_shutdown(_drain_ms: u32) -> i32 {
-    FFI_OK
+pub unsafe extern "C" fn gusset_shutdown(drain_ms: u32) -> i32 {
+    let remaining = crate::pool::shutdown(std::time::Duration::from_millis(drain_ms as u64));
+    if remaining == 0 {
+        FFI_OK
+    } else {
+        log_event(&format!(
+            "gusset: shutdown drain budget of {} ms expired with {} work unit(s) still in flight",
+            drain_ms, remaining
+        ));
+        FFI_ERR
+    }
 }
 
 /// 4. Opens a new handle with a worker pool (I4).
@@ -143,10 +215,7 @@ pub unsafe extern "C" fn gusset_handle_open(
 ///
 /// `handle` must be a valid handle pointer previously returned by `gusset_handle_open`.
 #[no_mangle]
-pub unsafe extern "C" fn gusset_handle_close(
-    handle: *mut Handle,
-    status: *mut FfiStatus,
-) -> i32 {
+pub unsafe extern "C" fn gusset_handle_close(handle: *mut Handle, status: *mut FfiStatus) -> i32 {
     if handle.is_null() {
         if !status.is_null() {
             unsafe {
@@ -259,8 +328,8 @@ pub unsafe extern "C" fn gusset_take(
     let h = unsafe { &*handle };
 
     let res = unsafe {
-        ffi_guard(status, || {
-            let job_result = h.take(ticket)?;
+        ffi_guard(status, || -> Result<(), FfiError> {
+            let job_result = h.take(ticket).map_err(FfiError::from)?;
             match job_result {
                 JobResult::Ok(data) => {
                     if data.is_empty() {
@@ -269,7 +338,7 @@ pub unsafe extern "C" fn gusset_take(
                         ptr::write(out_len, 0);
                     } else {
                         let len = data.len();
-                        let (buf_id, buf_ptr) = h.buf_alloc(len)?;
+                        let (buf_id, buf_ptr) = h.buf_alloc(len).map_err(FfiError::from)?;
                         ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr, len);
                         ptr::write(out_buf_id, buf_id);
                         ptr::write(out_ptr, buf_ptr);
@@ -277,11 +346,24 @@ pub unsafe extern "C" fn gusset_take(
                     }
                     Ok(())
                 }
-                JobResult::Err(msg) => Err(msg),
-                JobResult::Panic(msg) => {
-                    Err(format!("PANIC: {}", msg))
-                }
-                JobResult::Cancelled(reason) => Err(format!("cancelled: {:?}", reason)),
+                JobResult::Err(msg) => Err(FfiError {
+                    code: FFI_ERR,
+                    msg,
+                    file: Some("gusset.rs"),
+                    line: line!(),
+                }),
+                JobResult::Panic { msg, file, line } => Err(FfiError {
+                    code: FFI_PANIC,
+                    msg: format!("PANIC: {}", msg),
+                    file,
+                    line,
+                }),
+                JobResult::Cancelled(reason) => Err(FfiError {
+                    code: FFI_ERR,
+                    msg: format!("cancelled: {:?}", reason),
+                    file: Some("gusset.rs"),
+                    line: line!(),
+                }),
             }
         })
     };
@@ -289,17 +371,7 @@ pub unsafe extern "C" fn gusset_take(
     if res.is_some() {
         FFI_OK
     } else if !status.is_null() {
-        unsafe {
-            if (*status).code == FFI_ERR && !(*status).msg.is_null() && (*status).msg_len > 0 {
-                let slice = std::slice::from_raw_parts((*status).msg, (*status).msg_len);
-                if let Ok(msg_str) = std::str::from_utf8(slice) {
-                    if msg_str.starts_with("PANIC:") {
-                        (*status).code = FFI_PANIC;
-                    }
-                }
-            }
-            (*status).code
-        }
+        unsafe { (*status).code }
     } else {
         FFI_BAD_ARG
     }
@@ -348,10 +420,7 @@ pub unsafe extern "C" fn gusset_cancel(
 ///
 /// `handle` must be a valid handle pointer.
 #[no_mangle]
-pub unsafe extern "C" fn gusset_cancel_all(
-    handle: *mut Handle,
-    status: *mut FfiStatus,
-) -> i32 {
+pub unsafe extern "C" fn gusset_cancel_all(handle: *mut Handle, status: *mut FfiStatus) -> i32 {
     if handle.is_null() {
         if !status.is_null() {
             unsafe {
@@ -412,11 +481,7 @@ pub unsafe extern "C" fn gusset_alloc_stats(out: *mut AllocStats) {
 ///
 /// `buf` must point to at least `len` writable bytes. `out_written` must point to valid writable memory.
 #[no_mangle]
-pub unsafe extern "C" fn gusset_drain_logs(
-    buf: *mut u8,
-    len: usize,
-    out_written: *mut usize,
-) {
+pub unsafe extern "C" fn gusset_drain_logs(buf: *mut u8, len: usize, out_written: *mut usize) {
     if buf.is_null() || len == 0 || out_written.is_null() {
         if !out_written.is_null() {
             unsafe {
@@ -456,7 +521,10 @@ pub unsafe extern "C" fn gusset_buf_alloc(
     if handle.is_null() || out_id.is_null() || out_ptr.is_null() {
         if !status.is_null() {
             unsafe {
-                ptr::write(status, FfiStatus::bad_arg("null argument passed to buf_alloc"));
+                ptr::write(
+                    status,
+                    FfiStatus::bad_arg("null argument passed to buf_alloc"),
+                );
             }
         }
         return FFI_BAD_ARG;
@@ -502,7 +570,7 @@ pub unsafe extern "C" fn gusset_buf_free(
     }
 
     let h = unsafe { &*handle };
-    let res = unsafe { ffi_guard(status, || h.buf_free(id)) };
+    let res = unsafe { ffi_guard(status, || h.buf_free(id).map_err(FfiError::from)) };
 
     if res.is_some() {
         FFI_OK

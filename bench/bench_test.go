@@ -8,7 +8,7 @@ import (
 )
 
 func BenchmarkGussetCallNoop(b *testing.B) {
-	h, err := gusset.Open(gusset.WithPoolSize(4))
+	h, err := gusset.Open(gusset.WithPoolSize(4), gusset.WithDiagnosticEngine())
 	if err != nil {
 		b.Fatalf("Open failed: %v", err)
 	}
@@ -30,7 +30,7 @@ func BenchmarkGussetCallNoop(b *testing.B) {
 }
 
 func BenchmarkGussetCallParallel(b *testing.B) {
-	h, err := gusset.Open(gusset.WithPoolSize(8))
+	h, err := gusset.Open(gusset.WithPoolSize(8), gusset.WithDiagnosticEngine())
 	if err != nil {
 		b.Fatalf("Open failed: %v", err)
 	}
@@ -55,7 +55,7 @@ func BenchmarkGussetCallParallel(b *testing.B) {
 }
 
 func BenchmarkGussetSubmitWait(b *testing.B) {
-	h, err := gusset.Open(gusset.WithPoolSize(4))
+	h, err := gusset.Open(gusset.WithPoolSize(4), gusset.WithDiagnosticEngine())
 	if err != nil {
 		b.Fatalf("Open failed: %v", err)
 	}
@@ -81,7 +81,7 @@ func BenchmarkGussetSubmitWait(b *testing.B) {
 }
 
 func BenchmarkGussetBufferLarge(b *testing.B) {
-	h, err := gusset.Open(gusset.WithPoolSize(4))
+	h, err := gusset.Open(gusset.WithPoolSize(4), gusset.WithDiagnosticEngine())
 	if err != nil {
 		b.Fatalf("Open failed: %v", err)
 	}

@@ -2,22 +2,31 @@
 
 pub mod sys;
 
-use crate::alloc::{record_alloc, record_dealloc};
-use crate::ffi::guard::{extract_panic_payload, install_panic_hook};
-use crate::header::{CallHeader, CancelReason, JobContext};
+use crate::ffi::guard::{extract_panic_payload, install_panic_hook, take_panic_location};
+use crate::header::{
+    CallHeader, CancelReason, JobContext, GUSSET_FLAGS_KNOWN, GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+};
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::thread;
 use sys::RawBuffer;
+
+/// Task payload for work units (R16 zero-copy guarantee).
+enum TaskPayload {
+    /// Inlined payload for small inputs (<= 4 KiB).
+    Inline(Vec<u8>),
+    /// Reference-counted shared buffer for large inputs (> 4 KiB).
+    Shared(Arc<RawBuffer>),
+}
 
 /// Work unit sent to worker threads.
 struct WorkUnit {
     ticket: u64,
     ctx: JobContext,
-    input: Vec<u8>,
+    payload: TaskPayload,
 }
 
 /// Result of job execution.
@@ -27,39 +36,176 @@ pub enum JobResult {
     Ok(Vec<u8>),
     /// Returned error.
     Err(String),
-    /// Panic caught by firewall.
-    Panic(String),
+    /// Panic caught by firewall with source location.
+    Panic {
+        /// Panic message string.
+        msg: String,
+        /// Source file path where panic occurred.
+        file: Option<&'static str>,
+        /// Source line number where panic occurred.
+        line: u32,
+    },
     /// Job cancelled or timed out.
     Cancelled(CancelReason),
 }
 
+/// Set by [`begin_shutdown`]; cleared by [`rearm`].
+///
+/// While set, `Handle::submit` refuses new work. Draining is meaningless if fresh
+/// submissions keep arriving behind the drain loop.
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// Every handle opened in this process, weakly held.
+///
+/// Weak so the registry never keeps a handle alive past its own close, and so a
+/// leaked registry entry costs one pointer rather than a worker pool.
+static LIVE_HANDLES: Mutex<Vec<Weak<Handle>>> = Mutex::new(Vec::new());
+
+/// Reports whether `gusset_shutdown` has been called and not yet re-armed.
+pub fn is_shutting_down() -> bool {
+    SHUTTING_DOWN.load(Ordering::Acquire)
+}
+
+/// Re-arms the runtime after a shutdown, allowing submissions again.
+///
+/// Called from `gusset_init`, making init/shutdown a reversible pair rather than a
+/// one-way door that a second run inside one process could never recover from.
+pub fn rearm() {
+    SHUTTING_DOWN.store(false, Ordering::Release);
+}
+
+/// Marks the runtime as shutting down and cancels every job on every live handle.
+///
+/// Returns the number of handles signalled.
+pub fn begin_shutdown() -> usize {
+    SHUTTING_DOWN.store(true, Ordering::Release);
+
+    let mut registry = lock_recover(&LIVE_HANDLES);
+    registry.retain(|w| w.strong_count() > 0);
+
+    let live: Vec<Arc<Handle>> = registry.iter().filter_map(Weak::upgrade).collect();
+    drop(registry);
+
+    for h in &live {
+        h.cancel_all();
+    }
+    live.len()
+}
+
+/// Total work units still queued or running across every live handle.
+pub fn total_in_flight() -> usize {
+    let mut registry = lock_recover(&LIVE_HANDLES);
+    registry.retain(|w| w.strong_count() > 0);
+    registry
+        .iter()
+        .filter_map(Weak::upgrade)
+        .map(|h| h.in_flight())
+        .sum()
+}
+
+/// Drains the runtime: refuses new work, cancels in-flight jobs, and waits up to
+/// `drain` for them to finish.
+///
+/// Returns `Ok(remaining)` where `remaining` is the number of work units still in
+/// flight when the budget expired — zero means a clean drain. Cancellation is
+/// cooperative, so a work unit that never calls `JobContext::check` cannot be
+/// drained; reporting the count is how the caller learns that rather than being
+/// told the drain succeeded.
+pub fn shutdown(drain: std::time::Duration) -> usize {
+    begin_shutdown();
+
+    let deadline = std::time::Instant::now() + drain;
+    let mut backoff = std::time::Duration::from_micros(200);
+
+    loop {
+        let remaining = total_in_flight();
+        if remaining == 0 {
+            return 0;
+        }
+        if std::time::Instant::now() >= deadline {
+            return remaining;
+        }
+        thread::sleep(backoff);
+        backoff = (backoff * 2).min(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Locks one of this module's mutexes, recovering from poisoning.
+///
+/// Every mutex here guards a plain collection, so a panic while one is held leaves
+/// the collection structurally valid. *Skipping* the guarded operation does not:
+/// a dropped result leaves the Go caller waiting on that ticket forever, a skipped
+/// `sender.take()` leaves `close` blocked in `join`, and a lost cancel flag disables
+/// cancellation without telling anyone. Recovering is strictly safer than treating
+/// "could not lock" the same as "done".
+fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Engine handler function type.
-pub type EngineFn = Box<dyn Fn(&JobContext, &[u8]) -> Result<Vec<u8>, String> + Send + Sync + 'static>;
+pub type EngineFn =
+    Box<dyn Fn(&JobContext, &[u8]) -> Result<Vec<u8>, String> + Send + Sync + 'static>;
 
 static GLOBAL_ENGINE: RwLock<Option<EngineFn>> = RwLock::new(None);
 
 /// Sets the global engine execution handler.
+///
+/// Lock poisoning is recovered from rather than swallowed: a previous panic while
+/// the registry was held must not leave the process permanently unable to register
+/// an engine, and it must never be reported to the caller as a successful install.
 pub fn set_engine_handler<F>(f: F)
 where
     F: Fn(&JobContext, &[u8]) -> Result<Vec<u8>, String> + Send + Sync + 'static,
 {
-    if let Ok(mut w) = GLOBAL_ENGINE.write() {
-        *w = Some(Box::new(f));
-    }
+    let mut w = GLOBAL_ENGINE.write().unwrap_or_else(|e| e.into_inner());
+    *w = Some(Box::new(f));
 }
 
-/// Default execution dispatcher for testing and baseline operations.
+/// Reports whether an adopter engine handler is currently registered.
+pub fn has_engine_handler() -> bool {
+    GLOBAL_ENGINE
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+}
+
+/// Dispatches one work unit (R9).
+///
+/// Resolution order, and why it is this order:
+///
+/// 1. A registered adopter engine always wins. `GUSSET_FLAG_DIAGNOSTIC_ENGINE`
+///    cannot displace it, so a stray flag can never silently swap a production
+///    engine for the diagnostic one.
+/// 2. Otherwise, if the *caller* set `GUSSET_FLAG_DIAGNOSTIC_ENGINE`, run the
+///    built-in diagnostic engine. Only Gusset's own tests set that bit.
+/// 3. Otherwise fail closed. Running an implicit echo-or-panic engine because
+///    registration was forgotten, or lost a startup race, is how a payload's
+///    first byte comes to select `panic!` in a production process.
 pub fn default_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, String> {
-    // If a global engine is set, delegate to it.
     {
-        if let Ok(r) = GLOBAL_ENGINE.read() {
-            if let Some(ref engine) = *r {
-                return engine(ctx, input);
-            }
+        let r = GLOBAL_ENGINE.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref engine) = *r {
+            return engine(ctx, input);
         }
     }
 
-    // Default engine handling test modes.
+    if ctx.header().flags & GUSSET_FLAG_DIAGNOSTIC_ENGINE != 0 {
+        return diagnostic_dispatch(ctx, input);
+    }
+
+    Err(
+        "gusset: no engine handler registered; call gusset::set_engine_handler() before \
+         submitting work (submission refused rather than run against a built-in engine)"
+            .to_string(),
+    )
+}
+
+/// Built-in diagnostic engine driving the panic zoo and the pitfall suite.
+///
+/// Reachable only through `GUSSET_FLAG_DIAGNOSTIC_ENGINE` and only when no adopter
+/// engine is registered. It selects behaviour from `input[0]`, which is precisely
+/// why untrusted payloads must never reach it.
+pub fn diagnostic_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, String> {
     if input.is_empty() {
         return Ok(Vec::new());
     }
@@ -85,12 +231,25 @@ pub fn default_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, Strin
         }
         // Mode 5: Timeout / sleep loop checking ctx.check()
         5 => {
-            let iterations = if input.len() >= 2 { input[1] as usize } else { 100 };
+            let iterations = if input.len() >= 2 {
+                input[1] as usize
+            } else {
+                100
+            };
             for _ in 0..iterations {
                 ctx.check().map_err(|e| format!("cancelled: {:?}", e))?;
                 thread::sleep(std::time::Duration::from_millis(10));
             }
             Ok(vec![5, 0])
+        }
+        // Mode 7: Echo the header's trace and span ids, so R9 trace propagation is
+        // verifiable end to end rather than assumed.
+        7 => {
+            let h = ctx.header();
+            let mut out = Vec::with_capacity(24);
+            out.extend_from_slice(&h.trace_id);
+            out.extend_from_slice(&h.span_id);
+            Ok(out)
         }
         // Mode 6: Deep recursion to prove stack size (R8)
         6 => {
@@ -101,14 +260,34 @@ pub fn default_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, Strin
                     std::hint::black_box(recurse(depth - 1) + 1)
                 }
             }
-            let depth = if input.len() >= 5 {
+            // The depth comes from the payload, so it must be bounded like any
+            // other input-derived quantity. Uncapped, `[6, 0xFF, 0xFF, 0xFF, 0xFF]`
+            // recurses 4.29 billion frames and overflows even an 8 MiB stack — an
+            // abort, not a catchable panic, so the firewall cannot contain it. The
+            // fuzz targets reach this mode constantly; 100_000 frames is well under
+            // the stack budget and still an order past the 128 KiB musl default
+            // that the mode exists to disprove.
+            const MAX_RECURSION_DEPTH: u32 = 100_000;
+            let requested = if input.len() >= 5 {
                 u32::from_le_bytes([input[1], input[2], input[3], input[4]])
             } else {
                 50_000
             };
-            let res = recurse(depth);
+            let res = recurse(requested.min(MAX_RECURSION_DEPTH));
             Ok(res.to_le_bytes().to_vec())
         }
+        // Mode 8: report the executing worker's real stack size (I5/R8).
+        //
+        // Mode 6 recurses to prove the stack is deep enough, but on glibc and
+        // darwin the pthread default is already 8 MiB, so it passes there whether
+        // or not Gusset set the size — it proves the platform. Reading the size
+        // back from the thread that actually ran the job is what distinguishes
+        // "Gusset sized this stack" from "the platform happened to agree", which
+        // is the claim a musl host would otherwise be needed to test.
+        8 => Ok(sys::current_thread_stack_size()
+            .unwrap_or(0)
+            .to_le_bytes()
+            .to_vec()),
         // Mode 10: Vector sum-and-square computation (Phase 2 CPU-bound engine)
         10 => {
             let mut acc = 0u64;
@@ -129,75 +308,207 @@ pub fn default_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, Strin
 /// Represents an active Gusset runtime handle (I4).
 pub struct Handle {
     pool_size: usize,
-    pipe_write_fd: i32,
+    /// Completion-pipe write descriptor, or -1 when this handle does not own one.
+    ///
+    /// Held as an atomic so ownership transfers at a single point: `open` publishes
+    /// the descriptor only after the handle is fully constructed, and `close` takes
+    /// it back with a swap. A handle that fails to open therefore never closes a
+    /// descriptor the caller is still responsible for, and no descriptor is closed
+    /// twice — which would otherwise shut an unrelated file that reused the number.
+    pipe_write_fd: AtomicI32,
     poisoned: AtomicBool,
     closed: AtomicBool,
-    sender: SyncSender<WorkUnit>,
+    sender: Mutex<Option<SyncSender<WorkUnit>>>,
     results: Mutex<HashMap<u64, JobResult>>,
     cancel_flags: Mutex<HashMap<u64, Arc<AtomicBool>>>,
-    buffers: Mutex<HashMap<u64, RawBuffer>>,
+    buffers: Mutex<HashMap<u64, Arc<RawBuffer>>>,
     next_ticket: AtomicU64,
     next_buffer_id: AtomicU64,
+    next_worker_id: AtomicU64,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
     receiver: Arc<Mutex<Receiver<WorkUnit>>>,
+    self_weak: Mutex<Weak<Handle>>,
 }
+
+/// Default worker count when the caller passes 0.
+pub const DEFAULT_POOL_SIZE: usize = 4;
+
+/// Hard ceiling on workers per handle.
+///
+/// Each worker is a real OS thread with an 8 MiB stack, so an unbounded pool size
+/// is an unbounded thread and address-space request driven straight from a caller
+/// argument. It also bounds the number of completion tickets that can be in flight
+/// behind the completion pipe, which is what keeps `write_ticket` from ever facing
+/// a full pipe under the documented bounded-concurrency contract (I4, R11).
+pub const MAX_POOL_SIZE: usize = 1024;
+
+/// Explicit worker stack size (R8).
+///
+/// cgo-created threads inherit the pthread default, which is 128 KiB on musl. Heavy
+/// work runs here, not on the caller's g0 stack, so the size is set explicitly
+/// rather than inherited.
+pub const WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 impl Handle {
     /// Opens a new handle with a dedicated worker pool of pool_size threads.
+    ///
+    /// Returns `Err` for a pool size above [`MAX_POOL_SIZE`] rather than attempting
+    /// the spawn: refusing loudly beats discovering the ceiling as a partial spawn
+    /// failure halfway through creating thousands of threads.
     pub fn open(pool_size: u32, pipe_write_fd: i32) -> Result<Arc<Self>, String> {
         install_panic_hook();
 
-        let pool_size = if pool_size == 0 { 4 } else { pool_size as usize };
+        let pool_size = if pool_size == 0 {
+            DEFAULT_POOL_SIZE
+        } else {
+            pool_size as usize
+        };
+
+        if pool_size > MAX_POOL_SIZE {
+            return Err(format!(
+                "pool_size {} exceeds maximum {} (each worker is an OS thread with an 8 MiB stack)",
+                pool_size, MAX_POOL_SIZE
+            ));
+        }
         let (sender, receiver) = sync_channel(pool_size * 2);
         let receiver = Arc::new(Mutex::new(receiver));
 
         let handle = Arc::new(Self {
             pool_size,
-            pipe_write_fd,
+            // Not owned yet: published below, only once the pool is fully up.
+            pipe_write_fd: AtomicI32::new(-1),
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
-            sender,
+            sender: Mutex::new(Some(sender)),
             results: Mutex::new(HashMap::new()),
             cancel_flags: Mutex::new(HashMap::new()),
             buffers: Mutex::new(HashMap::new()),
             next_ticket: AtomicU64::new(1),
             next_buffer_id: AtomicU64::new(1),
+            next_worker_id: AtomicU64::new(0),
             workers: Mutex::new(Vec::with_capacity(pool_size)),
             receiver,
+            self_weak: Mutex::new(Weak::new()),
         });
 
-        // Spawn pool worker threads
+        // Store weak self reference for worker threads. If this were skipped the
+        // workers could never upgrade, so every result would be computed and then
+        // silently discarded.
+        *lock_recover(&handle.self_weak) = Arc::downgrade(&handle);
+
+        // Spawn pool worker threads. Workers park in recv() until the first submit,
+        // which cannot happen before this function returns, so publishing the
+        // descriptor after the spawn cannot race a completion write.
         handle.spawn_workers(pool_size)?;
+
+        // Take ownership of the completion pipe only now that opening has
+        // succeeded. On any error path above, the descriptor stays the caller's and
+        // Drop closes nothing.
+        handle.pipe_write_fd.store(pipe_write_fd, Ordering::Release);
+
+        // Register for gusset_shutdown. Registered last so a handle that failed to
+        // open never appears, and pruned here so the list cannot grow without bound
+        // across many open/close cycles.
+        {
+            let mut registry = lock_recover(&LIVE_HANDLES);
+            registry.retain(|w| w.strong_count() > 0);
+            registry.push(Arc::downgrade(&handle));
+        }
 
         Ok(handle)
     }
 
-    fn spawn_workers(self: &Arc<Self>, count: usize) -> Result<(), String> {
-        let mut workers = self.workers.lock().map_err(|e| e.to_string())?;
+    /// Work units queued or running on this handle.
+    ///
+    /// A cancel flag is registered at submit and removed by the worker once the
+    /// result is stored, so the flag count is exactly the in-flight count.
+    pub fn in_flight(&self) -> usize {
+        lock_recover(&self.cancel_flags).len()
+    }
 
-        for i in 0..count {
-            let handle_clone = Arc::clone(self);
+    fn spawn_workers(&self, count: usize) -> Result<(), String> {
+        let mut workers = lock_recover(&self.workers);
+        self.spawn_workers_locked(&mut workers, count)
+    }
+
+    fn spawn_workers_locked(
+        &self,
+        workers: &mut Vec<thread::JoinHandle<()>>,
+        count: usize,
+    ) -> Result<(), String> {
+        let weak_handle = lock_recover(&self.self_weak).clone();
+
+        for _ in 0..count {
+            // Deterministic trigger for the failure path below. The fd-ownership
+            // fix has no natural reproducer — a real spawn failure needs the OS to
+            // be out of threads — so without injection the regression test could
+            // only assert the success path and would pass against the pre-fix code.
+            #[cfg(test)]
+            if tests::spawn_should_fail() {
+                return Err("gusset: injected spawn failure (test)".to_string());
+            }
+
+            let weak_clone = weak_handle.clone();
             let receiver_clone = Arc::clone(&self.receiver);
-            let worker_id = i;
+            // Monotonic, so a respawned worker never reuses a retired worker's name
+            // in a thread dump (workers.len() shrinks when dead entries are reaped).
+            let worker_id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
 
-            // Spawn worker with 8 MiB explicit stack size (R8) and install sigaltstack
             let builder = thread::Builder::new()
                 .name(format!("gusset-w{}", worker_id))
-                .stack_size(8 * 1024 * 1024);
+                .stack_size(WORKER_STACK_SIZE);
 
             let join_handle = builder
                 .spawn(move || {
-                    sys::install_sigaltstack();
+                    // I5/R8: a staticlib never runs std::rt::init, so nothing has
+                    // installed an alternate signal stack for this thread. Without
+                    // one, a stack overflow kills the process before Go's handler
+                    // runs, so a failure here is a real loss of protection and is
+                    // reported rather than shrugged off.
+                    let _sig_guard = match sys::install_sigaltstack() {
+                        Some(g) => Some(g),
+                        None => {
+                            crate::ffi::log_event(&format!(
+                                "gusset: worker gusset-w{} started WITHOUT sigaltstack; \
+                                 a Rust stack overflow on this thread will abort the process (I5/R8)",
+                                worker_id
+                            ));
+                            None
+                        }
+                    };
+
+                    // I5/R8: `Builder::stack_size` is a request. A platform that
+                    // rounded it down, or a future refactor that dropped the call,
+                    // would leave heavy work running on whatever the pthread default
+                    // happens to be — 128 KiB on musl — and nothing would say so
+                    // until a deep engine blew the stack in production.
+                    match sys::current_thread_stack_size() {
+                        Some(got) if got < WORKER_STACK_SIZE => {
+                            crate::ffi::log_event(&format!(
+                                "gusset: worker gusset-w{} has a {} byte stack, below the \
+                                 requested {} bytes; deep engine recursion may overflow (I5/R8)",
+                                worker_id, got, WORKER_STACK_SIZE
+                            ));
+                        }
+                        Some(_) => {}
+                        None => {
+                            crate::ffi::log_event(&format!(
+                                "gusset: worker gusset-w{} could not read back its stack size; \
+                                 the 8 MiB guarantee is unverified on this platform (I5/R8)",
+                                worker_id
+                            ));
+                        }
+                    }
 
                     loop {
                         let unit = {
-                            let rx = receiver_clone.lock();
-                            match rx {
-                                Ok(guard) => match guard.recv() {
-                                    Ok(u) => u,
-                                    Err(_) => break, // Channel closed, shutdown
-                                },
-                                Err(_) => break,
+                            // Poison-recovering: the guard protects only the receiver,
+                            // and treating "poisoned" as "shut down" would retire the
+                            // whole pool on an unrelated panic.
+                            let guard = lock_recover(&receiver_clone);
+                            match guard.recv() {
+                                Ok(u) => u,
+                                Err(_) => break, // Disconnected on handle close
                             }
                         };
 
@@ -206,34 +517,48 @@ impl Handle {
                         let result = match early_cancel {
                             Err(reason) => JobResult::Cancelled(reason),
                             Ok(()) => {
-                                // Execute behind catch_unwind
+                                let slice: &[u8] = match &unit.payload {
+                                    TaskPayload::Inline(vec) => vec.as_slice(),
+                                    TaskPayload::Shared(buf) => buf.as_slice(),
+                                };
+
                                 match catch_unwind(AssertUnwindSafe(|| {
-                                    default_dispatch(&unit.ctx, &unit.input)
+                                    default_dispatch(&unit.ctx, slice)
                                 })) {
                                     Ok(Ok(out)) => JobResult::Ok(out),
                                     Ok(Err(err)) => JobResult::Err(err),
                                     Err(payload) => {
                                         // Caught panic: poison handle (I2)
-                                        handle_clone.poisoned.store(true, Ordering::Release);
+                                        if let Some(h) = weak_clone.upgrade() {
+                                            h.poisoned.store(true, Ordering::Release);
+                                        }
                                         let msg = extract_panic_payload(payload);
-                                        JobResult::Panic(msg)
+                                        let loc = take_panic_location();
+                                        JobResult::Panic {
+                                            msg,
+                                            file: loc.map(|l| l.file),
+                                            line: loc.map(|l| l.line).unwrap_or(0),
+                                        }
                                     }
                                 }
                             }
                         };
 
-                        // Store result
-                        if let Ok(mut map) = handle_clone.results.lock() {
-                            map.insert(unit.ticket, result);
-                        }
+                        // Store result and wake netpoller if handle still alive
+                        if let Some(h) = weak_clone.upgrade() {
+                            lock_recover(&h.results).insert(unit.ticket, result);
+                            lock_recover(&h.cancel_flags).remove(&unit.ticket);
 
-                        // Remove cancel flag
-                        if let Ok(mut flags) = handle_clone.cancel_flags.lock() {
-                            flags.remove(&unit.ticket);
+                            let fd = h.pipe_write_fd.load(Ordering::Acquire);
+                            if let Err(e) = sys::write_ticket(fd, unit.ticket) {
+                                // The waiting Go caller will never be woken for this
+                                // ticket, so say so rather than dropping it in silence.
+                                crate::ffi::log_event(&format!(
+                                    "gusset: completion write failed for ticket {}: {}",
+                                    unit.ticket, e
+                                ));
+                            }
                         }
-
-                        // Write 8-byte ticket to pipe fd (wakes Go netpoller)
-                        let _ = sys::write_ticket(handle_clone.pipe_write_fd, unit.ticket);
                     }
                 })
                 .map_err(|e| format!("failed to spawn worker thread: {}", e))?;
@@ -244,106 +569,162 @@ impl Handle {
         Ok(())
     }
 
-    /// Submits a task to the pool (R16).
-    pub fn submit(
-        &self,
-        header: CallHeader,
-        input: &[u8],
-        buffer_id: u64,
-    ) -> Result<u64, String> {
+    /// Verifies worker health and respawns replacement workers if any died (I5).
+    fn ensure_workers(&self) -> Result<(), String> {
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        let mut workers = lock_recover(&self.workers);
+        workers.retain(|h| !h.is_finished());
+
+        if workers.len() < self.pool_size {
+            let needed = self.pool_size - workers.len();
+            self.spawn_workers_locked(&mut workers, needed)?;
+        }
+
+        Ok(())
+    }
+
+    /// Submits a task to the pool (R16 zero-copy for buffers).
+    pub fn submit(&self, header: CallHeader, input: &[u8], buffer_id: u64) -> Result<u64, String> {
         if self.poisoned.load(Ordering::Acquire) {
             return Err("handle is poisoned".to_string());
         }
         if self.closed.load(Ordering::Acquire) {
             return Err("handle is closed".to_string());
         }
+        if is_shutting_down() {
+            return Err("gusset runtime is shutting down".to_string());
+        }
 
-        // Determine input payload:
+        // Reject unknown flag bits instead of ignoring them, so a caller built
+        // against a newer header cannot believe a flag took effect here.
+        let unknown = header.flags & !GUSSET_FLAGS_KNOWN;
+        if unknown != 0 {
+            return Err(format!(
+                "unknown CallHeader flag bits set: {:#010x} (known mask {:#010x})",
+                unknown, GUSSET_FLAGS_KNOWN
+            ));
+        }
+
+        // Auto-respawn replacement workers if any died (I5)
+        self.ensure_workers()?;
+
         // R16: inputs up to 4 KiB copied during submit; larger inputs live in Buffer
-        let task_input = if buffer_id > 0 {
-            let buffers = self.buffers.lock().map_err(|e| e.to_string())?;
-            let rec = buffers.get(&buffer_id).ok_or_else(|| {
-                format!("buffer id {} not found", buffer_id)
-            })?;
-            rec.to_vec()
+        // Shared buffers are passed as Arc<RawBuffer> without extra byte copy
+        let payload = if buffer_id > 0 {
+            let buffers = lock_recover(&self.buffers);
+            let rec = buffers
+                .get(&buffer_id)
+                .ok_or_else(|| format!("buffer id {} not found", buffer_id))?;
+            TaskPayload::Shared(Arc::clone(rec))
         } else {
-            input.to_vec()
+            TaskPayload::Inline(input.to_vec())
         };
 
         let ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);
         let cancel_flag = Arc::new(AtomicBool::new(false));
 
-        if let Ok(mut map) = self.cancel_flags.lock() {
-            map.insert(ticket, Arc::clone(&cancel_flag));
-        }
+        // Registered before the unit is queued: a flag registered afterwards could
+        // miss a cancel that arrives while the job is already running.
+        lock_recover(&self.cancel_flags).insert(ticket, Arc::clone(&cancel_flag));
 
         let ctx = JobContext::new(header, cancel_flag);
         let unit = WorkUnit {
             ticket,
             ctx,
-            input: task_input,
+            payload,
         };
 
-        self.sender.send(unit).map_err(|e| e.to_string())?;
+        let sender_guard = lock_recover(&self.sender);
+        let sender = sender_guard
+            .as_ref()
+            .ok_or_else(|| "handle is closed".to_string())?;
+        sender.send(unit).map_err(|e| e.to_string())?;
 
         Ok(ticket)
     }
 
     /// Moves out the result of a completed job (moves out exactly once).
     pub fn take(&self, ticket: u64) -> Result<JobResult, String> {
-        let mut results = self.results.lock().map_err(|e| e.to_string())?;
+        let mut results = lock_recover(&self.results);
         results
             .remove(&ticket)
             .ok_or_else(|| format!("ticket {} not found or already taken", ticket))
     }
 
     /// Cancels a specific job by ticket (I3).
-    pub fn cancel(&self, ticket: u64) {
-        if let Ok(flags) = self.cancel_flags.lock() {
-            if let Some(flag) = flags.get(&ticket) {
+    ///
+    /// Returns whether a live flag was found. A caller that cancels an unknown or
+    /// already-completed ticket learns so instead of being told nothing.
+    pub fn cancel(&self, ticket: u64) -> bool {
+        let flags = lock_recover(&self.cancel_flags);
+        match flags.get(&ticket) {
+            Some(flag) => {
                 flag.store(true, Ordering::Release);
+                true
             }
+            None => false,
         }
     }
 
     /// Cancels all currently pending jobs (I3).
-    pub fn cancel_all(&self) {
-        if let Ok(flags) = self.cancel_flags.lock() {
-            for flag in flags.values() {
-                flag.store(true, Ordering::Release);
-            }
+    ///
+    /// Returns how many flags were set. `close` relies on this actually running:
+    /// a silently skipped cancel leaves cooperative jobs running while `close`
+    /// waits for them in `join`.
+    pub fn cancel_all(&self) -> usize {
+        let flags = lock_recover(&self.cancel_flags);
+        for flag in flags.values() {
+            flag.store(true, Ordering::Release);
         }
+        flags.len()
     }
 
     /// Allocates 64-byte aligned Rust-owned buffer memory (R16).
     pub fn buf_alloc(&self, len: usize) -> Result<(u64, *mut u8), String> {
         let buf = RawBuffer::allocate(len)?;
         let ptr = buf.as_mut_ptr();
-        record_alloc(len);
 
         let id = self.next_buffer_id.fetch_add(1, Ordering::Relaxed);
-        let mut map = self.buffers.lock().map_err(|e| e.to_string())?;
-        map.insert(id, buf);
+        let mut map = lock_recover(&self.buffers);
+        map.insert(id, Arc::new(buf));
 
         Ok((id, ptr))
     }
 
     /// Frees a Rust-owned buffer by id (R4, R16).
     pub fn buf_free(&self, id: u64) -> Result<(), String> {
-        let mut map = self.buffers.lock().map_err(|e| e.to_string())?;
-        if let Some(buf) = map.remove(&id) {
-            record_dealloc(buf.len());
+        let mut map = lock_recover(&self.buffers);
+        if map.remove(&id).is_some() {
             Ok(())
         } else {
             Err(format!("buffer id {} not found", id))
         }
     }
 
-    /// Closes the handle, cancels in-flight jobs, and closes write fd.
+    /// Closes the handle, disconnects workers, joins worker threads, and closes write fd.
     pub fn close(&self) {
         if !self.closed.swap(true, Ordering::SeqCst) {
+            // 1. Disconnect sender so workers unblock from recv(). Skipping this
+            // would leave every worker parked forever and hang step 3.
+            lock_recover(&self.sender).take();
+
+            // 2. Signal cooperative cancellation to all active jobs
             self.cancel_all();
-            sys::close_fd(self.pipe_write_fd);
+
+            // 3. Join all worker threads to guarantee zero leaked threads
+            let handles: Vec<_> = lock_recover(&self.workers).drain(..).collect();
+            for handle in handles {
+                let _ = handle.join();
+            }
+
+            // 4. Release the completion pipe now that every worker has finished.
+            // The swap makes this a once-only transfer: a second close, or a Drop
+            // following an explicit close, finds -1 and closes nothing.
+            let fd = self.pipe_write_fd.swap(-1, Ordering::AcqRel);
+            sys::close_fd(fd);
         }
     }
 
@@ -361,5 +742,186 @@ impl Handle {
 impl Drop for Handle {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+// These tests drive pipe(2)/read(2)/write(2) directly, because the descriptor
+// ownership they check is only observable at the syscall level. The allow is
+// scoped to the test module: `pool` itself stays under the crate-wide
+// `deny(unsafe_code)`, with `pool::sys` the only module permitted unsafe.
+#[allow(unsafe_code)]
+mod tests {
+    use super::*;
+
+    /// Number of further worker spawns to allow before failing, or -1 to disable.
+    ///
+    /// Compiled only under `cfg(test)`, so the injection point in
+    /// `spawn_workers_locked` does not exist in a shipped `libgusset.a`.
+    static SPAWN_FAIL_COUNTDOWN: std::sync::atomic::AtomicI64 =
+        std::sync::atomic::AtomicI64::new(-1);
+
+    /// Serialises the tests that arm the injector, since it is process-global and
+    /// `cargo test` runs unit tests on parallel threads.
+    static INJECT_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(super) fn spawn_should_fail() -> bool {
+        let remaining = SPAWN_FAIL_COUNTDOWN.load(Ordering::Acquire);
+        if remaining < 0 {
+            return false;
+        }
+        if remaining == 0 {
+            return true;
+        }
+        SPAWN_FAIL_COUNTDOWN.store(remaining - 1, Ordering::Release);
+        false
+    }
+
+    /// Opens a real pipe, returning `(read_fd, write_fd)`.
+    fn make_pipe() -> (i32, i32) {
+        let mut fds = [0i32; 2];
+        // SAFETY: `fds` is a valid two-element array for pipe(2) to fill.
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(rc, 0, "pipe() failed");
+        (fds[0], fds[1])
+    }
+
+    /// True when `fd` is open *and still refers to the same pipe as `read_fd`*.
+    ///
+    /// `fcntl(F_GETFD)` alone is not enough: a descriptor number that Gusset closed
+    /// can be handed straight back out by a later `open` in another thread, and the
+    /// check would then pass against exactly the bug it exists to catch. Writing a
+    /// sentinel and reading it off the far end tests identity, not just liveness.
+    fn still_the_same_pipe(write_fd: i32, read_fd: i32) -> bool {
+        let out: [u8; 1] = [0xA5];
+        // SAFETY: writing one byte from a valid stack buffer to a candidate fd.
+        let n = unsafe { libc::write(write_fd, out.as_ptr() as *const libc::c_void, 1) };
+        if n != 1 {
+            return false;
+        }
+        let mut back = [0u8; 1];
+        // SAFETY: reading one byte into a valid stack buffer.
+        let n = unsafe { libc::read(read_fd, back.as_mut_ptr() as *mut libc::c_void, 1) };
+        n == 1 && back[0] == 0xA5
+    }
+
+    /// An `open` that fails after the `Arc` exists must not close the caller's fd.
+    ///
+    /// `Handle` used to take the write descriptor in its constructor, so the `Arc`
+    /// drop on a late failure path ran `close()` on a descriptor ownership had never
+    /// transferred for. The caller then closed it again, and in a process that had
+    /// meanwhile opened a file, the second close landed on an unrelated descriptor.
+    ///
+    /// Miri cannot run pipe(2) or the worker threads, so this is skipped there; the
+    /// fd-ownership logic it covers is not the kind Miri checks for.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn failed_open_leaves_the_completion_fd_with_the_caller() {
+        let _serialise = lock_recover(&INJECT_LOCK);
+        let (r, w) = make_pipe();
+
+        // Allow two workers, then fail: the failure has to land *after* the Arc and
+        // its Drop exist, which is the only window in which the old code could
+        // close a descriptor it did not own.
+        SPAWN_FAIL_COUNTDOWN.store(2, Ordering::Release);
+        let result = Handle::open(4, w);
+        SPAWN_FAIL_COUNTDOWN.store(-1, Ordering::Release);
+
+        match result {
+            Ok(_) => panic!("injected spawn failure did not fail the open"),
+            Err(e) => assert!(
+                e.contains("injected spawn failure"),
+                "open failed for an unexpected reason: {}",
+                e
+            ),
+        }
+
+        assert!(
+            still_the_same_pipe(w, r),
+            "open() failed but closed the caller's completion descriptor: ownership \
+             must transfer only once the pool is fully up"
+        );
+
+        // SAFETY: both descriptors are still owned by this test.
+        unsafe {
+            libc::close(w);
+            libc::close(r);
+        }
+    }
+
+    /// A worker's stack is 8 MiB because Gusset asked for it (I5, R8).
+    ///
+    /// Read back from the thread that actually ran the job, through the real pool.
+    /// A deep-recursion probe cannot distinguish this from the platform default on
+    /// glibc or darwin, which is why R8 previously had no gate outside a musl host.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn worker_stack_is_explicitly_sized_not_inherited() {
+        let _serialise = lock_recover(&INJECT_LOCK);
+        let (r, w) = make_pipe();
+        // R3 forbids `expect`, in test code too since clippy gained --all-targets.
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        let header = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..Default::default()
+        };
+        let ticket = match handle.submit(header, &[8], 0) {
+            Ok(t) => t,
+            Err(e) => panic!("submit failed: {}", e),
+        };
+
+        // Drain the completion ticket so the worker never blocks writing it.
+        let mut buf = [0u8; 8];
+        let mut got = 0usize;
+        while got < buf.len() {
+            // SAFETY: reading into a valid stack buffer from the pipe's read end.
+            let n = unsafe {
+                libc::read(
+                    r,
+                    buf.as_mut_ptr().add(got) as *mut libc::c_void,
+                    buf.len() - got,
+                )
+            };
+            assert!(n > 0, "completion pipe read failed");
+            got += n as usize;
+        }
+        assert_eq!(u64::from_ne_bytes(buf), ticket);
+
+        let result = match handle.take(ticket) {
+            Ok(r) => r,
+            Err(e) => panic!("take failed: {}", e),
+        };
+        let reported = match result {
+            JobResult::Ok(out) => {
+                assert_eq!(out.len(), 8, "mode 8 returns a u64");
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&out);
+                u64::from_le_bytes(b) as usize
+            }
+            other => panic!("expected Ok from diagnostic mode 8, got {:?}", other),
+        };
+
+        assert_ne!(
+            reported, 0,
+            "the worker could not read its own stack size, so I5's 8 MiB guarantee \
+             is unverified on this platform rather than confirmed"
+        );
+        assert!(
+            reported >= WORKER_STACK_SIZE,
+            "worker ran on a {} byte stack, below the {} bytes Gusset requests; on musl \
+             the inherited default is 128 KiB (I5/R8)",
+            reported,
+            WORKER_STACK_SIZE
+        );
+
+        handle.close();
+        // SAFETY: the read end is still owned by this test; close() took the write end.
+        unsafe {
+            libc::close(r);
+        }
     }
 }

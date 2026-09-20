@@ -17,7 +17,26 @@ libc = "0.2"
 [build-dependencies]
 
 [dev-dependencies]
+# Already a direct dependency of this crate; the runtime tests need it to create
+# pipes and probe descriptor state.
+libc = "0.2"
 
 [[test]]
 name = "exports_match"
 path = "../../tests/exports_match.rs"
+
+# Signature-level agreement between the hand-written gusset.h and the Rust
+# exports. exports_match covers names only; this covers types.
+[[test]]
+name = "header_match"
+path = "../../tests/header_match.rs"
+
+[[test]]
+name = "rust_runtime"
+path = "../../tests/rust_runtime.rs"
+
+# Separate binary: shutdown latches a process-global flag that refuses every
+# submission, which a parallel test in the same binary would observe.
+[[test]]
+name = "rust_shutdown"
+path = "../../tests/rust_shutdown.rs"

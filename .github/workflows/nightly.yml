@@ -17,8 +17,39 @@ jobs:
         with:
           components: miri
 
+      # This previously ran `cargo miri test -p gusset --lib alloc header` against a
+      # library that contained no unit tests whatsoever, so Miri reported success
+      # having executed nothing. The pure modules now carry real tests
+      # (crates/gusset/src/header.rs and src/ffi/alloc.rs).
+      #
+      # Only --lib is checked: Miri cannot run the FFI exports or the worker threads,
+      # and pretending otherwise is how a green job comes to mean nothing.
+      - name: Confirm the lib actually has tests for Miri to run
+        run: |
+          count=$(cargo test -p gusset --lib -- --list 2>/dev/null | grep -c ': test$' || true)
+          echo "lib unit tests: $count"
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no lib unit tests; a Miri run over nothing is not a check"
+            exit 1
+          fi
+
       - name: Run Miri on pure modules
-        run: cargo miri test -p gusset --lib alloc header
+        env:
+          # Instant::now() is a host clock read, which Miri refuses under isolation.
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: |
+          set -o pipefail
+          cargo miri test -p gusset --lib 2>&1 | tee miri.txt
+          # The pool tests carry #[cfg_attr(miri, ignore)] — Miri cannot run pipe(2)
+          # or the worker threads — so "0 passed" is a reachable state if the pure
+          # modules ever lose their tests. Assert on what actually executed, not
+          # just on the exit code.
+          passed=$(grep -oE '[0-9]+ passed' miri.txt | head -1 | grep -oE '[0-9]+')
+          echo "miri executed: ${passed:-0} test(s)"
+          if [ "${passed:-0}" -eq 0 ]; then
+            echo "::error::Miri executed zero tests; the job proves nothing"
+            exit 1
+          fi
 
   sanitizer:
     name: AddressSanitizer
@@ -29,13 +60,49 @@ jobs:
       - name: Set up Rust Nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
-          components: rust-src
+          components: rust-src, llvm-tools
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.27.x'
 
-      - name: Build with ASan
+      # The previous job built with ASan and stopped there, so nothing was ever
+      # executed under the sanitizer. A build is not a check.
+      #
+      # The Rust suite is what ASan can meaningfully cover here: RawBuffer's manual
+      # alloc/dealloc, the completion-pipe writes, and worker thread lifecycle.
+      - name: Run the Rust suite under ASan
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          RUSTDOCFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: detect_leaks=1:detect_stack_use_after_return=1
         run: |
-          RUSTFLAGS="-Zsanitizer=address" cargo build --release -Zbuild-std --target x86_64-unknown-linux-gnu
+          cargo test -p gusset -Zbuild-std \
+            --target x86_64-unknown-linux-gnu \
+            --test rust_runtime --test rust_shutdown
+
+      # R4's deliberate cross-free, which this job named and did not have. Without
+      # a violation ASan is supposed to catch, a green ASan run only shows the code
+      # did not happen to trip the sanitizer — not that it was watching.
+      #
+      # The mechanism was verified directly: std::alloc with 64-byte alignment,
+      # then libc free, then the owner's dealloc. ASan accepts the libc free (on
+      # glibc a 64-byte-aligned block comes from posix_memalign, and freeing that
+      # with free() is legal C) and reports the owner's subsequent release as
+      # "attempting double-free". That second free is where R4's damage actually
+      # lands, which is why the test drives both.
+      #
+      # go test -asan is linux-only; it is unsupported on darwin/arm64, so this
+      # assertion cannot run on a developer Mac and the test reports SKIP there
+      # rather than passing.
+      - name: R4 cross-free must be detected
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          go test -asan -v -count=1 -timeout 10m \
+            -run 'TestR4_CrossFreeIsDetectedUnderASan' ./tests/pitfalls/ | tee asan_go.txt
+          if grep -q 'SKIP' asan_go.txt; then
+            echo "::error::the cross-free test skipped under -asan; the asan build tag is not set"
+            exit 1
+          fi

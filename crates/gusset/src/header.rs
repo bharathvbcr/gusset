@@ -27,6 +27,22 @@ pub struct CallHeader {
 assert_eq_size!(CallHeader, [u8; 40]);
 assert_eq_align!(CallHeader, u64);
 
+/// Header flag: the caller explicitly opts this submission into the built-in
+/// diagnostic engine (the panic zoo and pitfall work units).
+///
+/// The diagnostic engine selects its behaviour from the first input byte, so it
+/// must never be reachable from untrusted payload data. Gusset therefore runs it
+/// only when the *caller* sets this bit in `CallHeader::flags` and no real engine
+/// handler is registered. A production caller never sets it, so a hostile first
+/// byte cannot steer a submission into a panic.
+pub const GUSSET_FLAG_DIAGNOSTIC_ENGINE: u32 = 1 << 0;
+
+/// Mask of every `flags` bit this ABI version understands.
+///
+/// A submission carrying an unknown bit is rejected rather than silently ignored,
+/// so a newer caller cannot believe a flag took effect against an older library.
+pub const GUSSET_FLAGS_KNOWN: u32 = GUSSET_FLAG_DIAGNOSTIC_ENGINE;
+
 /// Cancellation or timeout reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelReason {
@@ -83,5 +99,76 @@ impl JobContext {
     /// Returns the submission instant.
     pub fn submit_instant(&self) -> Instant {
         self.submit_instant
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    /// Miri runs these: they are pure, allocation-light, and free of FFI and
+    /// threads. The nightly Miri job used to invoke `cargo miri test -p gusset
+    /// --lib alloc header`, but the library carried no unit tests at all, so it
+    /// reported success having checked nothing.
+    #[test]
+    fn header_layout_is_the_documented_40_bytes() {
+        assert_eq!(core::mem::size_of::<CallHeader>(), 40);
+        assert_eq!(core::mem::align_of::<CallHeader>(), 8);
+        // Reserved exists to pad to 40; a default header must be all zeros so an
+        // unset field never reads as a set flag on the other side.
+        let h = CallHeader::default();
+        assert_eq!(h.flags, 0);
+        assert_eq!(h.reserved, 0);
+        assert_eq!(h.timeout_ns, 0);
+        assert_eq!(h.trace_id, [0u8; 16]);
+        assert_eq!(h.span_id, [0u8; 8]);
+    }
+
+    #[test]
+    fn diagnostic_flag_is_bit_zero_and_is_the_only_known_bit() {
+        assert_eq!(GUSSET_FLAG_DIAGNOSTIC_ENGINE, 1);
+        assert_eq!(GUSSET_FLAGS_KNOWN, GUSSET_FLAG_DIAGNOSTIC_ENGINE);
+        // Anything outside the known mask must be detectable as unknown.
+        assert_ne!((1u32 << 31) & !GUSSET_FLAGS_KNOWN, 0);
+    }
+
+    #[test]
+    fn zero_timeout_means_no_deadline() {
+        let ctx = JobContext::new(CallHeader::default(), Arc::new(AtomicBool::new(false)));
+        assert_eq!(ctx.check(), Ok(()));
+        assert!(ctx.header().timeout_ns == 0);
+    }
+
+    #[test]
+    fn expired_relative_timeout_reports_deadline_exceeded() {
+        let header = CallHeader {
+            timeout_ns: 1, // one nanosecond: expired by the time it is checked
+            ..Default::default()
+        };
+        let ctx = JobContext::new(header, Arc::new(AtomicBool::new(false)));
+        // Burn a little real time without sleeping, so this stays fast under Miri.
+        for _ in 0..1000 {
+            core::hint::black_box(());
+        }
+        assert_eq!(ctx.check(), Err(CancelReason::DeadlineExceeded));
+    }
+
+    #[test]
+    fn cancel_flag_outranks_an_unexpired_deadline() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let header = CallHeader {
+            timeout_ns: 60_000_000_000, // 60s: nowhere near expiry
+            ..Default::default()
+        };
+        let ctx = JobContext::new(header, Arc::clone(&flag));
+        assert_eq!(ctx.check(), Ok(()));
+
+        flag.store(true, Ordering::Release);
+        assert_eq!(
+            ctx.check(),
+            Err(CancelReason::Explicit),
+            "an explicit cancel must be reported as Explicit, not as a timeout"
+        );
     }
 }

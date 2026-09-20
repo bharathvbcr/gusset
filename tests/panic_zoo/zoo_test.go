@@ -15,7 +15,7 @@ import (
 
 // Case 1: &str payload panic
 func TestPanicZoo_StrPayload(t *testing.T) {
-	h, err := gusset.Open(gusset.WithPoolSize(2))
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestPanicZoo_StrPayload(t *testing.T) {
 
 // Case 2: Embedded NUL byte in panic message (Phase 0 repro resolution)
 func TestPanicZoo_NulBytePayload(t *testing.T) {
-	h, err := gusset.Open(gusset.WithPoolSize(2))
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestPanicZoo_NulBytePayload(t *testing.T) {
 
 // Case 3: Non-string panic payload (std::panic::panic_any(42i32))
 func TestPanicZoo_NonStringPayload(t *testing.T) {
-	h, err := gusset.Open(gusset.WithPoolSize(2))
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestPanicZoo_NonStringPayload(t *testing.T) {
 
 // Case 4: Error with panic inside Display formatting
 func TestPanicZoo_PanicInDisplay(t *testing.T) {
-	h, err := gusset.Open(gusset.WithPoolSize(2))
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestPanicZoo_PanicInDisplay(t *testing.T) {
 
 // Case 5: Normal success path (Mode 0 echo)
 func TestPanicZoo_SuccessEcho(t *testing.T) {
-	h, err := gusset.Open(gusset.WithPoolSize(2))
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}

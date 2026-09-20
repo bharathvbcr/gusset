@@ -16,6 +16,11 @@ extern "C" {
 #define FFI_POISONED 3
 #define FFI_BAD_ARG 4
 
+/* CallHeader.flags bits. Bit 0 opts a submission into the built-in diagnostic
+ * engine, which selects behaviour from the first input byte. Production callers
+ * never set it, so untrusted payload data cannot steer a call into a panic. */
+#define GUSSET_FLAG_DIAGNOSTIC_ENGINE 1u
+
 typedef struct {
     uint8_t trace_id[16];
     uint8_t span_id[8];
@@ -33,10 +38,11 @@ typedef struct {
     uint32_t line;
 } FfiStatus;
 
+/* Sizes and aligns are ordered: CallHeader, FfiStatus, AbiLayout, AllocStats. */
 typedef struct {
     uint32_t version;
-    uint32_t sizes[3];
-    uint32_t aligns[3];
+    uint32_t sizes[4];
+    uint32_t aligns[4];
 } AbiLayout;
 
 typedef struct {

@@ -19,20 +19,38 @@ func TestPitfall_ABILayoutMatch(t *testing.T) {
 		t.Fatalf("ABI version mismatch: expected %d, got %d", gusset.ExpectedAbiVersion, layout.Version)
 	}
 
-	expectedSizes := [3]uint32{gusset.ExpectedHeaderSize, gusset.ExpectedStatusSize, gusset.ExpectedLayoutSize}
+	expectedSizes := [ffi.AbiTypeCount]uint32{
+		gusset.ExpectedHeaderSize, gusset.ExpectedStatusSize,
+		gusset.ExpectedLayoutSize, gusset.ExpectedStatsSize,
+	}
 	if layout.Sizes != expectedSizes {
 		t.Fatalf("ABI sizes mismatch: expected %v, got %v", expectedSizes, layout.Sizes)
 	}
 
-	expectedAligns := [3]uint32{gusset.ExpectedHeaderAlign, gusset.ExpectedStatusAlign, gusset.ExpectedLayoutAlign}
+	expectedAligns := [ffi.AbiTypeCount]uint32{
+		gusset.ExpectedHeaderAlign, gusset.ExpectedStatusAlign,
+		gusset.ExpectedLayoutAlign, gusset.ExpectedStatsAlign,
+	}
 	if layout.Aligns != expectedAligns {
 		t.Fatalf("ABI aligns mismatch: expected %v, got %v", expectedAligns, layout.Aligns)
+	}
+
+	// AllocStats crosses the boundary through gusset_alloc_stats, which writes it
+	// straight into Go memory. ABI version 1 did not cover it, so a size or
+	// alignment disagreement corrupted the Go heap with nothing to catch it.
+	localSizes, localAligns := ffi.LocalLayout()
+	for i := 0; i < ffi.AbiTypeCount; i++ {
+		if localSizes[i] != layout.Sizes[i] || localAligns[i] != layout.Aligns[i] {
+			t.Fatalf("ABI drift for %s: Rust size %d align %d, cgo size %d align %d",
+				ffi.AbiTypeNames[i], layout.Sizes[i], layout.Aligns[i],
+				localSizes[i], localAligns[i])
+		}
 	}
 }
 
 // Pitfall 2: Handle Poisoning (Invariant I2, R10)
 func TestPitfall_HandlePoisoning(t *testing.T) {
-	h, err := gusset.Open(gusset.WithPoolSize(2))
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -57,7 +75,7 @@ func TestPitfall_HandlePoisoning(t *testing.T) {
 
 // Pitfall 3: Deadline Enforcement inside Rust (Invariant I3, R9)
 func TestPitfall_DeadlineEnforcement(t *testing.T) {
-	h, err := gusset.Open(gusset.WithPoolSize(2))
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -84,7 +102,7 @@ func TestPitfall_DeadlineEnforcement(t *testing.T) {
 
 // Pitfall 4: Goroutine Migration Safety (Rule R7)
 func TestPitfall_GoroutineMigration(t *testing.T) {
-	h, err := gusset.Open(gusset.WithPoolSize(4))
+	h, err := gusset.Open(gusset.WithPoolSize(4), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -119,7 +137,7 @@ func TestPitfall_GoroutineMigration(t *testing.T) {
 
 // Pitfall 5: Large Input and Buffer Zero-Copy (Rule R16)
 func TestPitfall_LargeBufferAllocAndFree(t *testing.T) {
-	h, err := gusset.Open(gusset.WithPoolSize(2))
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -170,7 +188,7 @@ func TestPitfall_LargeBufferAllocAndFree(t *testing.T) {
 
 // Pitfall 6: Rust Allocator Accounting and Go Memory Limit (Rule R4)
 func TestPitfall_AllocatorStatsAndLimit(t *testing.T) {
-	h, err := gusset.Open(gusset.WithPoolSize(2))
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -208,7 +226,7 @@ func TestPitfall_AllocatorStatsAndLimit(t *testing.T) {
 
 // Pitfall 7: Stack Size on Deep Recursion (Invariant I5, Rule R8)
 func TestPitfall_DeepRecursionOnWorkerStack(t *testing.T) {
-	h, err := gusset.Open(gusset.WithPoolSize(2))
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -241,7 +259,7 @@ func TestPitfall_DeepRecursionOnWorkerStack(t *testing.T) {
 // Pitfall 8: Concurrency Bound and Thread Cap Soak (Invariant I4, Rule R11)
 func TestPitfall_ThreadCapBoundedSoak(t *testing.T) {
 	const poolSize = 4
-	h, err := gusset.Open(gusset.WithPoolSize(poolSize))
+	h, err := gusset.Open(gusset.WithPoolSize(poolSize), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}

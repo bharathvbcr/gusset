@@ -13,7 +13,7 @@ import (
 // Validates adoption of Gusset by a second engine shape (CPU-bound vector arithmetic)
 // with zero modifications to the 14-export Rust ABI and 10-entry Go public API.
 func TestPhase2_CpuBoundEngine(t *testing.T) {
-	h, err := gusset.Open(gusset.WithPoolSize(4))
+	h, err := gusset.Open(gusset.WithPoolSize(4), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}

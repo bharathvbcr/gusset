@@ -1,8 +1,32 @@
+//go:generate go run gen.go
+
 package ffi
 
 /*
+// Linking modes.
+//
+// The default resolves libgusset.a out of this checkout's target/ directory, which
+// is how the repository's own build and tests work. That path does not exist for
+// anyone consuming Gusset as a Go module: target/ is gitignored, so it is not in
+// the module zip, and the module cache is read-only anyway. An adopter building
+// against the published module gets "ld: library 'gusset' not found" plus two
+// "search path not found" warnings naming a directory they have never heard of.
+//
+// Two supported ways out, both documented in docs/adoption.md:
+//
+//   - Build with -tags gusset_pkgconfig after `make install`, which writes
+//     gusset.pc alongside the archive.
+//   - Or point the linker at the archive directly:
+//     CGO_LDFLAGS="-L/path/to/lib" go build ./...
+//
+// Under R14 an adopter links exactly one Rust staticlib, built from an umbrella
+// crate pulling in both Gusset and their engine. Because the library name below is
+// fixed, that umbrella crate must set [lib] name = "gusset" so its output is
+// libgusset.a whatever the package is called.
+
 #cgo CFLAGS: -I${SRCDIR}
-#cgo LDFLAGS: -L${SRCDIR}/../../target/release -L${SRCDIR}/../../target/debug -lgusset -lpthread -lm -ldl
+#cgo !gusset_pkgconfig LDFLAGS: -L${SRCDIR}/../../target/release -L${SRCDIR}/../../target/debug -lgusset -lpthread -lm -ldl
+#cgo gusset_pkgconfig pkg-config: gusset
 #cgo noescape gusset_abi_layout
 #cgo nocallback gusset_abi_layout
 #cgo noescape gusset_init
@@ -116,11 +140,19 @@ type CallHeader struct {
 	Reserved  uint32
 }
 
+// AbiTypeCount is the number of repr(C) types whose layout is verified at init.
+// Order: CallHeader, FfiStatus, AbiLayout, AllocStats.
+const AbiTypeCount = 4
+
+// FlagDiagnosticEngine opts a submission into the built-in diagnostic engine.
+// See GUSSET_FLAG_DIAGNOSTIC_ENGINE in gusset.h.
+const FlagDiagnosticEngine uint32 = C.GUSSET_FLAG_DIAGNOSTIC_ENGINE
+
 // AbiLayout is the Go representation of AbiLayout.
 type AbiLayout struct {
 	Version uint32
-	Sizes   [3]uint32
-	Aligns  [3]uint32
+	Sizes   [AbiTypeCount]uint32
+	Aligns  [AbiTypeCount]uint32
 }
 
 // AllocStats is the Go representation of AllocStats.
@@ -131,22 +163,47 @@ type AllocStats struct {
 }
 
 // AbiLayout retrieves the runtime ABI layout from Rust.
+// LocalLayout reports the sizes and alignments cgo actually compiled for the four
+// ABI structs, in the same order as AbiLayout.
+//
+// internal/ffi/gusset.h is hand-maintained, not generated, so it can drift from the
+// Rust definitions. Comparing Rust's self-reported layout against this — rather than
+// only against hand-typed Go constants — is what catches that drift, and it stays
+// correct on any pointer width.
+func LocalLayout() ([AbiTypeCount]uint32, [AbiTypeCount]uint32) {
+	var (
+		header C.CallHeader
+		status C.FfiStatus
+		layout C.AbiLayout
+		stats  C.AllocStats
+	)
+	sizes := [AbiTypeCount]uint32{
+		uint32(unsafe.Sizeof(header)),
+		uint32(unsafe.Sizeof(status)),
+		uint32(unsafe.Sizeof(layout)),
+		uint32(unsafe.Sizeof(stats)),
+	}
+	aligns := [AbiTypeCount]uint32{
+		uint32(unsafe.Alignof(header)),
+		uint32(unsafe.Alignof(status)),
+		uint32(unsafe.Alignof(layout)),
+		uint32(unsafe.Alignof(stats)),
+	}
+	return sizes, aligns
+}
+
+// AbiTypeNames labels the entries of AbiLayout for error messages.
+var AbiTypeNames = [AbiTypeCount]string{"CallHeader", "FfiStatus", "AbiLayout", "AllocStats"}
+
 func GetAbiLayout() AbiLayout {
 	var cLayout C.AbiLayout
 	C.gusset_abi_layout(&cLayout)
-	return AbiLayout{
-		Version: uint32(cLayout.version),
-		Sizes: [3]uint32{
-			uint32(cLayout.sizes[0]),
-			uint32(cLayout.sizes[1]),
-			uint32(cLayout.sizes[2]),
-		},
-		Aligns: [3]uint32{
-			uint32(cLayout.aligns[0]),
-			uint32(cLayout.aligns[1]),
-			uint32(cLayout.aligns[2]),
-		},
+	out := AbiLayout{Version: uint32(cLayout.version)}
+	for i := 0; i < AbiTypeCount; i++ {
+		out.Sizes[i] = uint32(cLayout.sizes[i])
+		out.Aligns[i] = uint32(cLayout.aligns[i])
 	}
+	return out
 }
 
 // Init initializes the Gusset runtime.
