@@ -8,22 +8,55 @@ Gusset is **not** a binding generator, **not** a cgo-free calling path, and **no
 
 ## Architecture
 
-```
-Go Application
-       │
-       ▼
-Gusset Go Package (github.com/bharathvbcr/gusset)
- [Bounded Handles, Semaphore, Deadlines, Netpoller Completion]
-       │
-       ▼  (cgo with #cgo noescape and #cgo nocallback)
-C ABI Boundary (internal/ffi/gusset.h)
-       │
-       ▼  (pub unsafe extern "C" - strictly 14 exports)
-Gusset Rust Crate (crates/gusset)
- [Panic Firewall, 8 MiB Worker Threads, sigaltstack, Allocator Stats]
-       │
-       ▼
-Adopter Engine (crates/gusset-example / tessl / sparsl)
+```mermaid
+flowchart TD
+    subgraph GoApp ["Go Application Layer"]
+        App["Go Application Code"]
+        Ctx["context.Context (Deadlines & OpenTelemetry Trace)"]
+        MemLimit["debug.SetMemoryLimit (Runtime Memory Advisory)"]
+    end
+
+    subgraph GoPkg ["Gusset Go Package (github.com/bharathvbcr/gusset)"]
+        Handle["gusset.Handle (Bounded Pool & Bulkhead State)"]
+        Sem["Go Semaphore (Permits <= PoolSize <= 1024)"]
+        Netpoller["Netpoller Reader Goroutine (os.Pipe Read End)"]
+        StatsBridge["AllocStats Bridge (gusset.Stats & AdviseMemoryLimit)"]
+    end
+
+    subgraph Boundary ["Hardened C ABI Boundary (internal/ffi/gusset.h)"]
+        ABI["ABI Layout Verification v2 (4 #[repr(C)] structs checked at init)"]
+        Directives["#cgo noescape / #cgo nocallback (0 Go heap escape allocations)"]
+        Exports["Strictly 14 C ABI Exports (nm verified in CI)"]
+    end
+
+    subgraph RustCrate ["Gusset Rust Runtime (crates/gusset)"]
+        Guard["ffi_guard (Panic Catching & FfiStatus Formatting)"]
+        Workers["Worker Pool with Explicit 8 MiB Stacks (gusset-w0 .. gusset-wN)"]
+        SigAlt["sigaltstack (64 KiB Alternate Stack per worker)"]
+        PipeWrite["POSIX Pipe Write End (Non-blocking ticket notification)"]
+        Alloc["Counting Global Allocator Wrapper (Live & Peak Memory)"]
+        LogRing["Bounded Log Ring Buffer (Oldest-line eviction & truncation)"]
+    end
+
+    subgraph Engine ["Adopter Rust Engine"]
+        Reg["Registered Handler (gusset::set_engine_handler)"]
+        Core["Domain Engine Logic (e.g. dc-glob / tessl / sparsl)"]
+        Cancel["Cooperative Cancellation (ctx.check between work units)"]
+    end
+
+    App --> Handle
+    Handle --> Sem
+    Sem --> Exports
+    Exports --> Guard
+    Guard --> Workers
+    Workers --> Reg
+    Reg --> Core
+    Core -.-> Cancel
+    Workers --> PipeWrite
+    PipeWrite -. "8-byte ticket" .-> Netpoller
+    Netpoller --> Handle
+    Alloc --> StatsBridge
+    StatsBridge --> MemLimit
 ```
 
 ---
@@ -36,6 +69,96 @@ Adopter Engine (crates/gusset-example / tessl / sparsl)
 4. **(I4) Bounded Concurrency:** In-flight calls per handle never exceed the configured pool size. Callers park on the Go semaphore, never on an OS thread in cgo. Pool size is capped at `gusset.MaxPoolSize` (1024); a larger request is refused, not clamped.
 5. **(I5) Rust-Owned Stacks:** Heavy Rust work runs on Rust-spawned threads with an explicit 8 MiB stack, never on the caller's g0 stack (musl's default is 128 KiB). Each worker installs its own 64 KiB `sigaltstack`, and a failure to do so is logged rather than silently accepted.
 6. **(I6) ABI Verification:** Go `init()` verifies ABI version, struct sizes, and alignments against Rust before the process starts serving — for all four `#[repr(C)]` types that cross the boundary, `AllocStats` included.
+
+---
+
+## Execution & Completion Lifecycle
+
+Gusset decouples work submission from thread-blocking cgo calls: callers park on Go's netpoller and channel semaphores rather than pinning OS threads in cgo.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Caller as Go Goroutine
+    participant Handle as gusset.Handle
+    participant Sem as Semaphore (Channel)
+    participant CGO as C ABI (internal/ffi)
+    participant Pool as Rust Worker Pool
+    participant Pipe as POSIX Pipe (os.Pipe)
+    participant Reader as Netpoller Reader
+
+    Caller->>Handle: Call(ctx, input)
+    Handle->>Sem: Acquire permit (pool bounded)
+    Note over Sem: Callers queue in Go runtime;<br/>never pin an OS thread in cgo (I4)
+    Handle->>CGO: gusset_submit(handle, header, input, &ticket)
+    Note over CGO: 40-byte CallHeader:<br/>relative timeout_ns + trace/span IDs
+    CGO->>Pool: Enqueue job to worker channel
+    CGO-->>Handle: Return ticket ID immediately
+    Handle->>Handle: Register ticket channel in pending map
+
+    par Rust Worker Execution
+        Pool->>Pool: Worker dequeues job
+        Note over Pool: Runs under catch_unwind (I2)<br/>Worker has explicit 8 MiB stack (I5)
+        Pool->>Pool: ctx.check() (timeout & cancel flag)
+        Pool->>Pool: Execute registered engine
+        Pool->>Pipe: Write 8-byte ticket ID to write fd
+    and Netpoller Wakeup
+        Handle->>Reader: Await ticket on Go channel or ctx.Done()
+        Pipe-->>Reader: Netpoller wakes reader on ticket arrival
+        Reader->>Handle: Dispatch completion to ticket channel
+    end
+
+    Handle->>CGO: gusset_take(handle, ticket, &out, &len)
+    Note over CGO: Result moved out exactly once
+    CGO-->>Handle: Return result bytes
+    Handle->>Sem: Release semaphore permit
+    Handle-->>Caller: Return ([]byte, nil)
+```
+
+### Bulkhead & Panic Poisoning State Machine
+
+When foreign Rust code panics, Gusset acts as a production bulkhead. The worker thread survives, the panic is caught and formatted into an `FfiStatus`, and the handle latches into a permanently `Poisoned` state so subsequent submissions fail-fast without re-entering native code.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Healthy: gusset.Open()
+
+    state Healthy {
+        [*] --> Idle
+        Idle --> InFlight: Submit / Call (Acquire Semaphore)
+        InFlight --> Idle: Ticket Complete (gusset_take)
+    }
+
+    Healthy --> Poisoned: Rust panic caught by ffi_guard (I2)
+    state Poisoned {
+        [*] --> FailFast
+        FailFast --> FailFast: Subsequent calls return ErrPoisoned
+    }
+
+    Healthy --> ShuttingDown: gusset_shutdown(drain_ms)
+    ShuttingDown --> Closed: Drain completes or budget expires
+
+    Poisoned --> Closed: Handle.Close()
+    Closed --> [*]
+```
+
+### Dual-Path Memory Model (R6 & R16)
+
+To respect Go's garbage collector and cgo pointer-passing rules, Gusset employs a dual-path input ownership model:
+
+```mermaid
+flowchart LR
+    Input["Input Payload"] --> Size{"Payload Size?"}
+    
+    Size -->|"<= 4 KiB"| Small["Inline Copy\n(gusset_submit)"]
+    Small --> Ephemeral["Go pointer valid only for cgo call duration\n(R6: copied immediately into Rust memory)"]
+    
+    Size -->|"> 4 KiB"| Large["Rust-Owned Buffer\n(gusset_buf_alloc)"]
+    Large --> Slice["Go unsafe.Slice mapping\n(R16: 0 Go heap allocations)"]
+    Slice --> Write["Go writes directly into 64-byte aligned Rust buffer"]
+    Write --> BufID["Submit by Buffer ID\n(no Go pointers passed)"]
+    BufID --> Free["Explicit Buffer.Free()\n(gusset_buf_free)"]
+```
 
 ---
 
@@ -87,6 +210,13 @@ Gusset exports strictly 14 C ABI functions from `libgusset.a` (enforced by `test
 - `gusset.AdviseMemoryLimit(total int64) int64`
 - `gusset.Threads() int64`
 - `gusset.DrainLogs(buf []byte) int`
+
+### 4 Boundary `#[repr(C)]` Types (ABI Version 2)
+At startup, `gusset_abi_layout` exports the memory layout of all four types crossing the FFI boundary. Go's `init()` checks them against both compiled-in constants and cgo's compiled struct layouts to prevent silent memory corruption:
+- `CallHeader` (40 bytes, align 8): Relative `timeout_ns` (uint64), OpenTelemetry `trace_id` (16 bytes), `span_id` (8 bytes), `flags` (uint32), `reserved` (uint32).
+- `FfiStatus` (48 bytes, align 8): Status code (i32), message pointer (`*mut u8`) and length (`usize`), file pointer (`*const u8`) and length (`usize`), line (u32).
+- `AbiLayout` (36 bytes, align 4): ABI version (`2`), array of 4 sizes (`[u32; 4]`), array of 4 alignments (`[u32; 4]`).
+- `AllocStats` (24 bytes, align 8): Non-allocating allocator accounting with `live_bytes` (u64), `peak_bytes` (u64), and `alloc_count` (u64).
 
 ---
 

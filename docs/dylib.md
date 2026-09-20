@@ -25,6 +25,21 @@ cargo build --release --lib
 
 Under macOS Hardened Runtime, applications will refuse to load unsigned or improperly signed dynamic libraries.
 
+```mermaid
+flowchart TD
+    Build["cargo build --release --lib\n(Produces target/release/libgusset.dylib)"] --> SignChoice{"Signing Target?"}
+    
+    SignChoice -->|"Local Development"| AdHoc["Ad-Hoc Signing\ncodesign --force --deep --sign - ..."]
+    SignChoice -->|"Distribution / CI"| DevID["Developer ID Signing\ncodesign --sign 'Developer ID: ...' --options runtime ..."]
+    
+    AdHoc --> Verify["Signature Inspection\ncodesign --display --verbose=4 ..."]
+    DevID --> Verify
+    Verify --> Gatekeeper["Gatekeeper Assessment\nspctl --assess --type execute ..."]
+    
+    Gatekeeper --> CgoLink["cgo Dynamic Linking\n-L... -lgusset -Wl,-rpath,..."]
+    CgoLink --> AppLaunch["Hardened Runtime Execution\n(dyld loads library without SIGKILL / rejection)"]
+```
+
 ### Ad-hoc signing (Development only)
 ```bash
 codesign --force --deep --sign - target/release/libgusset.dylib

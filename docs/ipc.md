@@ -21,32 +21,77 @@ For GPU workloads requiring zero-downtime serving from Go, Gusset defines the Ph
 
 ## Architectural Model
 
+```mermaid
+flowchart TD
+    subgraph GoProcess ["Go Service Process"]
+        App["Go Application Handler"]
+        IpcHandle["gusset-ipc.Handle\n(Identical Go API to gusset.Handle)"]
+        IceClient["iceoryx2 Shm Client\n(Zero-copy request publisher & response subscriber)"]
+        App --> IpcHandle
+        IpcHandle --> IceClient
+    end
+
+    subgraph ShmTransport ["Shared Memory Layer (POSIX shm / memfd)"]
+        ReqRing["Request Ring Buffer\n(Lock-free Zero-Copy Payloads)"]
+        RespRing["Response Ring Buffer\n(Lock-free Zero-Copy Results)"]
+        IceClient --> ReqRing
+        RespRing --> IceClient
+    end
+
+    subgraph Supervisor ["Supervisor Daemon (e.g. tessld)"]
+        Monitor["Process Monitor & Fork/Exec/Restart Controller"]
+        Heartbeat["Microsecond Heartbeat Watcher\n(Watchdog thread)"]
+        RestartBudget["Restart Budget & Circuit Breaker\n(N restarts within window T)"]
+        Monitor --- Heartbeat
+        Monitor --- RestartBudget
+    end
+
+    subgraph WorkerProcess ["Isolated Worker Subprocess (Metal / GPU Context)"]
+        Worker["Rust Engine Worker Process"]
+        GpuCtx["Metal / CUDA Kernel Context"]
+        FaultZone["Fault Zone\n(Hardware GPU Hang / Driver Reset -> SIGKILL / SIGABRT)"]
+        Worker --> GpuCtx
+        GpuCtx --> FaultZone
+    end
+
+    ReqRing --> Worker
+    Worker --> RespRing
+    Monitor -. "fork / exec / signal monitoring" .-> Worker
 ```
-┌────────────────────────────────────────────────────────┐
-│                      Go Service                        │
-│                                                        │
-│   App Handler                                          │
-│       │                                                │
-│       ▼                                                │
-│   gusset.Handle (or gusset-ipc.Handle)                 │
-│       │                                                │
-│       ▼                                                │
-│   iceoryx2 Shm Ring Buffer Client                      │
-└───────────────────────┬────────────────────────────────┘
-                        │ Shared Memory (POSIX shm / memfd)
-                        │ Zero-Copy Buffers
-┌───────────────────────▼────────────────────────────────┐
-│               Supervisor Daemon (tessld)               │
-│                                                        │
-│   Worker Process Monitor (fork / exec / restart)       │
-│       │                                                │
-│       ▼                                                │
-│   Rust Engine Worker (Metal / GPU Context)             │
-│                                                        │
-│   [ Induced Metal Fault / GPU Reset kills Worker ]     │
-│   ==> Supervisor detects termination, restarts Worker  │
-│   ==> Go Service experiences transient retry, not crash│
-└────────────────────────────────────────────────────────┘
+
+## Fault Containment & Recovery Lifecycle
+
+When driving GPU hardware, driver resets or kernel panics issue uncatchable `SIGKILL` or `SIGABRT` signals. An in-process cgo boundary cannot survive these faults; out-of-process crash isolation ensures the Go service continues uninterrupted:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Go as Go Service (gusset-ipc)
+    participant Shm as iceoryx2 Shared Memory
+    participant Super as Supervisor Daemon (tessld)
+    participant Worker as Worker Subprocess (Metal/GPU)
+    participant OS as Host OS / Kernel Driver
+
+    Go->>Shm: Write request payload (zero-copy)
+    Shm->>Worker: Worker reads request from ring buffer
+    Worker->>Worker: Dispatch kernel to GPU (Metal/CUDA)
+
+    critical Hardware Driver Reset Fault
+        Worker->>OS: GPU Hang / Invalid Kernel Address
+        OS->>Worker: Kernel driver terminates process (SIGABRT / SIGKILL)
+        Note over Worker: Worker process dies immediately.<br/>In-process cgo would destroy entire Go process!
+    end
+
+    Note over Go: Go Service remains healthy & serving
+    Super->>OS: Detect child worker termination via waitpid / signal
+    Super->>Super: Check restart budget (<= N restarts in window T)
+    Super->>Worker: Spawn fresh worker subprocess & re-init GPU context
+    Worker->>Shm: Re-attach to shared memory rings
+    Super-->>Go: Notify worker restored
+    Go->>Shm: Retry transiently failed request
+    Shm->>Worker: New worker processes request
+    Worker->>Shm: Write response payload
+    Shm-->>Go: Return result to Go caller
 ```
 
 ---

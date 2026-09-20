@@ -17,6 +17,28 @@ binary twice and the link fails with `rust_eh_personality` defined twice.
 So an adopter does not link Gusset's archive *and* their engine's archive. They
 build a single umbrella crate that depends on both.
 
+```mermaid
+flowchart TD
+    subgraph UmbrellaCrate ["Umbrella Crate (myservice-gusset-engine)"]
+        CargoToml["Cargo.toml\n[lib] name = 'gusset'\ncrate-type = ['staticlib']\npanic = 'unwind'"]
+        GussetCore["gusset_core (crates/gusset)\nFFI guard, worker pool, status protocol"]
+        AdopterCore["my-engine\nDomain logic & algorithms"]
+        CargoToml --> GussetCore
+        CargoToml --> AdopterCore
+    end
+
+    UmbrellaCrate -->|"cargo build --release"| LibArchive["libgusset.a\n(Single static archive enforcing R14)"]
+
+    subgraph GoApp ["Go Application (myservice)"]
+        GoSource["Go Source Code\nimport 'github.com/bharathvbcr/gusset'"]
+        CgoDirectives["cgo Preambles\n#cgo LDFLAGS: -lgusset"]
+        GoSource --> CgoDirectives
+    end
+
+    LibArchive -->|"Linker -lgusset"| Binary["Single Unified Binary\n(No duplicate std symbols or eh_personality)"]
+    CgoDirectives --> Binary
+```
+
 **The part that is easy to get wrong:** cgo links `-lgusset`, so the umbrella's
 output file must be `libgusset.a` no matter what the package is called. That is
 `[lib] name`, not `[package] name`:
@@ -106,6 +128,37 @@ payload could choose a Rust panic and poison the handle. It is now reachable onl
 through `gusset.WithDiagnosticEngine()`, which is for Gusset's own test suites.
 Production code must never pass it.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Go as Go Application
+    participant Shim as cgo Shim (registerEngine)
+    participant CInit as C Export (myservice_engine_init)
+    participant RustGusset as Gusset Core Runtime
+    participant Engine as Adopter Engine Closure
+
+    Note over Go,RustGusset: Step 1: Startup Registration
+    Go->>Shim: registerEngine()
+    Shim->>CInit: myservice_engine_init()
+    CInit->>RustGusset: set_engine_handler(closure)
+    RustGusset-->>CInit: Registered in global state
+    CInit-->>Shim: Complete
+    Shim-->>Go: Complete
+
+    Note over Go,RustGusset: Step 2: Safe Closed-by-Default Dispatch
+    alt No Engine Registered
+        Go->>RustGusset: gusset_submit(...)
+        RustGusset-->>Go: Refused: 'no engine handler registered' (Fail-Closed)
+    else Engine Registered
+        Go->>RustGusset: gusset_submit(...)
+        RustGusset->>Engine: Run with (&JobContext, &[u8])
+        Engine->>RustGusset: ctx.check() (cooperative cancel & relative deadline)
+        Engine->>Engine: Process domain logic
+        Engine-->>RustGusset: Ok(Vec<u8>)
+        RustGusset-->>Go: Ticket completed via netpoller pipe
+    end
+```
+
 ## 3. Link the archive
 
 The default `#cgo LDFLAGS` point into `target/release` **inside a Gusset source
@@ -116,6 +169,19 @@ configuration gives you:
 ```
 ld: warning: search path '.../internal/ffi/../../target/release' not found
 ld: library 'gusset' not found
+```
+
+```mermaid
+flowchart LR
+    subgraph OptionA ["Option A: pkg-config (Recommended)"]
+        Install["make install PREFIX=/usr/local"] --> Artifacts["libgusset.a\ngusset.h\ngusset.pc"]
+        Artifacts --> GoPkgConfig["PKG_CONFIG_PATH=/usr/local/lib/pkgconfig\ngo build -tags gusset_pkgconfig ./..."]
+    end
+
+    subgraph OptionB ["Option B: Direct Linker Flags"]
+        CargoBuild["cargo build --release\n(in umbrella crate)"] --> OutputArchive["target/release/libgusset.a"]
+        OutputArchive --> GoDirectLink["CGO_LDFLAGS='-L$PWD/engine/target/release'\ngo build ./..."]
+    end
 ```
 
 Pick one of the two supported ways out.

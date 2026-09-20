@@ -28,6 +28,30 @@ I5 and R8 say heavy Rust work runs on Rust-spawned threads with an explicit 8 Mi
 stack, never on the caller's g0 stack. musl's default thread stack is 128 KiB,
 against 8 MiB on glibc and darwin.
 
+```mermaid
+flowchart LR
+    subgraph DangerZone ["The 128 KiB Hazard"]
+        MuslDefault["musl Default Stack: 128 KiB\n(vs glibc & darwin: 8 MiB)"]
+        Recursion["Deep Recursion / Native Frames"]
+        Crash["Process SIGSEGV\n(musl pthread default exhausted)"]
+        MuslDefault --> Recursion --> Crash
+    end
+
+    subgraph GussetDefense ["Gusset Stack Hardening (I5, R8)"]
+        ExplicitStack["thread::Builder::stack_size(8 MiB)\nExplicit stack sizing on all platforms"]
+        SigAlt["sigaltstack: 64 KiB\nAlternate signal stack per worker"]
+        ExplicitStack --> SafeRun["Safe Deep Execution\n(musl, glibc, darwin)"]
+        SigAlt --> SafeRun
+    end
+
+    subgraph DualVerification ["Dual Verification Gate"]
+        Probe["pool::sys::current_thread_stack_size\n(Asserts allocated size on every platform)"]
+        CIJob["musl Alpine CI Container Job\n(Runs test suite where OS default is 128 KiB)"]
+        SafeRun --> Probe
+        SafeRun --> CIJob
+    end
+```
+
 That difference is the entire reason the rule exists, and it also means a
 deep-recursion test on glibc or darwin proves nothing: it passes whether or not
 Gusset set the stack size, because the platform default already covers it.
@@ -46,6 +70,28 @@ silently, the same way a failed `sigaltstack` does.
 ## What a Windows port would have to add
 
 Not a roadmap — a statement of scope, so the cost is visible rather than assumed:
+
+```mermaid
+flowchart TD
+    subgraph UnixContract ["Unix Architectural Contract (Supported)"]
+        UPipe["POSIX Pipe (os.Pipe)\nRust writes 8B ticket; Go Netpoller wakes reader"]
+        USig["sigaltstack (64 KiB per worker)\nSurvives Rust stack overflow; Go handles SIGSEGV"]
+        UStack["pthread_attr_setstacksize\nExplicit 8 MiB worker stack; pthread_getattr_np check"]
+        UFd["int32 File Descriptor\nPassed directly to gusset_handle_open"]
+    end
+
+    subgraph WindowsGaps ["Windows Gaps & Port Prerequisites (Not Supported)"]
+        WPipe["IOCP / Win32 Event Objects\nRequires non-blocking Go runtime poll integration"]
+        WSig["Vectored Exception Handling (VEH)\nRequires guard-page stack expansion shims"]
+        WStack["GetCurrentThreadStackLimits\nWin32 thread attribute management"]
+        WFd["Pointer-Sized HANDLE\nABI breaking change (requires ABI v3 layout)"]
+    end
+
+    UPipe -. "Requires rewrite" .-> WPipe
+    USig -. "Requires rewrite" .-> WSig
+    UStack -. "Requires rewrite" .-> WStack
+    UFd -. "Requires rewrite" .-> WFd
+```
 
 - **Completion signalling.** The completion path is a POSIX pipe written from a
   Rust worker and read by Go's netpoller. Windows needs an IOCP or event-object
