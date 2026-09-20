@@ -51,6 +51,10 @@ func (s *handleState) newBuffer(n int) (*Buffer, error) {
 		return nil, err
 	}
 
+	return newBufferFromRaw(s, id, slice), nil
+}
+
+func newBufferFromRaw(s *handleState, id uint64, slice []byte) *Buffer {
 	buf := &Buffer{
 		id:    id,
 		state: s,
@@ -62,7 +66,7 @@ func (s *handleState) newBuffer(n int) (*Buffer, error) {
 		_ = info.state.bufFreeCleanup(info.id)
 	}, bufferCleanupInfo{state: s, id: id})
 
-	return buf, nil
+	return buf
 }
 
 func (s *handleState) bufFreeCleanup(id uint64) error {

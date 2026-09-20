@@ -29,11 +29,34 @@ struct WorkUnit {
     payload: TaskPayload,
 }
 
+/// Output produced by an engine execution.
+#[derive(Debug, Clone)]
+pub enum JobOutput {
+    /// Standard vector of output bytes.
+    Bytes(Vec<u8>),
+    /// Pre-allocated or engine-allocated Rust buffer ID for zero-copy egress (R16).
+    Buffer(u64),
+}
+
+impl From<Vec<u8>> for JobOutput {
+    fn from(v: Vec<u8>) -> Self {
+        JobOutput::Bytes(v)
+    }
+}
+
+impl From<u64> for JobOutput {
+    fn from(buf_id: u64) -> Self {
+        JobOutput::Buffer(buf_id)
+    }
+}
+
 /// Result of job execution.
 #[derive(Debug)]
 pub enum JobResult {
     /// Succeeded with output bytes.
     Ok(Vec<u8>),
+    /// Succeeded with a Rust-owned buffer id (zero-copy egress, R16).
+    Buffer(u64),
     /// Returned error.
     Err(String),
     /// Panic caught by firewall with source location.
@@ -144,44 +167,94 @@ fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// Engine handler function type.
 pub type EngineFn =
-    Box<dyn Fn(&JobContext, &[u8]) -> Result<Vec<u8>, String> + Send + Sync + 'static>;
+    Box<dyn Fn(&JobContext, &[u8]) -> Result<JobOutput, String> + Send + Sync + 'static>;
 
 static GLOBAL_ENGINE: RwLock<Option<EngineFn>> = RwLock::new(None);
+static ENGINE_REGISTRY: RwLock<Option<HashMap<u32, EngineFn>>> = RwLock::new(None);
 
 /// Sets the global engine execution handler.
 ///
 /// Lock poisoning is recovered from rather than swallowed: a previous panic while
 /// the registry was held must not leave the process permanently unable to register
 /// an engine, and it must never be reported to the caller as a successful install.
-pub fn set_engine_handler<F>(f: F)
+pub fn set_engine_handler<F, R>(f: F)
 where
-    F: Fn(&JobContext, &[u8]) -> Result<Vec<u8>, String> + Send + Sync + 'static,
+    F: Fn(&JobContext, &[u8]) -> Result<R, String> + Send + Sync + 'static,
+    R: Into<JobOutput> + 'static,
 {
     let mut w = GLOBAL_ENGINE.write().unwrap_or_else(|e| e.into_inner());
-    *w = Some(Box::new(f));
+    *w = Some(Box::new(move |ctx, input| f(ctx, input).map(Into::into)));
+}
+
+/// Registers an engine execution handler for a specific opcode (R9).
+///
+/// Dispatches calls matching `ctx.opcode() == opcode` directly to this handler.
+pub fn register_engine<F, R>(opcode: u32, f: F)
+where
+    F: Fn(&JobContext, &[u8]) -> Result<R, String> + Send + Sync + 'static,
+    R: Into<JobOutput> + 'static,
+{
+    let mut w = ENGINE_REGISTRY.write().unwrap_or_else(|e| e.into_inner());
+    let map = w.get_or_insert_with(HashMap::new);
+    map.insert(
+        opcode,
+        Box::new(move |ctx, input| f(ctx, input).map(Into::into)),
+    );
+}
+
+/// Clears all registered engine handlers (global and opcode-specific). Diagnostic/test use.
+pub fn clear_engine_handlers() {
+    let mut g = GLOBAL_ENGINE.write().unwrap_or_else(|e| e.into_inner());
+    *g = None;
+    let mut reg = ENGINE_REGISTRY.write().unwrap_or_else(|e| e.into_inner());
+    *reg = None;
 }
 
 /// Reports whether an adopter engine handler is currently registered.
 pub fn has_engine_handler() -> bool {
-    GLOBAL_ENGINE
+    let global_has = GLOBAL_ENGINE
         .read()
         .unwrap_or_else(|e| e.into_inner())
-        .is_some()
+        .is_some();
+    if global_has {
+        return true;
+    }
+    let reg = ENGINE_REGISTRY.read().unwrap_or_else(|e| e.into_inner());
+    match *reg {
+        Some(ref m) => !m.is_empty(),
+        None => false,
+    }
 }
 
 /// Dispatches one work unit (R9).
 ///
 /// Resolution order, and why it is this order:
 ///
-/// 1. A registered adopter engine always wins. `GUSSET_FLAG_DIAGNOSTIC_ENGINE`
+/// 1. An opcode-specific registered engine handler matching `ctx.opcode()` wins.
+/// 2. A registered adopter global engine wins next. `GUSSET_FLAG_DIAGNOSTIC_ENGINE`
 ///    cannot displace it, so a stray flag can never silently swap a production
 ///    engine for the diagnostic one.
-/// 2. Otherwise, if the *caller* set `GUSSET_FLAG_DIAGNOSTIC_ENGINE`, run the
+/// 3. Otherwise, if the *caller* set `GUSSET_FLAG_DIAGNOSTIC_ENGINE`, run the
 ///    built-in diagnostic engine. Only Gusset's own tests set that bit.
-/// 3. Otherwise fail closed. Running an implicit echo-or-panic engine because
+/// 4. Otherwise fail closed. Running an implicit echo-or-panic engine because
 ///    registration was forgotten, or lost a startup race, is how a payload's
 ///    first byte comes to select `panic!` in a production process.
-pub fn default_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, String> {
+pub fn default_dispatch(ctx: &JobContext, input: &[u8]) -> Result<JobOutput, String> {
+    let opcode = ctx.opcode();
+    if opcode != 0 {
+        let reg = ENGINE_REGISTRY.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref map) = *reg {
+            if let Some(ref engine) = map.get(&opcode) {
+                return engine(ctx, input);
+            }
+        }
+        return Err(format!(
+            "gusset: no engine handler registered for opcode {} (submission refused)",
+            opcode
+        ));
+    }
+
+    // 2. Opcode 0: Check global registration
     {
         let r = GLOBAL_ENGINE.read().unwrap_or_else(|e| e.into_inner());
         if let Some(ref engine) = *r {
@@ -189,8 +262,9 @@ pub fn default_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, Strin
         }
     }
 
+    // 3. Diagnostic engine fallback (only for opcode 0)
     if ctx.header().flags & GUSSET_FLAG_DIAGNOSTIC_ENGINE != 0 {
-        return diagnostic_dispatch(ctx, input);
+        return diagnostic_dispatch(ctx, input).map(JobOutput::Bytes);
     }
 
     Err(
@@ -501,7 +575,7 @@ impl Handle {
                     }
 
                     loop {
-                        let unit = {
+                        let mut unit = {
                             // Poison-recovering: the guard protects only the receiver,
                             // and treating "poisoned" as "shut down" would retire the
                             // whole pool on an unrelated panic.
@@ -511,6 +585,7 @@ impl Handle {
                                 Err(_) => break, // Disconnected on handle close
                             }
                         };
+                        unit.ctx.mark_dequeued();
 
                         // Check cancellation before starting
                         let early_cancel = unit.ctx.check();
@@ -522,10 +597,14 @@ impl Handle {
                                     TaskPayload::Shared(buf) => buf.as_slice(),
                                 };
 
-                                match catch_unwind(AssertUnwindSafe(|| {
+                                let dispatch_res = catch_unwind(AssertUnwindSafe(|| {
                                     default_dispatch(&unit.ctx, slice)
-                                })) {
-                                    Ok(Ok(out)) => JobResult::Ok(out),
+                                }));
+                                unit.ctx.mark_finished();
+
+                                match dispatch_res {
+                                    Ok(Ok(JobOutput::Bytes(out))) => JobResult::Ok(out),
+                                    Ok(Ok(JobOutput::Buffer(buf_id))) => JobResult::Buffer(buf_id),
                                     Ok(Err(err)) => JobResult::Err(err),
                                     Err(payload) => {
                                         // Caught panic: poison handle (I2)
@@ -692,6 +771,16 @@ impl Handle {
         map.insert(id, Arc::new(buf));
 
         Ok((id, ptr))
+    }
+
+    /// Looks up a live buffer by id, returning its mutable pointer and byte length.
+    pub fn buf_get(&self, id: u64) -> Result<(*mut u8, usize), String> {
+        let map = lock_recover(&self.buffers);
+        if let Some(buf) = map.get(&id) {
+            Ok((buf.as_mut_ptr(), buf.len()))
+        } else {
+            Err(format!("buffer id {} not found", id))
+        }
     }
 
     /// Frees a Rust-owned buffer by id (R4, R16).

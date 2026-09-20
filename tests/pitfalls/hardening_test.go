@@ -213,3 +213,66 @@ func (testSpan) SpanID() [8]byte {
 	b[0] = 0xCD
 	return b
 }
+
+// TestHardening_WaitBufferZeroCopyEgress exercises the zero-copy return path (R16).
+// Ensures WaitBuffer returns a Rust-owned *Buffer, Bytes() returns the content,
+// and Free releases it cleanly.
+func TestHardening_WaitBufferZeroCopyEgress(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Diagnostic engine: byte 0 echoes the tail
+	payload := []byte{0, 1, 2, 3, 4, 5}
+	ticket, err := h.Submit(ctx, payload)
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+
+	buf, err := h.WaitBuffer(ctx, ticket)
+	if err != nil {
+		t.Fatalf("WaitBuffer failed: %v", err)
+	}
+	if buf == nil {
+		t.Fatal("expected non-nil Buffer from WaitBuffer")
+	}
+
+	bytes := buf.Bytes()
+	if len(bytes) != 6 || bytes[0] != 0 || bytes[5] != 5 {
+		t.Fatalf("unexpected buffer bytes: %v", bytes)
+	}
+
+	if err := buf.Free(); err != nil {
+		t.Fatalf("buf.Free failed: %v", err)
+	}
+	if buf.Bytes() != nil {
+		t.Fatalf("expected nil bytes after Free, got %v", buf.Bytes())
+	}
+
+	// Idempotent free
+	if err := buf.Free(); err != nil {
+		t.Fatalf("double Free returned error: %v", err)
+	}
+}
+
+// TestHardening_OpcodeOptionsAndContext verifies WithOpcode and ContextWithOpcode options (R9).
+func TestHardening_OpcodeOptionsAndContext(t *testing.T) {
+	// Handle with default opcode
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithOpcode(42))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	ctx := context.Background()
+	ctxOp := gusset.ContextWithOpcode(ctx, 99)
+
+	if op, ok := ctxOp.Value(gusset.OpcodeContextKey).(uint32); !ok || op != 99 {
+		t.Fatalf("expected opcode 99 attached to context, got %v", op)
+	}
+}

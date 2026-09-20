@@ -35,4 +35,4 @@ pub use alloc::{get_alloc_stats, AllocStats, Counting};
 pub use ffi::status::{FfiStatus, FFI_BAD_ARG, FFI_ERR, FFI_OK, FFI_PANIC, FFI_POISONED};
 pub use ffi::{gusset_abi_layout, AbiLayout, GUSSET_ABI_VERSION};
 pub use header::{CallHeader, CancelReason, JobContext};
-pub use pool::{set_engine_handler, Handle};
+pub use pool::{clear_engine_handlers, register_engine, set_engine_handler, Handle, JobOutput};

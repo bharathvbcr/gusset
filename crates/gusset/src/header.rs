@@ -59,6 +59,8 @@ pub struct JobContext {
     submit_instant: Instant,
     deadline: Option<Instant>,
     cancel_flag: Arc<AtomicBool>,
+    dequeued_at: Option<Instant>,
+    finished_at: Option<Instant>,
 }
 
 impl JobContext {
@@ -75,12 +77,51 @@ impl JobContext {
             submit_instant,
             deadline,
             cancel_flag,
+            dequeued_at: None,
+            finished_at: None,
         }
     }
 
     /// Returns a reference to the call header.
     pub fn header(&self) -> &CallHeader {
         &self.header
+    }
+
+    /// Returns the engine dispatch opcode passed in CallHeader.reserved (R9).
+    pub fn opcode(&self) -> u32 {
+        self.header.reserved
+    }
+
+    /// Marks the instant when this job was dequeued by a worker thread.
+    pub fn mark_dequeued(&mut self) {
+        self.dequeued_at = Some(Instant::now());
+    }
+
+    /// Marks the instant when job execution finished on the worker thread.
+    pub fn mark_finished(&mut self) {
+        self.finished_at = Some(Instant::now());
+    }
+
+    /// Time spent waiting in the worker queue before execution began.
+    pub fn queue_delay(&self) -> Option<Duration> {
+        self.dequeued_at
+            .map(|d| d.saturating_duration_since(self.submit_instant))
+    }
+
+    /// Duration of engine compute on the worker thread.
+    pub fn compute_duration(&self) -> Option<Duration> {
+        match (self.dequeued_at, self.finished_at) {
+            (Some(d), Some(f)) => Some(f.saturating_duration_since(d)),
+            _ => None,
+        }
+    }
+
+    /// Total duration elapsed since job submission.
+    pub fn total_duration(&self) -> Duration {
+        match self.finished_at {
+            Some(f) => f.saturating_duration_since(self.submit_instant),
+            None => Instant::now().saturating_duration_since(self.submit_instant),
+        }
     }
 
     /// Checks whether the job has been cancelled or exceeded its deadline (R9).

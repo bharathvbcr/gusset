@@ -346,6 +346,14 @@ pub unsafe extern "C" fn gusset_take(
                     }
                     Ok(())
                 }
+                JobResult::Buffer(buf_id) => {
+                    let (buf_ptr, len) = h.buf_get(buf_id).map_err(FfiError::from)?;
+                    // High bit indicates a persistent zero-copy user buffer output (R16)
+                    ptr::write(out_buf_id, buf_id | (1 << 63));
+                    ptr::write(out_ptr, buf_ptr);
+                    ptr::write(out_len, len);
+                    Ok(())
+                }
                 JobResult::Err(msg) => Err(FfiError {
                     code: FFI_ERR,
                     msg,

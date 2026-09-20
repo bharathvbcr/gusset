@@ -17,16 +17,18 @@ import (
 )
 
 type callResult struct {
-	data []byte
-	err  error
+	data   []byte
+	buffer *Buffer
+	err    error
 }
 
 // Option configures Handle settings.
 type Option func(*handleConfig)
 
 type handleConfig struct {
-	poolSize  uint32
-	callFlags uint32
+	poolSize      uint32
+	callFlags     uint32
+	defaultOpcode uint32
 }
 
 // MaxPoolSize mirrors gusset::pool::MAX_POOL_SIZE.
@@ -63,22 +65,31 @@ func WithDiagnosticEngine() Option {
 	}
 }
 
+// WithOpcode sets the default engine dispatch opcode for this handle (R9).
+// Dispatches to an engine registered with that opcode in Rust without payload byte mangling.
+func WithOpcode(opcode uint32) Option {
+	return func(c *handleConfig) {
+		c.defaultOpcode = opcode
+	}
+}
+
 // handleState owns the active Gusset runtime session resources (I4).
 // Keeping state decoupled from Handle ensures runtime.AddCleanup on Handle
 // can collect unreachable handles without a reference cycle with the drainPipe goroutine.
 type handleState struct {
-	ptr        unsafe.Pointer
-	callFlags  uint32
-	sem        chan struct{}
-	poisoned   atomic.Bool
-	closed     atomic.Bool
-	pipe       *os.File
-	drainDone  chan struct{}
-	mu         sync.Mutex
-	cgoMu      sync.RWMutex
-	pending    map[uint64]chan callResult
-	completed  map[uint64]callResult
-	semTickets map[uint64]struct{}
+	ptr           unsafe.Pointer
+	callFlags     uint32
+	defaultOpcode uint32
+	sem           chan struct{}
+	poisoned      atomic.Bool
+	closed        atomic.Bool
+	pipe          *os.File
+	drainDone     chan struct{}
+	mu            sync.Mutex
+	cgoMu         sync.RWMutex
+	pending       map[uint64]chan callResult
+	completed     map[uint64]callResult
+	semTickets    map[uint64]struct{}
 }
 
 // Handle represents an active Gusset runtime session (I4).
@@ -116,14 +127,15 @@ func Open(opts ...Option) (*Handle, error) {
 	}
 
 	state := &handleState{
-		ptr:        hPtr,
-		callFlags:  cfg.callFlags,
-		sem:        make(chan struct{}, cfg.poolSize),
-		pipe:       r,
-		drainDone:  make(chan struct{}),
-		pending:    make(map[uint64]chan callResult),
-		completed:  make(map[uint64]callResult),
-		semTickets: make(map[uint64]struct{}),
+		ptr:           hPtr,
+		callFlags:     cfg.callFlags,
+		defaultOpcode: cfg.defaultOpcode,
+		sem:           make(chan struct{}, cfg.poolSize),
+		pipe:          r,
+		drainDone:     make(chan struct{}),
+		pending:       make(map[uint64]chan callResult),
+		completed:     make(map[uint64]callResult),
+		semTickets:    make(map[uint64]struct{}),
 	}
 
 	h := &Handle{state: state}
@@ -155,6 +167,11 @@ func drainPipe(s *handleState) {
 			for _, ch := range s.pending {
 				ch <- callResult{err: errors.New("gusset: handle closed")}
 			}
+			for _, res := range s.completed {
+				if res.buffer != nil {
+					_ = res.buffer.Free()
+				}
+			}
 			s.pending = make(map[uint64]chan callResult)
 			s.completed = make(map[uint64]callResult)
 			s.mu.Unlock()
@@ -184,6 +201,10 @@ func drainPipe(s *handleState) {
 				s.poisoned.Store(true)
 			}
 			res = callResult{err: takeErr}
+		} else if (bufID & (uint64(1) << 63)) != 0 {
+			// Wrap the persistent Rust-owned buffer with zero memory copies (R16 return path)
+			actualBufID := bufID &^ (uint64(1) << 63)
+			res = callResult{buffer: newBufferFromRaw(s, actualBufID, outBytes)}
 		} else {
 			var out []byte
 			if len(outBytes) > 0 {
@@ -239,8 +260,14 @@ func (s *handleState) close() error {
 	<-s.drainDone
 	_ = s.pipe.Close()
 
-	// 4. Drain any remaining permits from untaken submitted tickets
+	// 4. Drain any remaining permits from untaken submitted tickets and free unconsumed buffers
 	s.mu.Lock()
+	for _, res := range s.completed {
+		if res.buffer != nil {
+			_ = res.buffer.Free()
+		}
+	}
+	s.completed = make(map[uint64]callResult)
 	for ticket := range s.semTickets {
 		delete(s.semTickets, ticket)
 		<-s.sem
@@ -288,7 +315,7 @@ func (s *handleState) call(ctx context.Context, in []byte) ([]byte, error) {
 		return nil, errors.New("gusset: handle is closed")
 	}
 
-	header := extractCallHeader(ctx, s.callFlags)
+	header := extractCallHeader(ctx, s.callFlags, s.defaultOpcode)
 	s.cgoMu.RLock()
 	if s.closed.Load() || s.ptr == nil {
 		s.cgoMu.RUnlock()
@@ -310,7 +337,20 @@ func (s *handleState) call(ctx context.Context, in []byte) ([]byte, error) {
 	if res, done := s.completed[ticket]; done {
 		delete(s.completed, ticket)
 		s.mu.Unlock()
-		return res.data, res.err
+		if res.err != nil {
+			return nil, res.err
+		}
+		if res.buffer != nil {
+			defer res.buffer.Free()
+			b := res.buffer.Bytes()
+			if b == nil && len(res.buffer.data) > 0 {
+				return nil, errors.New("gusset: handle is closed")
+			}
+			out := make([]byte, len(b))
+			copy(out, b)
+			return out, nil
+		}
+		return res.data, nil
 	}
 	if s.closed.Load() {
 		s.mu.Unlock()
@@ -321,7 +361,20 @@ func (s *handleState) call(ctx context.Context, in []byte) ([]byte, error) {
 
 	select {
 	case res := <-ticketCh:
-		return res.data, res.err
+		if res.err != nil {
+			return nil, res.err
+		}
+		if res.buffer != nil {
+			defer res.buffer.Free()
+			b := res.buffer.Bytes()
+			if b == nil && len(res.buffer.data) > 0 {
+				return nil, errors.New("gusset: handle is closed")
+			}
+			out := make([]byte, len(b))
+			copy(out, b)
+			return out, nil
+		}
+		return res.data, nil
 	case <-ctx.Done():
 		// R9: Cancel task and wait for ticket to drain before releasing semaphore (I4)
 		if !s.closed.Load() {
@@ -332,6 +385,9 @@ func (s *handleState) call(ctx context.Context, in []byte) ([]byte, error) {
 			s.cgoMu.RUnlock()
 		}
 		res := <-ticketCh
+		if res.buffer != nil {
+			_ = res.buffer.Free()
+		}
 		if res.err != nil && errors.Is(res.err, ErrPanic) {
 			s.poisoned.Store(true)
 			return nil, res.err
@@ -385,7 +441,7 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 		return 0, errors.New("gusset: handle is closed")
 	}
 
-	header := extractCallHeader(ctx, s.callFlags)
+	header := extractCallHeader(ctx, s.callFlags, s.defaultOpcode)
 	s.cgoMu.RLock()
 	if s.closed.Load() || s.ptr == nil {
 		s.cgoMu.RUnlock()
@@ -417,6 +473,19 @@ func (h *Handle) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	return res, err
 }
 
+// WaitBuffer waits for completion of an asynchronously submitted job ticket,
+// returning a zero-copy *Buffer backed by Rust-owned memory.
+//
+// If the job completed with inline bytes rather than an allocated buffer, a *Buffer
+// is allocated to hold the data.
+// The caller is responsible for calling buf.Free() when done, though runtime.AddCleanup
+// acts as a safety net if the buffer is garbage collected.
+func (h *Handle) WaitBuffer(ctx context.Context, ticket uint64) (*Buffer, error) {
+	buf, err := h.state.waitBuffer(ctx, ticket)
+	runtime.KeepAlive(h)
+	return buf, err
+}
+
 // ErrUnknownTicket reports a ticket this handle is not waiting on: never submitted
 // here, already awaited, or issued by a different handle.
 var ErrUnknownTicket = errors.New("gusset: unknown or already-awaited ticket")
@@ -425,17 +494,61 @@ var ErrUnknownTicket = errors.New("gusset: unknown or already-awaited ticket")
 var ErrTicketBusy = errors.New("gusset: ticket already has a waiter")
 
 func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
+	res, err := s.waitInternal(ctx, ticket)
+	if err != nil {
+		return nil, err
+	}
+	if res.buffer != nil {
+		defer res.buffer.Free()
+		b := res.buffer.Bytes()
+		if b == nil && len(res.buffer.data) > 0 {
+			return nil, errors.New("gusset: handle is closed")
+		}
+		out := make([]byte, len(b))
+		copy(out, b)
+		return out, nil
+	}
+	return res.data, nil
+}
+
+func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, error) {
+	res, err := s.waitInternal(ctx, ticket)
+	if err != nil {
+		return nil, err
+	}
+	if res.buffer != nil {
+		if res.buffer.Bytes() == nil && len(res.buffer.data) > 0 {
+			_ = res.buffer.Free()
+			return nil, errors.New("gusset: handle is closed")
+		}
+		return res.buffer, nil
+	}
+	if len(res.data) > 0 {
+		buf, err := s.newBuffer(len(res.data))
+		if err != nil {
+			return nil, err
+		}
+		copy(buf.Bytes(), res.data)
+		return buf, nil
+	}
+	return nil, errors.New("gusset: job did not produce a buffer output")
+}
+
+func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResult, error) {
 	defer s.releaseSem(ticket)
 
 	s.mu.Lock()
 	if res, done := s.completed[ticket]; done {
 		delete(s.completed, ticket)
 		s.mu.Unlock()
-		return res.data, res.err
+		if res.err != nil {
+			return callResult{}, res.err
+		}
+		return res, nil
 	}
 	if s.closed.Load() {
 		s.mu.Unlock()
-		return nil, errors.New("gusset: handle is closed")
+		return callResult{}, errors.New("gusset: handle is closed")
 	}
 
 	// Refuse a ticket this handle is not holding.
@@ -447,7 +560,7 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	// exactly the set of live tickets this handle issued and has not yet handed back.
 	if _, live := s.semTickets[ticket]; !live {
 		s.mu.Unlock()
-		return nil, ErrUnknownTicket
+		return callResult{}, ErrUnknownTicket
 	}
 
 	// Refuse a second waiter rather than displacing the first.
@@ -458,7 +571,7 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	// result can be moved out exactly once, so a ticket can have exactly one waiter.
 	if _, busy := s.pending[ticket]; busy {
 		s.mu.Unlock()
-		return nil, ErrTicketBusy
+		return callResult{}, ErrTicketBusy
 	}
 
 	ticketCh := make(chan callResult, 1)
@@ -467,7 +580,10 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 
 	select {
 	case res := <-ticketCh:
-		return res.data, res.err
+		if res.err != nil {
+			return callResult{}, res.err
+		}
+		return res, nil
 	case <-ctx.Done():
 		if !s.closed.Load() {
 			s.cgoMu.RLock()
@@ -477,10 +593,13 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 			s.cgoMu.RUnlock()
 		}
 		res := <-ticketCh
+		if res.buffer != nil {
+			_ = res.buffer.Free()
+		}
 		if res.err != nil && errors.Is(res.err, ErrPanic) {
 			s.poisoned.Store(true)
-			return nil, res.err
+			return callResult{}, res.err
 		}
-		return nil, ctx.Err()
+		return callResult{}, ctx.Err()
 	}
 }

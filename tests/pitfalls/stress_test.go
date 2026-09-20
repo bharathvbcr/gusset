@@ -573,3 +573,124 @@ func TestStress_ConcurrentCallAndCloseRace(t *testing.T) {
 			trial, successCount.Load(), closedCount.Load())
 	}
 }
+
+// TestStress_ConcurrentZeroCopyEgressAndCloseRace subjects WaitBuffer to severe concurrent
+// load while racing handle close. It proves that WaitBuffer either yields a valid, readable
+// *Buffer or fails cleanly with ErrClosed/canceled, never returning a nil or corrupted slice.
+func TestStress_ConcurrentZeroCopyEgressAndCloseRace(t *testing.T) {
+	for trial := 0; trial < 5; trial++ {
+		h, err := gusset.Open(gusset.WithPoolSize(8), gusset.WithDiagnosticEngine())
+		if err != nil {
+			t.Fatalf("trial %d: Open failed: %v", trial, err)
+		}
+
+		const numGoroutines = 40
+		var wg sync.WaitGroup
+		var successCount atomic.Int64
+		var closedCount atomic.Int64
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+
+		for g := 0; g < numGoroutines; g++ {
+			wg.Add(1)
+			go func(gid int) {
+				defer wg.Done()
+				for i := 0; i < 25; i++ {
+					payload := []byte{0, byte(gid), byte(i)}
+					ticket, err := h.Submit(ctx, payload)
+					if err != nil {
+						closedCount.Add(1)
+						return
+					}
+					buf, err := h.WaitBuffer(ctx, ticket)
+					if err != nil {
+						closedCount.Add(1)
+						return
+					}
+					slice := buf.Bytes()
+					if slice == nil || len(slice) < 3 || slice[1] != byte(gid) || slice[2] != byte(i) {
+						t.Errorf("corrupted WaitBuffer response: %v", slice)
+						_ = buf.Free()
+						return
+					}
+					if err := buf.Free(); err != nil {
+						t.Errorf("buf.Free error: %v", err)
+						return
+					}
+					successCount.Add(1)
+				}
+			}(g)
+		}
+
+		// Jitter before closing handle mid-flight
+		time.Sleep(time.Duration(10+trial*15) * time.Millisecond)
+		_ = h.Close()
+		cancel()
+
+		wg.Wait()
+		t.Logf("trial %d: %d successful WaitBuffer calls, %d calls received clean error",
+			trial, successCount.Load(), closedCount.Load())
+	}
+}
+
+// TestStress_MultiEngineConcurrentSaturation hammers a handle with concurrent calls
+// routed to different opcodes, verifying fail-closed isolation and thread safety.
+func TestStress_MultiEngineConcurrentSaturation(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(8), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	const numGoroutines = 40
+	const iterations = 30
+	var wg sync.WaitGroup
+	var successCount atomic.Int64
+	var refusedCount atomic.Int64
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for g := 0; g < numGoroutines; g++ {
+		wg.Add(1)
+		go func(gid int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				// Alternately send opcode 0 (diagnostic echo) or opcode > 0 (unregistered engine)
+				if (gid+i)%2 == 0 {
+					callCtx := gusset.ContextWithOpcode(ctx, 0)
+					res, err := h.Call(callCtx, []byte{0, byte(gid), byte(i)})
+					if err != nil {
+						t.Errorf("opcode 0 call failed: %v", err)
+						return
+					}
+					if len(res) < 3 || res[1] != byte(gid) || res[2] != byte(i) {
+						t.Errorf("corrupted response: %v", res)
+						return
+					}
+					successCount.Add(1)
+				} else {
+					targetOpcode := uint32(100 + (gid % 10))
+					callCtx := gusset.ContextWithOpcode(ctx, targetOpcode)
+					_, err := h.Call(callCtx, []byte{1, 2, 3})
+					if err == nil {
+						t.Errorf("unregistered opcode %d must be refused", targetOpcode)
+						return
+					}
+					if !strings.Contains(err.Error(), "no engine handler registered") {
+						t.Errorf("expected refusal message, got: %v", err)
+						return
+					}
+					refusedCount.Add(1)
+				}
+			}
+		}(g)
+	}
+
+	wg.Wait()
+	t.Logf("saturation complete: %d successes, %d clean refusals", successCount.Load(), refusedCount.Load())
+	if successCount.Load()+refusedCount.Load() != int64(numGoroutines*iterations) {
+		t.Fatalf("expected %d total results, got %d", numGoroutines*iterations, successCount.Load()+refusedCount.Load())
+	}
+}
+

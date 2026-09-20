@@ -206,7 +206,7 @@ Gusset exports strictly 14 C ABI functions from `libgusset.a` (enforced by `test
 - `(*Handle).Close() error`
 - `(*Handle).Call(ctx context.Context, in []byte) ([]byte, error)`
 - `(*Handle).Submit(ctx context.Context, in any) (uint64, error)`
-- `(*Handle).Wait(ctx context.Context, ticket uint64) ([]byte, error)`
+- `(*Handle).Wait(ctx context.Context, ticket uint64) ([]byte, error)` (and `WaitBuffer` for zero-copy egress)
 - `(*Handle).NewBuffer(n int) (*Buffer, error)` (with `(*Buffer).Free() error`)
 - `gusset.Stats() AllocStats`
 - `gusset.AdviseMemoryLimit(total int64) int64`

@@ -131,9 +131,23 @@ type TraceCarrier interface {
 	SpanID() [8]byte
 }
 
-// extractCallHeader extracts timeout and trace/span context if present.
-func extractCallHeader(ctx context.Context, flags uint32) ffi.CallHeader {
-	header := ffi.CallHeader{Flags: flags}
+// OpcodeContextKey is the context key for attaching an engine dispatch opcode (R9).
+var OpcodeContextKey = opcodeContextKey{}
+
+type opcodeContextKey struct{}
+
+// ContextWithOpcode attaches an engine dispatch opcode to the context.
+// Overrides the default opcode configured on the Handle.
+func ContextWithOpcode(ctx context.Context, opcode uint32) context.Context {
+	return context.WithValue(ctx, OpcodeContextKey, opcode)
+}
+
+// extractCallHeader extracts timeout, trace/span context, and opcode if present.
+func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) ffi.CallHeader {
+	header := ffi.CallHeader{
+		Flags:    flags,
+		Reserved: defaultOpcode,
+	}
 
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
@@ -147,6 +161,10 @@ func extractCallHeader(ctx context.Context, flags uint32) ffi.CallHeader {
 	if sc, ok := ctx.Value(SpanContextKey).(TraceCarrier); ok {
 		header.TraceID = sc.TraceID()
 		header.SpanID = sc.SpanID()
+	}
+
+	if op, ok := ctx.Value(OpcodeContextKey).(uint32); ok {
+		header.Reserved = op
 	}
 
 	return header
