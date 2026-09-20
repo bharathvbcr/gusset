@@ -4,6 +4,8 @@ The runtime contract for running a Rust engine inside a Go service: panic firewa
 
 Gusset is **not** a binding generator, **not** a cgo-free calling path, and **not** an IPC transport. It is the hardening plate between Go and Rust in production.
 
+> **Why Gusset?** Foreign Function Interface generators (`cgo`, `cbindgen`, `uniffi`) solve type marshalling, but leave the process vulnerable to thread exhaustion (>10k threads), musl 128 KiB stack overflows in Docker, double-panic `SIGABRT` aborts, and container OOM kills. See [Why Gusset is Needed](docs/why.md) for the complete engineering rationale and runtime collision analysis.
+
 ---
 
 ## Architecture

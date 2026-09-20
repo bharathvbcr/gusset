@@ -4,7 +4,7 @@ As of 2026-09-20. Author: Bharath Chandra. Living copy: https://claude.ai/code/a
 
 ## Thesis and scope
 
-Build the runtime contract for running a Rust engine inside a Go service: the layer between "bindings exist" and "this runs in production without taking the Go process down." It is infrastructure for Bharath's own Rust+Go apps first; the open-source framework is the extraction, not the goal.
+Build the runtime contract for running a Rust engine inside a Go service: the layer between "bindings exist" and "this runs in production without taking the Go process down" (detailed in [`docs/why.md`](why.md)). It is infrastructure for Bharath's own Rust+Go apps first; the open-source framework is the extraction, not the goal.
 
 In scope:
 
