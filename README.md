@@ -34,8 +34,25 @@ Adopter Engine (crates/gusset-example / tessl / sparsl)
 2. **(I2) Panic Firewall:** No Rust panic crosses the FFI boundary. A caught panic poisons the handle; subsequent calls fail fast with `ErrPoisoned`.
 3. **(I3) Deadline & Cancellation:** Deadlines and cancellations are enforced inside Rust between work units using relative `timeout_ns` and per-job `AtomicBool` flags.
 4. **(I4) Bounded Concurrency:** In-flight calls per handle never exceed the configured pool size. Callers park on the Go semaphore, never on an OS thread in cgo.
-5. **(I5) Stack & Signal Safety:** Heavy work runs on Rust-spawned threads with 8 MiB explicit stack size and 64 KiB `sigaltstack`.
 6. **(I6) ABI Verification:** Go `init()` verifies ABI version, struct sizes, and alignments against Rust before the process starts serving.
+
+---
+
+## Installation
+
+### One-Command Install
+Install Gusset runtime library, C headers, pkg-config definition, and `gussetvet` linter:
+```bash
+curl -fsSL https://raw.githubusercontent.com/bharathvbcr/gusset/main/install.sh | bash
+```
+
+### Local / From Source
+```bash
+git clone https://github.com/bharathvbcr/gusset.git
+cd gusset
+make install
+```
+By default, this installs into `~/.local` (or `/usr/local` if run with write permissions or as root). Custom prefix can be provided via `PREFIX=/path/to/prefix make install`.
 
 ---
 

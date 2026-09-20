@@ -1,0 +1,10 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: gusset
+Description: Go-Rust runtime contract static library
+Version: @VERSION@
+Libs: -L${libdir} -lgusset -lpthread -lm -ldl
+Cflags: -I${includedir}
