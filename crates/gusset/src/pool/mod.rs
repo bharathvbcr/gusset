@@ -438,6 +438,13 @@ impl Handle {
             pool_size as usize
         };
 
+        if pipe_write_fd < 0 {
+            return Err("pipe_write_fd must be non-negative".to_string());
+        }
+
+        sys::set_nonblocking(pipe_write_fd)
+            .map_err(|e| format!("failed to set non-blocking on pipe write fd: {}", e))?;
+
         if pool_size > MAX_POOL_SIZE {
             return Err(format!(
                 "pool_size {} exceeds maximum {} (each worker is an OS thread with an 8 MiB stack)",

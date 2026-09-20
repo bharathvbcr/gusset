@@ -1,6 +1,7 @@
 package gusset
 
 import (
+	"math"
 	"runtime/debug"
 
 	"github.com/bharathvbcr/gusset/internal/ffi"
@@ -25,10 +26,20 @@ func Stats() AllocStats {
 
 // AdviseMemoryLimit adjusts Go's runtime memory limit based on total budget and Rust live memory.
 // Calls debug.SetMemoryLimit(max(total - rustLive, floor)).
+// If total < 0, queries the current limit non-destructively.
 func AdviseMemoryLimit(total int64) int64 {
+	if total < 0 {
+		return debug.SetMemoryLimit(-1)
+	}
+
 	const floor = int64(16 * 1024 * 1024) // 16 MiB floor
 	st := Stats()
-	rustLive := int64(st.LiveBytes)
+	var rustLive int64
+	if st.LiveBytes > uint64(math.MaxInt64) {
+		rustLive = math.MaxInt64
+	} else {
+		rustLive = int64(st.LiveBytes)
+	}
 
 	target := total - rustLive
 	if target < floor {

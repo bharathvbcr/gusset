@@ -118,6 +118,7 @@ func Open(opts ...Option) (*Handle, error) {
 		return nil, err
 	}
 	_ = w.Close()
+	_ = syscall.SetNonblock(writeFD, true)
 
 	hPtr, err := ffi.HandleOpen(cfg.poolSize, writeFD)
 	if err != nil {
@@ -296,104 +297,11 @@ func (h *Handle) Call(ctx context.Context, in []byte) ([]byte, error) {
 }
 
 func (s *handleState) call(ctx context.Context, in []byte) ([]byte, error) {
-	if s.poisoned.Load() {
-		return nil, ErrPoisoned
-	}
-	if s.closed.Load() {
-		return nil, errors.New("gusset: handle is closed")
-	}
-
-	// Acquire semaphore bounded by pool size (I4)
-	select {
-	case s.sem <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	defer func() { <-s.sem }()
-
-	if s.closed.Load() {
-		return nil, errors.New("gusset: handle is closed")
-	}
-
-	header := extractCallHeader(ctx, s.callFlags, s.defaultOpcode)
-	s.cgoMu.RLock()
-	if s.closed.Load() || s.ptr == nil {
-		s.cgoMu.RUnlock()
-		return nil, errors.New("gusset: handle is closed")
-	}
-	ticket, err := ffi.Submit(s.ptr, header, in, 0)
-	s.cgoMu.RUnlock()
-
+	ticket, err := s.submit(ctx, in)
 	if err != nil {
-		if errors.Is(err, ErrPanic) {
-			s.poisoned.Store(true)
-		}
 		return nil, err
 	}
-
-	ticketCh := make(chan callResult, 1)
-
-	s.mu.Lock()
-	if res, done := s.completed[ticket]; done {
-		delete(s.completed, ticket)
-		s.mu.Unlock()
-		if res.err != nil {
-			return nil, res.err
-		}
-		if res.buffer != nil {
-			defer res.buffer.Free()
-			b := res.buffer.Bytes()
-			if b == nil && len(res.buffer.data) > 0 {
-				return nil, errors.New("gusset: handle is closed")
-			}
-			out := make([]byte, len(b))
-			copy(out, b)
-			return out, nil
-		}
-		return res.data, nil
-	}
-	if s.closed.Load() {
-		s.mu.Unlock()
-		return nil, errors.New("gusset: handle is closed")
-	}
-	s.pending[ticket] = ticketCh
-	s.mu.Unlock()
-
-	select {
-	case res := <-ticketCh:
-		if res.err != nil {
-			return nil, res.err
-		}
-		if res.buffer != nil {
-			defer res.buffer.Free()
-			b := res.buffer.Bytes()
-			if b == nil && len(res.buffer.data) > 0 {
-				return nil, errors.New("gusset: handle is closed")
-			}
-			out := make([]byte, len(b))
-			copy(out, b)
-			return out, nil
-		}
-		return res.data, nil
-	case <-ctx.Done():
-		// R9: Cancel task and wait for ticket to drain before releasing semaphore (I4)
-		if !s.closed.Load() {
-			s.cgoMu.RLock()
-			if s.ptr != nil {
-				_ = ffi.Cancel(s.ptr, ticket)
-			}
-			s.cgoMu.RUnlock()
-		}
-		res := <-ticketCh
-		if res.buffer != nil {
-			_ = res.buffer.Free()
-		}
-		if res.err != nil && errors.Is(res.err, ErrPanic) {
-			s.poisoned.Store(true)
-			return nil, res.err
-		}
-		return nil, ctx.Err()
-	}
+	return s.wait(ctx, ticket)
 }
 
 // Submit submits a job asynchronously (accepts either []byte or *Buffer) and returns a ticket.
@@ -423,6 +331,15 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 	case []byte:
 		rawInput = v
 	case *Buffer:
+		if v == nil {
+			return 0, errors.New("gusset: buffer is nil")
+		}
+		if v.freed.Load() || v.state.closed.Load() {
+			return 0, errors.New("gusset: buffer is freed or closed")
+		}
+		if v.state != s {
+			return 0, errors.New("gusset: buffer belongs to a different handle")
+		}
 		bufferID = v.id
 	case nil:
 	default:
@@ -531,7 +448,8 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 		copy(buf.Bytes(), res.data)
 		return buf, nil
 	}
-	return nil, errors.New("gusset: job did not produce a buffer output")
+	// A job returning an empty output (0 bytes) produces a valid empty Buffer
+	return newBufferFromRaw(s, 0, nil), nil
 }
 
 func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResult, error) {

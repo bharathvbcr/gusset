@@ -232,6 +232,26 @@ pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
     Ok(())
 }
 
+/// Sets the given file descriptor to non-blocking mode (O_NONBLOCK).
+pub fn set_nonblocking(fd: i32) -> Result<()> {
+    if fd < 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "invalid file descriptor",
+        ));
+    }
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 {
+            return Err(Error::last_os_error());
+        }
+        if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return Err(Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 /// Closes a file descriptor safely with EINTR retry.
 pub fn close_fd(fd: i32) {
     if fd >= 0 {

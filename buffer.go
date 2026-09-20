@@ -61,15 +61,20 @@ func newBufferFromRaw(s *handleState, id uint64, slice []byte) *Buffer {
 		data:  slice,
 	}
 
-	// AddCleanup backstop if caller forgets to explicitly Free
-	buf.cleanup = runtime.AddCleanup(buf, func(info bufferCleanupInfo) {
-		_ = info.state.bufFreeCleanup(info.id)
-	}, bufferCleanupInfo{state: s, id: id})
+	if id > 0 {
+		// AddCleanup backstop if caller forgets to explicitly Free
+		buf.cleanup = runtime.AddCleanup(buf, func(info bufferCleanupInfo) {
+			_ = info.state.bufFreeCleanup(info.id)
+		}, bufferCleanupInfo{state: s, id: id})
+	}
 
 	return buf
 }
 
 func (s *handleState) bufFreeCleanup(id uint64) error {
+	if id == 0 {
+		return nil
+	}
 	s.cgoMu.RLock()
 	defer s.cgoMu.RUnlock()
 	if s.closed.Load() || s.ptr == nil {
@@ -80,6 +85,9 @@ func (s *handleState) bufFreeCleanup(id uint64) error {
 }
 
 func (s *handleState) bufFree(id uint64) error {
+	if id == 0 {
+		return nil
+	}
 	s.cgoMu.RLock()
 	defer s.cgoMu.RUnlock()
 	if s.closed.Load() || s.ptr == nil {
@@ -114,7 +122,9 @@ func (b *Buffer) Free() error {
 	if b.freed.Swap(true) {
 		return nil
 	}
-	b.cleanup.Stop()
+	if b.id > 0 {
+		b.cleanup.Stop()
+	}
 	err := b.state.bufFree(b.id)
 	// Drop our own view of the released memory so nothing here can resurrect it.
 	b.data = nil

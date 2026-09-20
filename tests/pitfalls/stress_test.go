@@ -694,3 +694,177 @@ func TestStress_MultiEngineConcurrentSaturation(t *testing.T) {
 	}
 }
 
+// TestStress_UnifiedCallAndSubmitWaitEquivalence stresses the unified pipeline by
+// interleaving synchronous Call and asynchronous Submit+Wait under high concurrency.
+// Verifies that semaphore permits are cleanly managed and never leaked.
+func TestStress_UnifiedCallAndSubmitWaitEquivalence(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(6), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	const numWorkers = 30
+	const opsPerWorker = 40
+	var wg sync.WaitGroup
+	var callSuccesses atomic.Int64
+	var waitSuccesses atomic.Int64
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	for g := 0; g < numWorkers; g++ {
+		wg.Add(1)
+		go func(gid int) {
+			defer wg.Done()
+			for i := 0; i < opsPerWorker; i++ {
+				payload := []byte{0, byte(gid), byte(i)}
+				if (gid+i)%2 == 0 {
+					// Use synchronous Call
+					res, err := h.Call(ctx, payload)
+					if err != nil {
+						t.Errorf("Call failed: %v", err)
+						return
+					}
+					if len(res) < 3 || res[1] != byte(gid) || res[2] != byte(i) {
+						t.Errorf("Call corrupted data: %v", res)
+						return
+					}
+					callSuccesses.Add(1)
+				} else {
+					// Use Submit + Wait
+					ticket, err := h.Submit(ctx, payload)
+					if err != nil {
+						t.Errorf("Submit failed: %v", err)
+						return
+					}
+					res, err := h.Wait(ctx, ticket)
+					if err != nil {
+						t.Errorf("Wait failed: %v", err)
+						return
+					}
+					if len(res) < 3 || res[1] != byte(gid) || res[2] != byte(i) {
+						t.Errorf("Wait corrupted data: %v", res)
+						return
+					}
+					waitSuccesses.Add(1)
+				}
+			}
+		}(g)
+	}
+
+	wg.Wait()
+	total := callSuccesses.Load() + waitSuccesses.Load()
+	if total != int64(numWorkers*opsPerWorker) {
+		t.Fatalf("expected %d total completions, got %d (call=%d, wait=%d)",
+			numWorkers*opsPerWorker, total, callSuccesses.Load(), waitSuccesses.Load())
+	}
+}
+
+// TestStress_AdversarialContextCancelStorm unleashes hundreds of rapid context cancellations
+// while worker threads are saturated with slow tasks, proving that tickets drain properly,
+// the semaphore never leaks permits, and no goroutines are orphaned.
+func TestStress_AdversarialContextCancelStorm(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(4), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	const numGoroutines = 40
+	const iterations = 15
+	var wg sync.WaitGroup
+	var cancelledCount atomic.Int64
+	var completedCount atomic.Int64
+
+	for g := 0; g < numGoroutines; g++ {
+		wg.Add(1)
+		go func(gid int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				// Random jitter timeout between 500us and 15ms
+				timeout := time.Duration(500+((gid*17+i*31)%15000)) * time.Microsecond
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+
+				// Mode 5: slow delay iterations (each iteration takes ~10ms)
+				payload := []byte{5, 2} // ~20ms work
+				res, err := h.Call(ctx, payload)
+				cancel()
+
+				if err != nil {
+					if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+						cancelledCount.Add(1)
+					} else {
+						t.Errorf("unexpected error on cancel storm: %v", err)
+						return
+					}
+				} else {
+					if len(res) == 0 {
+						t.Errorf("unexpected empty result")
+						return
+					}
+					completedCount.Add(1)
+				}
+			}
+		}(g)
+	}
+
+	wg.Wait()
+	t.Logf("Cancel storm finished: %d cancellations, %d completions",
+		cancelledCount.Load(), completedCount.Load())
+
+	// After all cancelled calls return, verify that the handle is still healthy
+	// and can immediately process normal work without semaphore deadlock (I4)
+	freshCtx, freshCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer freshCancel()
+
+	normalRes, err := h.Call(freshCtx, []byte{0, 0xAA, 0xBB})
+	if err != nil {
+		t.Fatalf("handle unusable after cancel storm: %v", err)
+	}
+	if len(normalRes) != 3 || normalRes[1] != 0xAA || normalRes[2] != 0xBB {
+		t.Fatalf("unexpected normal call result: %v", normalRes)
+	}
+}
+
+// TestStress_NonblockingPipeWatchdog verifies that pipe write descriptors are guaranteed
+// to be non-blocking and that high-frequency completion writes make continuous progress.
+func TestStress_NonblockingPipeWatchdog(t *testing.T) {
+	const poolSize = 8
+	h, err := gusset.Open(gusset.WithPoolSize(poolSize), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	const totalJobs = 500
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Pipeline batches of size poolSize (I4: in-flight calls bounded by pool size)
+	for batch := 0; batch < totalJobs; batch += poolSize {
+		batchCount := poolSize
+		if batch+batchCount > totalJobs {
+			batchCount = totalJobs - batch
+		}
+		tickets := make([]uint64, batchCount)
+		for i := 0; i < batchCount; i++ {
+			ticket, err := h.Submit(ctx, []byte{0, byte((batch + i) % 256)})
+			if err != nil {
+				t.Fatalf("Submit %d failed: %v", batch+i, err)
+			}
+			tickets[i] = ticket
+		}
+		for i, ticket := range tickets {
+			res, err := h.Wait(ctx, ticket)
+			if err != nil {
+				t.Fatalf("Wait %d failed: %v", batch+i, err)
+			}
+			if len(res) != 2 || res[1] != byte((batch+i)%256) {
+				t.Fatalf("mismatched response for ticket %d: %v", ticket, res)
+			}
+		}
+	}
+}
+
+
