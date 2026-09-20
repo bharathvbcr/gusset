@@ -1,0 +1,28 @@
+name: Gusset Toolchain Tip
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Weekly on Monday
+  workflow_dispatch:
+
+jobs:
+  gotip:
+    name: Go Tip Compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Rust static library
+        run: cargo build --release
+
+      - name: Set up Go Tip
+        run: |
+          git clone --depth=1 https://go.googlesource.com/go $HOME/gotip
+          cd $HOME/gotip/src && ./make.bash
+          echo "$HOME/gotip/bin" >> $GITHUB_PATH
+
+      - name: Run Tests on Go Tip
+        run: go test -v ./...

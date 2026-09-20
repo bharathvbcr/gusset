@@ -1,0 +1,7 @@
+disallowed-methods = [
+    { path = "std::ffi::CString::new", reason = "R3: Strings must cross as (ptr, len), never CString" },
+    { path = "std::option::Option::unwrap", reason = "R3: unwrap forbidden in FFI code paths" },
+    { path = "std::result::Result::unwrap", reason = "R3: unwrap forbidden in FFI code paths" },
+    { path = "std::option::Option::expect", reason = "R3: expect forbidden in FFI code paths" },
+    { path = "std::result::Result::expect", reason = "R3: expect forbidden in FFI code paths" },
+]

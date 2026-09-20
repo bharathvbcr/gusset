@@ -1,0 +1,41 @@
+name: Gusset Nightly Sanity
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  miri:
+    name: Miri Undefined Behavior Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Run Miri on pure modules
+        run: cargo miri test -p gusset --lib alloc header
+
+  sanitizer:
+    name: AddressSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Build with ASan
+        run: |
+          RUSTFLAGS="-Zsanitizer=address" cargo build --release -Zbuild-std --target x86_64-unknown-linux-gnu

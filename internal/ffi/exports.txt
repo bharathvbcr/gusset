@@ -1,0 +1,14 @@
+gusset_abi_layout
+gusset_alloc_stats
+gusset_buf_alloc
+gusset_buf_free
+gusset_cancel
+gusset_cancel_all
+gusset_drain_logs
+gusset_handle_close
+gusset_handle_open
+gusset_init
+gusset_shutdown
+gusset_status_free
+gusset_submit
+gusset_take

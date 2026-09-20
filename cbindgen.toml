@@ -1,0 +1,21 @@
+language = "C"
+include_guard = "GUSSET_H"
+cpp_compat = true
+tab_width = 4
+style = "both"
+pragma_once = true
+
+[parse]
+parse_deps = false
+clean = false
+
+[export]
+include = [
+    "CallHeader",
+    "FfiStatus",
+    "AbiLayout",
+    "AllocStats",
+]
+
+[enum]
+prefix_with_name = true

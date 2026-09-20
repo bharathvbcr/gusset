@@ -1,0 +1,16 @@
+[package]
+name = "gusset-example"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+authors = ["Bharath Chandra"]
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+gusset = { path = "../gusset" }
+libc = "0.2"
+
+[dev-dependencies]

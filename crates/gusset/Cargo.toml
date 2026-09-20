@@ -1,0 +1,23 @@
+[package]
+name = "gusset"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+description = "Go-Rust runtime contract: panic firewall, bounded concurrency, deadlines, poisoned handles, ABI verification"
+authors = ["Bharath Chandra"]
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+static_assertions = "1.1"
+libc = "0.2"
+
+[build-dependencies]
+
+[dev-dependencies]
+
+[[test]]
+name = "exports_match"
+path = "../../tests/exports_match.rs"

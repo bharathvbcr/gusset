@@ -1,0 +1,117 @@
+name: Gusset Matrix CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit:
+    name: Unit & Pitfalls (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: false
+
+      - name: Build Rust static library
+        run: cargo build --release
+
+      - name: Generate Go archive hash
+        run: go generate ./internal/ffi
+
+      - name: Run Rust tests
+        run: cargo test --workspace
+
+      - name: Run Go test suite (Panic Zoo & Pitfalls)
+        run: go test -v -timeout 10m ./...
+
+  lint:
+    name: Lint & Boundary Audits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Cargo Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Gussetvet Analyzer (R5)
+        run: go run ./tools/gussetvet
+
+      - name: Go Vet
+        run: go vet ./...
+
+      - name: Forbidden pattern audit
+        run: |
+          ! grep -rn "//go:linkname" . --exclude-dir=.git || { echo "linkname forbidden (R13)"; exit 1; }
+          ! grep -rn "asmcgocall" . --exclude-dir=.git || { echo "asmcgocall forbidden (R13)"; exit 1; }
+          ! grep -rn "C.free" internal/ ffi/ gusset.go handle.go stats.go buffer.go 2>/dev/null || { echo "C.free forbidden on Rust memory (R4)"; exit 1; }
+          ! grep -rn "GODEBUG=.*cgocheck=0" . --exclude-dir=.git || { echo "cgocheck=0 forbidden"; exit 1; }
+          ! grep -rn "GODEBUG=.*invalidptr=0" . --exclude-dir=.git || { echo "invalidptr=0 forbidden"; exit 1; }
+
+  soak:
+    name: Thread-Cap Soak
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Build Rust release
+        run: cargo build --release
+
+      - name: Run Soak Test
+        run: go test -v -run TestPitfall_ThreadCapBoundedSoak -timeout 20m ./tests/pitfalls/...
+
+  race:
+    name: Race & Aggressive GC
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Build Rust release
+        run: cargo build --release
+
+      - name: Go Race Detector
+        run: go test -race -v ./tests/pitfalls/... ./tests/panic_zoo/...
+
+      - name: Aggressive GC Test
+        run: GOGC=1 go test -v -count=5 ./tests/panic_zoo/...

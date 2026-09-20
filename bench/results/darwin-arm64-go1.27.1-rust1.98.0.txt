@@ -1,0 +1,31 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetCallNoop-18        	   72397	     22290 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallNoop-18        	   59313	     20892 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallNoop-18        	   53230	     21109 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallNoop-18        	   70039	     27040 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallNoop-18        	   55597	     21550 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallParallel-18    	  200785	      5237 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallParallel-18    	  234586	      5348 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallParallel-18    	  223866	      5105 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallParallel-18    	  235377	      5113 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallParallel-18    	  231582	      5316 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetSubmitWait-18      	   49095	     23528 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-18      	   52574	     23125 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-18      	   43465	     23671 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-18      	   54352	     23816 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-18      	   59254	     25380 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetBufferLarge-18     	   31782	     37867 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18     	   35841	     32928 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18     	   41191	     28996 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18     	   36450	     39197 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18     	   43584	     32190 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkChannelHop-18            	64886325	        18.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkChannelHop-18            	62122518	        17.24 ns/op	       0 B/op	       0 allocs/op
+BenchmarkChannelHop-18            	65629806	        18.67 ns/op	       0 B/op	       0 allocs/op
+BenchmarkChannelHop-18            	64570804	        18.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkChannelHop-18            	65740664	        19.33 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	37.712s
