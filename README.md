@@ -338,6 +338,28 @@ semaphore rather than each pinning an M. Details in
 
 ---
 
+## Contributing & Community
+
+We welcome contributions! Please review our community guidelines before submitting pull requests:
+- [Contributing Guide](CONTRIBUTING.md) — Local development workflow, linting, testing, and invariant rules.
+- [Security Policy](SECURITY.md) — Responsible disclosure process for memory safety and panic firewall vulnerabilities.
+- [Code of Conduct](CODE_OF_CONDUCT.md) — Contributor Covenant v2.1.
+- [Why Gusset is Needed](docs/why.md) — The engineering rationale behind runtime impedance mismatches.
+
+---
+
+## Acknowledgements & Prior Art
+
+Gusset's design builds upon insights, hard-won lessons, and patterns from prior Go–Rust integration work:
+- **[rust2go](https://github.com/ihciah/rust2go)**: Pioneered parameter ownership and buffer passing across the boundary; informed Gusset's rejection of manual-assembly Go callbacks and `cgocheck=0`.
+- **[uniffi-bindgen-go](https://github.com/NordSecurity/uniffi-bindgen-go)**: The primary binding generator Gusset pairs with; influenced Gusset's buffer allocation and layout conventions.
+- **[iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2)**: Inspired Gusset's Phase 4 zero-copy shared memory IPC architecture for GPU hardware crash containment.
+- **[Stoolap](https://stoolap.io/blog/2026/04/08/calling-a-rust-library-from-go-with-cgo-disabled/)**: Established benchmark discipline demonstrating that engine compute, rather than FFI trampolines, dominates real workloads.
+- **[Tokio](https://tokio.rs/)**: Influenced Gusset's cooperative flag-based cancellation model across FFI rather than dropped futures.
+- **[Hystrix / resilience4j](https://github.com/Netflix/Hystrix)**: Inspired the in-process bulkhead pattern where caught panics latch handle poisoning (`ErrPoisoned`) to prevent cascading process failures.
+
+---
+
 ## License
 
 `MIT OR Apache-2.0`
