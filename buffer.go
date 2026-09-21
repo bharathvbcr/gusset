@@ -124,7 +124,7 @@ func (s *handleState) bufFree(id uint64) error {
 // must not use a previously obtained slice after Free or Handle.Close, and should
 // keep the *Buffer reachable (runtime.KeepAlive) for as long as they use its bytes.
 func (b *Buffer) Bytes() []byte {
-	if b == nil || b.freed.Load() || b.state.closed.Load() {
+	if b == nil || b.freed.Load() || b.state == nil || b.state.closed.Load() {
 		return nil
 	}
 	return b.data
@@ -132,7 +132,7 @@ func (b *Buffer) Bytes() []byte {
 
 // ID returns the internal buffer ticket identifier.
 func (b *Buffer) ID() uint64 {
-	if b == nil {
+	if b == nil || b.state == nil {
 		return 0
 	}
 	return b.id
@@ -150,7 +150,10 @@ func (b *Buffer) Free() error {
 	if b.id > 0 {
 		b.cleanup.Stop()
 	}
-	err := b.state.bufFree(b.id)
+	var err error
+	if b.state != nil {
+		err = b.state.bufFree(b.id)
+	}
 	// Drop our own view of the released memory so nothing here can resurrect it.
 	b.data = nil
 	return err

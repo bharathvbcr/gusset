@@ -422,6 +422,9 @@ func (h *Handle) CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error) {
 	if in == nil {
 		return nil, errors.New("gusset: buffer is nil")
 	}
+	if in.state == nil {
+		return nil, errors.New("gusset: buffer is not initialized")
+	}
 	ticket, err := h.state.submit(ctx, in)
 	// Same window Submit documents: submit reads the id and nothing references
 	// the Buffer afterwards, so its cleanup becomes eligible to run while Rust
@@ -475,6 +478,9 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 		if v == nil {
 			return 0, errors.New("gusset: buffer is nil")
 		}
+		if v.state == nil {
+			return 0, errors.New("gusset: buffer is not initialized")
+		}
 		if v.freed.Load() || v.state.closed.Load() {
 			return 0, errors.New("gusset: buffer is freed or closed")
 		}
@@ -492,6 +498,13 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 	case s.sem <- struct{}{}:
 	case <-ctx.Done():
 		return 0, ctx.Err()
+	}
+
+	// In Go, select chooses pseudo-randomly when multiple channels are ready.
+	// If the context is already cancelled or expired, fail fast and release permit.
+	if err := ctx.Err(); err != nil {
+		<-s.sem
+		return 0, err
 	}
 
 	if s.closed.Load() {

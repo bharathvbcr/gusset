@@ -123,12 +123,15 @@ impl Drop for SigAltStackGuard {
 /// Reports the calling OS thread's stack size, or `None` where the platform
 /// cannot be asked.
 ///
-/// I5/R8 claim a worker runs on an explicit 8 MiB stack rather than the pthread
-/// default, which is 128 KiB on musl. On glibc and darwin the default is already
-/// 8 MiB, so a deep-recursion probe there passes whether or not Gusset set the
-/// size — it proves the platform, not the runtime. Reading the size back off the
-/// thread distinguishes the two on every platform, which is what makes R8
-/// testable without a musl host.
+/// I5/R8 claim a worker runs on an explicit 8 MiB stack rather than whatever it
+/// would otherwise inherit. A `thread::Builder` without `stack_size` gets Rust's
+/// std default of 2 MiB (overridable by `RUST_MIN_STACK`), not the platform's
+/// pthread default — which is 128 KiB on musl, 512 KiB for secondary threads on
+/// darwin, and on glibc whatever `RLIMIT_STACK` says (commonly 8 MiB, but 2 MiB
+/// on most architectures when that limit is unlimited). A deep-recursion probe
+/// that fits in 2 MiB therefore passes whether or not Gusset set the size.
+/// Reading the size back off the thread distinguishes the two on every platform,
+/// which is what makes R8 testable without a musl host.
 pub fn current_thread_stack_size() -> Option<usize> {
     #[cfg(target_vendor = "apple")]
     unsafe {

@@ -358,12 +358,13 @@ pub fn diagnostic_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, St
         }
         // Mode 8: report the executing worker's real stack size (I5/R8).
         //
-        // Mode 6 recurses to prove the stack is deep enough, but on glibc and
-        // darwin the pthread default is already 8 MiB, so it passes there whether
-        // or not Gusset set the size — it proves the platform. Reading the size
-        // back from the thread that actually ran the job is what distinguishes
-        // "Gusset sized this stack" from "the platform happened to agree", which
-        // is the claim a musl host would otherwise be needed to test.
+        // Mode 6 recurses to prove the stack is deep enough, but a worker Gusset
+        // did not size explicitly would still get Rust's own std default of 2 MiB
+        // (see RUST_MIN_STACK) rather than the platform's pthread default, so any
+        // recursion that fits in 2 MiB passes whether or not Gusset set the size.
+        // Reading the size back from the thread that actually ran the job is what
+        // distinguishes "Gusset sized this stack" from "the default happened to be
+        // enough", which is the claim a musl host would otherwise be needed to test.
         8 => Ok(sys::current_thread_stack_size()
             .unwrap_or(0)
             .to_le_bytes()
@@ -447,6 +448,26 @@ pub fn diagnostic_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, St
             }
             Ok(std::hint::black_box(acc).to_le_bytes().to_vec())
         }
+        // Mode 12: Megabyte string panic to test payload truncation (R3 hardening)
+        12 => {
+            panic!("{}", "A".repeat(1024 * 1024));
+        }
+        // Mode 13: Various non-string primitive panics
+        13 => match input.get(1).copied().unwrap_or(0) {
+            0 => std::panic::panic_any(12345u32),
+            1 => std::panic::panic_any(-9876543210i64),
+            2 => std::panic::panic_any(true),
+            3 => std::panic::panic_any(999999usize),
+            _ => std::panic::panic_any(-42isize),
+        },
+        // Mode 14: Log burst from worker thread to test log ring concurrency
+        14 => {
+            let count = input.get(1).copied().unwrap_or(10) as usize;
+            for i in 0..count {
+                crate::ffi::log_event(&format!("worker log event {}", i));
+            }
+            Ok(vec![14, count as u8])
+        }
         // Default: echo
         _ => Ok(input.to_vec()),
     }
@@ -463,6 +484,7 @@ pub struct Handle {
     /// descriptor the caller is still responsible for, and no descriptor is closed
     /// twice — which would otherwise shut an unrelated file that reused the number.
     pipe_write_fd: AtomicI32,
+    pipe_write_lock: Mutex<()>,
     poisoned: AtomicBool,
     closed: AtomicBool,
     sender: Mutex<Option<SyncSender<WorkUnit>>>,
@@ -539,6 +561,7 @@ impl Handle {
             pool_size,
             // Not owned yet: published below, only once the pool is fully up.
             pipe_write_fd: AtomicI32::new(-1),
+            pipe_write_lock: Mutex::new(()),
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             sender: Mutex::new(Some(sender)),
@@ -746,6 +769,7 @@ impl Handle {
                             lock_recover(&h.cancel_flags).remove(&unit.ticket);
 
                             let fd = h.pipe_write_fd.load(Ordering::Acquire);
+                            let _write_guard = lock_recover(&h.pipe_write_lock);
                             if let Err(e) = sys::write_ticket(fd, unit.ticket) {
                                 // The waiting Go caller will never be woken for this
                                 // ticket, so say so rather than dropping it in silence.
@@ -838,14 +862,19 @@ impl Handle {
             input_buffer_id: buffer_id,
         };
 
-        // The sender lock is held across the flag insert and the send so close
-        // cannot take the sender between those two steps. A flag inserted while
-        // the sender is already gone is a leak: no worker will ever clear it,
-        // and gusset_shutdown waits on in_flight which is the flag count.
-        let sender_guard = lock_recover(&self.sender);
-        let sender = match sender_guard.as_ref() {
-            Some(s) => s,
-            None => return Err("handle is closed".to_string()),
+        // The sender is cloned under its lock, and the cancel flag is inserted
+        // before the lock drops, so close cannot take the sender between flag
+        // insertion and the send. However the lock is *released* before the send
+        // itself: SyncSender::send on a bounded channel can block when the channel
+        // is full (the Go semaphore prevents this in correct operation, but a
+        // blocked send with the lock held would prevent close() from ever taking
+        // the sender, making the handle unrecoverable).
+        let sender = {
+            let guard = lock_recover(&self.sender);
+            match guard.as_ref() {
+                Some(s) => s.clone(),
+                None => return Err("handle is closed".to_string()),
+            }
         };
         lock_recover(&self.cancel_flags).insert(ticket, Arc::clone(&cancel_flag));
         if let Err(e) = sender.send(unit) {
@@ -897,11 +926,14 @@ impl Handle {
         if self.poisoned.load(Ordering::Acquire) {
             return Err("handle is poisoned".to_string());
         }
+        if self.closed.load(Ordering::Acquire) {
+            return Err("handle is closed".to_string());
+        }
         let buf = RawBuffer::allocate(len)?;
         let ptr = buf.as_mut_ptr();
 
         let id = self.next_buffer_id.fetch_add(1, Ordering::Relaxed);
-        if id >= (1 << 63) {
+        if id == 0 || id >= (1 << 63) {
             return Err("buffer id overflowed reserved 63-bit range".to_string());
         }
         let mut map = lock_recover(&self.buffers);
@@ -920,7 +952,7 @@ impl Handle {
         }
         let buf = RawBuffer::from_bytes(data)?;
         let id = self.next_buffer_id.fetch_add(1, Ordering::Relaxed);
-        if id >= (1 << 63) {
+        if id == 0 || id >= (1 << 63) {
             return Err("buffer id overflowed reserved 63-bit range".to_string());
         }
         lock_recover(&self.buffers).insert(id, Arc::new(buf));

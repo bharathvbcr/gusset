@@ -1,0 +1,312 @@
+THE ARTICLE
+===========
+
+The Seam Nobody Owns: Why I Built Gusset
+
+2026-09-21 · Bharath Chandra
+
+The demo worked. That was the problem.
+
+A binding between Go and Rust takes about twenty minutes to write.
+
+You mark a Rust function extern "C", point cgo at the archive, call it from Go. It compiles. It returns the right answer. You loop it ten thousand times and it never flinches. Every tutorial ends there, and for about a day, so did mine.
+
+Then I put it behind an HTTP handler and pointed real concurrency at it.
+
+What I found was not one bug with six symptoms. It was six unrelated failures, each with its own root cause, each living in a part of the system that neither language believes it owns. Go's runtime has opinions about threads and memory. Rust's runtime has opinions about stacks and panics. Nothing arbitrates between them.
+
+That gap — between "the binding works" and "this survives production" — is what I built Gusset (https://github.com/bharathvbcr/gusset) to close. This is the story of why it had to exist, and what it taught me about where engineering still lives in a year when most of the code writes itself.
+
+Where Python ran out
+
+I am not here to tell you Python is dead. I still train models in it. Most of my research life ran through PyTorch, and it was the right tool every single time.
+
+But Python has a specific ceiling, and it is not the one people argue about on the internet.
+
+The ceiling is not raw speed. It is that Python is a coordinator pretending to be a system. Every serious Python workload is really a thin orchestration layer over C, CUDA or Rust underneath — and the moment your problem falls outside what the underlying kernels already do, you fall off a cliff.
+
+I hit that cliff building sparse compute on Apple Silicon. PyTorch's MPS backend has picked up sparse COO matmul since I started, but the compressed layouts — CSR, CSC, BSR, BSC — still are not there; the PR enabling them (https://github.com/pytorch/pytorch/pull/196205) was open as of this month. Unstructured graphs thrash CPU cache past about twenty thousand nodes. Every cross-framework handoff costs a host copy. There was no Python-level fix, because the problem was the layer below Python, and Python does not let you go there.
+
+So I went there. I wrote the kernels myself, in Rust and Metal. And once you have gone down one level, you notice something uncomfortable: you can't go back up.
+
+A Python process cannot hold the guarantees I now needed — deterministic memory, bounded threads, no GIL bottleneck across a real worker pool, predictable latency under concurrent load. Not because Python is bad. Because Python's whole design decision is to trade those guarantees for the speed at which you can write the first version.
+
+Why Rust became the default, and why AI is the reason it could
+
+Here is the part I did not expect.
+
+The old argument against Rust was always ergonomic. The borrow checker is a tax. You fight the compiler for a week to get something you'd have written in Python over lunch. That was a real cost, and for years it was decisive.
+
+AI-assisted development inverted that argument completely.
+
+When a model writes the first draft, the cost of Rust's strictness collapses — and the value of it goes up. Think about what actually goes wrong when you generate code at speed. You get plausible code. Code that looks right, reads right, passes a skim, and holds a subtle lifetime bug, a race, an aliasing mistake, a null that arrives at 3am six weeks later.
+
+Python will happily run all of that. Rust will not compile it.
+
+That is the whole trade. In an AI-native workflow, the compiler stops being a tax and becomes the reviewer that never gets tired, never gets bored on the fourth file, and cannot be talked into "looks fine to me." Generation got cheap. Verification became the bottleneck. Rust is the language that gives you the most verification for free.
+
+So my main loop moved. New engines get written in Rust by default now, not because I enjoy lifetimes, but because it is the only setup where I can accept code I did not hand-write and still sleep.
+
+The apps that forced the question
+
+I did not set out to write an FFI library. I set out to ship products, and kept arriving at the same wall from different directions.
+
+ScholarLM is an academic research assistant — retrieval, synthesis, citation handling. DevCouncil (https://github.com/bharathvbcr/DevCouncil) and DevMap are code intelligence: AST parsing, call graphs, blast-radius analysis across a repository. Both ScholarLM and DevCouncil already run Rust and Go components side by side, and DevCouncil's legacy Python orchestration has been retired entirely. Manvi (https://github.com/bharathvbcr/Manvi) is my agent harness for running local models. tessl and sparsl are not products but libraries — the dense and sparse compute engines I wrote in Rust and Metal when PyTorch could not reach the hardware the way I needed.
+
+Every one of them has the same shape. Something compute-dense and correctness-critical at the core. Something that has to talk to the network, the filesystem, an SDK, a tool protocol, a user, around the edge.
+
+[IMAGE 4 — 04-architecture.png]
+
+That middle box is the part I could not buy. Everything above it and below it already existed, in my own repositories, working. The joint between them was the thing that kept breaking, and it kept breaking the same six ways in every project.
+
+Build the same scaffolding three times and it stops being scaffolding. It is infrastructure, and it deserves to be a library.
+
+"We ported it to Rust and it got more robust" — carefully
+
+DevCouncil and DevMap started as Python orchestration and are now native Rust and Go binaries, with the legacy Python retired. They got measurably harder to break in the process. Whole categories of failure I used to chase stopped occurring.
+
+They also got fast, and that is the half Python was never going to give me. Robustness you can sometimes discipline your way to. A speed floor you cannot.
+
+So I measured it. DevMap against five other code-graph tools, four repositories, one machine, raw output committed beside the report. On a 1,098-file corpus DevMap cold-indexes in 2.0 seconds against 3.3 for the next tool, and answers a definition lookup in 9.7 ms against 101. CodeGraph still re-indexes a single edited file faster than DevMap on every corpus — the one stage where a competitor is consistently ahead.
+
+The full breakdown — six tools, four corpora, every caveat, and the failures I kept in — is in the benchmark report (https://github.com/bharathvbcr/DevCouncil/blob/main/benchmarks/results/competition/20260914-v0.2.2/REPORT.md), and deserves a post of its own rather than a detour in this one.
+
+I want to be careful about what that proves, because the honest version of this claim is narrower than the version people post.
+
+The strongest public dataset is Google's. Memory-safety issues were 76% of Android vulnerabilities in 2019 and 24% in 2024 (https://security.googleblog.com/2024/09/eliminating-memory-safety-vulnerabilities-Android.html), and fell below 20% in 2025 (https://blog.google/security/rust-in-android-move-fast-fix-things/) across roughly five million lines of Rust. Google also reports Rust changes rolling back about four times less often than C++ for medium and large changes, and taking around 25% less review time.
+
+Here is the part that gets left out. Google's conclusion, in that same 2024 write-up, is explicitly not "rewrite your C++":
+
+"We do not need to throw away or rewrite all our existing memory-unsafe code."
+
+Their finding is that safety comes from writing new code in a safe language while old code ages out. Citing Android as proof that porting works is citing it against itself.
+
+And two counter-examples land directly on my own thesis.
+
+Microsoft ported the TypeScript compiler to Go, explicitly considering and rejecting Rust (https://github.com/microsoft/typescript-go/discussions/411), on the grounds that the work is dominated by traversing trees and graphs and that Go handled that ergonomically without the whole codebase having to think about memory management. That is precisely DevMap's workload. A serious team looked at my exact problem and chose the other language.
+
+Prisma went further and removed Rust from their ORM (https://www.prisma.io/blog/rust-to-typescript-update-boosting-prisma-orm-performance), reporting one large read going from 185 ms to 55 ms — 3.4x faster afterwards. Not because TypeScript is fast, but because deleting the FFI boundary was worth more than the Rust engine behind it.
+
+I take that last one seriously, because it is an argument against the thing I built. It is also the argument my own benchmarks answer: if your per-call work is small, the boundary costs more than the engine saves, and you should not cross it. That is a real threshold, and it has a number, which is further down this page.
+
+So the defensible claim is this. New systems-level code written in Rust shows large, published reductions in memory-safety defects and change-rollback rates. Evidence that porting existing code improves robustness is thinner, frequently confounded with the general benefits of rewriting, and in documented cases the port was reversed. My own experience is a data point, not a proof, and I would rather say that than overclaim on the strength of it.
+
+And then Go, which is not a preference
+
+If the story ended at "write everything in Rust," there would be no library and no article.
+
+It doesn't end there, because Go is a gravity well.
+
+Not because Go is a better language — that is not the claim. Because of where Go already is. Kubernetes is Go. Docker is Go. Terraform, Prometheus, etcd, most of the control plane you will ever deploy into is Go. When a vendor ships an SDK, Go is in the first tier. When you need a service that a team can read, deploy and operate without ceremony, Go is the path of least organizational resistance.
+
+And the agent tooling is following the same pattern. Google's Agent Development Kit ships for Python, Java, Go (https://developers.googleblog.com/announcing-the-agent-development-kit-for-go-build-powerful-ai-agents-with-your-favorite-languages/), TypeScript and, as of this month, Kotlin (https://developers.googleblog.com/announcing-adk-for-kotlin-10-building-production-ready-ai-agents-in-kotlin-android-and-beyond/) — five languages, at what Google calls core parity. There is no official Rust ADK. There is a capable community port, and it says plainly on the tin that it is not affiliated with Google.
+
+So the shape of the next few years is already visible, and it is not "Rust wins" or "Go wins."
+
+It is: the engine is Rust, the service around it is Go. The compute-dense, correctness-critical, performance-sensitive core in Rust. The control plane, the SDK surface, the agent runtime, the thing that talks to your platform, in Go.
+
+Which means the interesting problem is not either language. It is the seam between them.
+
+The trade nobody warns you about
+
+When you leave Python for deployment reasons, Go is the obvious next stop. It is enormously faster for code written in the language itself — on the Benchmarks Game, roughly 10–50x over CPython on CPU-bound work — and it deploys as a single binary into an ecosystem that already speaks Go.
+
+Then you discover what you gave up, and it is the opposite of what you expected.
+
+Python has far better native interop than Go. That sentence looks wrong and is not. Python's C-API is a de facto standard, reimplemented by PyPy and GraalPy. It has a stable ABI, abi3, so one compiled wheel loads across minor versions — with abi3t (https://peps.python.org/pep-0803/) arriving in 3.15 to cover free-threaded builds. And PyO3 (https://github.com/PyO3/pyo3) plus maturin have made Rust-backed Python modules routine: Polars, pydantic-core, tokenizers, cryptography and orjson all ship this way, to millions of users, boringly.
+
+Go has cgo. That is the whole list.
+
+And cgo's costs are documented by its own maintainers, not by its critics. Strict pointer-pinning rules enforced by cgocheck. A blocking call that occupies an OS thread — Dave Cheney's line, quoted approvingly in Cockroach Labs' write-up (https://www.cockroachlabs.com/blog/the-cost-and-complexity-of-cgo/), is that excessive cgo usage breaks Go's promise of lightweight concurrency. A required C toolchain, so cross-compilation needs a workaround like zig cc. Degraded race detection, profiling and coverage across the boundary. Dave Cheney titled a post "cgo is not Go" (https://dave.cheney.net/2016/01/18/cgo-is-not-go) in 2016 and nobody has had to update it.
+
+In fairness: Go 1.26 cut cgo's baseline call overhead by about 30% (https://go.dev/doc/go1.26), and a proposal to build cgo packages without a C toolchain (https://github.com/golang/go/issues/81450) is under active review. The floor is rising. But as of Go 1.27, no new FFI mechanism has shipped, and none is scheduled.
+
+So the path away from Python has a toll booth on it. You move to Go for speed, deployment and ecosystem, and you arrive holding a worse set of tools for the exact thing you now need most — because the reason you left Python was to get closer to native code, and Go is further from native code than Python was.
+
+That is the gap Gusset lives in. Python solved this with twenty years of C-API evolution and a generation of binding tools. Go has a footnote in the documentation and a warning from Dave Cheney.
+
+Who already runs both
+
+The Rust-engine-plus-Go-service pattern is not mine. It is most of the modern infrastructure layer.
+
+[IMAGE 5 — 05-who-runs-both.png]
+
+Now look at the right-hand column, because it is the most interesting thing I found while checking my own premise.
+
+Almost nobody does this in-process. Of the production pairings I could verify, the overwhelming majority keep Rust and Go in separate processes talking over gRPC or a socket. TiDB and TiKV — the canonical Rust-engine-behind-a-Go-service — share a protobuf repository, not a header file. PingCAP's own write-up on choosing Rust lists cgo overhead as a drawback of Go.
+
+The two clearest in-process cases both come with an asterisk. InfluxData's libflux was genuine cgo, and it died with the InfluxDB 3 rewrite. Dropbox's Brotli bindings are live, real cgo, and a compression codec is about the most forgiving possible payload for one.
+
+And where in-process Rust is winning inside Go right now, the vehicle is usually WebAssembly rather than FFI. Arcjet (https://blog.arcjet.com/calling-rust-ffi-libraries-from-go/) tried a Rust C library, rejected cgo explicitly because they wanted CGO_ENABLED=0 and distroless images, and ended up running Rust as Wasm through wazero. 1Password's Go SDK does the same. Datadog is the sharpest case of all: their Go agent already uses cgo to embed CPython, so that team demonstrably knows how to pay the toll — and when they built a Rust data plane, they still chose a separate process.
+
+I could tell you that proves the gap is real. The more honest reading is that it is evidence about the cost. When serious teams with the budget to do in-process FFI keep choosing a network hop or a Wasm sandbox, the boundary is expensive enough that avoiding it is usually correct.
+
+So take the hop if you can afford it. A Unix socket costs a few hundred microseconds and buys you a genuine fault domain, which is more than Gusset can offer. Gusset is for the case where you cannot — where the call is too frequent, the payload too large to copy, or the latency budget too tight for a round trip — and you are going to cross the boundary in-process whether or not anyone has made it safe.
+
+That case is real, and it is currently served by a footnote in the cgo documentation.
+
+The one line that lies to you
+
+    result := C.my_rust_engine_process(ptr, len)
+
+That line is the entire promise of FFI, and on a laptop it keeps it.
+
+The tooling around it is genuinely good. cgo, cbindgen and uniffi solve type marshalling and calling conventions, and they solve them well. That is the job they took, and they did not overpromise — read their docs and none of them claim to own what happens next.
+
+Here is what they do not own, and what nobody owns.
+
+Go and Rust are not libraries. They are runtimes. Each one ships its own scheduler, its own memory model, its own stack strategy, its own signal handlers, its own failure semantics. When you link them into a single process, you have not composed two libraries. You have put two operating-system-shaped things in one address space and asked them to agree about threads, stacks, clocks, heaps and death.
+
+They do not agree. The binding does not make them agree. The binding is a doorway between two buildings whose floors are at different heights.
+
+Everything below is what falls through the gap.
+
+Six ways a working binding kills your process
+
+1. The panic that kills you twice. Since Rust 1.81, a panic escaping an extern "C" boundary aborts the process outright. Everyone knows to wrap the call in catch_unwind. Almost nobody survives what comes next: the caught panic message has to become a C string, and the obvious way to do that is CString::new(msg).unwrap(). Feed it a panic payload containing a NUL byte — raw bytes, a malformed slice, anything binary — and CString::new returns an error, .unwrap() panics a second time, and a panic during unwinding is SIGABRT. Your Go backend is gone. The firewall you installed is the thing that killed you.
+
+2. The thread storm. To Go's scheduler, a cgo call is a blocking syscall. If it runs long enough for sysmon to notice — at least 20 microseconds, and up to 10 milliseconds when there is nothing else queued — the logical processor is handed off and another OS thread services the remaining goroutines. A burst of concurrent requests, each parked inside Rust, means your thread count tracks your concurrency rather than your cores. Go's default limit is 10,000 threads, and past it the runtime does not degrade: it prints runtime: program exceeds 10000-thread limit and dies with fatal error: thread exhaustion. You can raise that limit with debug.SetMaxThreads. You cannot make the threads free.
+
+3. The 128 KiB trap. A goroutine's stack starts at 2 KiB and grows on demand. A cgo call abandons that and runs on the host thread's stack, whose size the C library decides. On glibc that is usually 8 MiB — inherited from ulimit -s, not a constant. On macOS, secondary threads get 512 KiB. On musl — Alpine, which is what a great deal of containerized Go ships on — it is 128 KiB. Any real parser, AST walk, regex compile or recursive descent burns through that in microseconds. And because a Rust static library never runs std::rt::init, Rust's stack-overflow handler is not installed — not for the calling thread, and not for threads the library spawns itself. You get SIGSEGV, in production, with no Go recovery possible and nothing useful in the logs.
+
+4. The deadline that isn't one. context.WithTimeout is the spine of every Go service. It is also completely inert across FFI. A goroutine inside foreign code cannot be preempted or cancelled. Your client gave up after 500 ms; your process keeps burning CPU on that request for thirty seconds. Worse, you cannot even pass a deadline across: Go's monotonic clock is a process-internal offset, macOS uses mach_absolute_time, Linux uses CLOCK_MONOTONIC, and Rust's Instant is none of those. Compare them and you get garbage.
+
+5. Two heaps, one limit. GOMEMLIMIT exists so the GC collects before the container OOM-killer fires. Go's GC cannot see a single byte Rust allocated. Go holds 1 GiB, believes it has room, and stays idle while Rust takes 2.8 GiB and the cgroup issues SIGKILL. The process dies of memory exhaustion while the garbage collector is relaxed.
+
+6. The corpse that keeps taking traffic. Say you survive a panic. The Rust engine panicked halfway through mutating a tree, a buffer, an index. Its invariants are broken and its mutexes are poisoned. Your Go service catches the error, returns a 500, and sends the next request to the same instance. Now you are serving corrupted results, or deadlocking, and the incident has no obvious first cause.
+
+None of these is exotic. Every one of them is the default behaviour of code that worked perfectly the day you wrote it.
+
+What I built instead
+
+A gusset is the plate you weld into a joint that two beams already meet at. It adds nothing new to the structure. It stops the joint from tearing.
+
+So: Gusset (https://github.com/bharathvbcr/gusset) is a runtime contract between Go and Rust. It is deliberately not a binding generator, not a cgo-free calling trick, and not an IPC transport. Bring your own bindings; it sits underneath them.
+
+Six invariants, one for each way the process died.
+
+1. Panic firewall. No Rust panic crosses the boundary. Messages move as raw pointer + length with no NUL-termination anywhere, and Display formatting gets its own nested catch_unwind. Verified by a five-case panic zoo — including the embedded-NUL payload that aborts the naive implementation.
+2. Bounded concurrency. Callers take a permit from a Go channel semaphore, submit without blocking, and then park on the netpoller waiting for an 8-byte ticket down a pipe. Zero OS threads consumed while waiting. Your thread count tracks the pool you configured, not your traffic.
+3. Rust-owned stacks. Heavy work never touches the caller's thread stack. Workers are spawned with an explicit 8 MiB stack and their own 64 KiB sigaltstack. The musl trap stops being a trap.
+4. Deadlines that cross. Clocks don't travel, so Gusset doesn't send one. It computes a relative timeout_ns at submit time; Rust builds its own Instant from that. Cancellation is a per-job atomic flag in Rust memory, flipped by a sub-microsecond call.
+5. One memory budget. A counting allocator wrapper reports live and peak Rust bytes, and AdviseMemoryLimit feeds that back into Go's SetMemoryLimit, so the GC collects against the real total before the cgroup does something less polite.
+6. Bulkhead. A panic latches the handle permanently poisoned. Every subsequent call fails fast with ErrPoisoned without re-entering native code. The corpse stops taking traffic.
+
+Fourteen C exports, four #[repr(C)] types, and an ABI check at init() that verifies version, sizes and alignments before the process serves a single request — because a silently drifted header is heap corruption you find out about much later.
+
+What it is actually for
+
+The shape that fits is: a Go service, a Rust engine doing real work per call, and traffic.
+
+• Code intelligence in a service. AST parsing, call-graph construction, glob and path matching, blast-radius queries. Tree traversal is recursive and deep, which is the musl stack trap, and a malformed file is a panic waiting to happen. This is DevMap's workload and the first thing I ran through Gusset.
+• Search and retrieval. Vector index probes, BM25 scoring, reranking, tokenization. Hundreds of microseconds to milliseconds per call, high concurrency — squarely in the band where the coordination cost disappears and the thread ceiling is the real risk.
+• Inference and numeric kernels. Running tessl or sparsl behind a Go API. The Rust heap is large and invisible to Go's GC, which is exactly the two-heaps problem; allocator accounting is not a nicety here.
+• Anything parsing untrusted input. Compression, media transforms, cryptographic verification, document extraction. The input is adversarial by definition, so the panic firewall is the whole point.
+• Agent and tool runtimes. A Go control loop calling Rust tools per step, where one bad tool call must not end the process.
+
+On that last point, the best argument for a panic firewall is not mine.
+
+On 18 November 2025, Cloudflare had a roughly six-hour global outage (https://blog.cloudflare.com/18-november-2025-outage/). A duplicated database row pushed a configuration file past a preallocated limit, and the Rust proxy did what Rust does with an unexpected value:
+
+    thread fl2_worker_thread panicked: called Result::unwrap() on an Err value
+
+Nothing was memory-unsafe. Rust behaved exactly as designed — it refused to continue on a value it did not expect. The safe behaviour was a large part of the internet returning 5xx for six hours.
+
+That is the lesson I would most like people to take from all of this. Memory safety is not availability. A language that converts corruption into a crash has moved your problem, not solved it, and if that crash happens inside someone else's runtime it takes their process with it. Somebody has to decide what a panic means at the boundary — whether it kills the process, poisons one handle, or returns a 500 — and neither language will decide it for you.
+
+That decision is what a runtime contract is.
+
+The honest number, including the one that looks bad
+
+Gusset does not make your calls faster. On a single call it cannot beat raw cgo, by construction — it does everything cgo does, plus a semaphore, a submit, a worker hop, a pipe write and a netpoller wake.
+
+What it changes is the shape of the cost. Blocking cgo is cheap per call and unbounded in aggregate. Gusset is a few microseconds per call and flat in aggregate.
+
+So the question is never "is it faster." It is whether your per-call work is big enough to absorb the coordination.
+
+[IMAGE 2 — 02-crossover-cost-per-call.png]
+
+On a no-op the ratio is 828×, and I publish that first on purpose. It is also the workload nobody has. By the time a call does a few hundred microseconds of actual work — a tokenizer pass, a regex scan, an index probe, an image transform — the two curves have converged and the coordination has vanished into the noise.
+
+Now the measurement the whole design rests on. Same machine, same work, varying only how many calls are in flight:
+
+[IMAGE 1 — 01-threads-vs-concurrency.png]
+
+[IMAGE 3 — 03-peak-memory.png]
+
+Across that same sweep, reserved virtual address space grew by 14.2 GiB for blocking cgo and 643 MiB for Gusset — 226 extra OS threads against 10, at 64 MiB of reserved stack each. Reserved address space is not resident memory, which is why the second chart is the one to read.
+
+All figures: Apple M5 Pro, 18 cores, darwin/arm64, Go 1.27.1, Rust 1.98.0. Generated from committed benchmark output — CI fails if a published number drifts from the data behind it, which is a rule I added after catching my own README quoting figures three recordings out of date.
+
+When not to use it: if your Rust calls are under ~10 µs of work, the overhead is the workload — use raw cgo or just write it in Go. If you need a real fault domain, because the engine touches a GPU driver or an unaudited C dependency, Gusset is the wrong shape and a Wasm sandbox is the honest answer — at a compute cost that one 2026 cryptography benchmark puts between roughly 1.5× and 4.7× native, depending on the runtime and which features you enable. Benchmark your own workload; that spread is too wide to borrow. Gusset keeps native speed and gives up in-process fault isolation. That is a trade, not a win.
+
+What this taught me about building software now
+
+I want to end on the thing that surprised me most.
+
+AI wrote a great deal of Gusset. It was fast, it was good, and on the parts that live inside one language it was close to unimprovable. That is the state of the art and it is genuinely remarkable.
+
+And it could not have found the bug in its own panic firewall.
+
+Not because the model isn't capable. Because that bug — CString::new(msg).unwrap() turning your safety net into a SIGABRT — does not live in Go and does not live in Rust. It lives in the sentence "Rust 1.81 aborts on unwinding across extern "C"" meeting the sentence "a panic inside a panic is fatal" meeting the sentence "panic payloads can contain arbitrary bytes." Three true facts from three different documents, and the failure exists only where they touch.
+
+That is what I think the job is becoming.
+
+Generation is solved enough. What is not solved is knowing which three facts collide, which layer owns a failure nobody claimed, and what a benchmark is quietly lying to you about. Every one of the six collisions in this article is invisible from inside either language's documentation. You only see them from the seam.
+
+So my advice to anyone watching AI write their code faster than they can read it: go find the seams. Between runtimes, between services, between the model's output and the machine it actually runs on. That is where the work went. It did not disappear — it moved.
+
+—
+
+Gusset is open source, MIT OR Apache-2.0, at github.com/bharathvbcr/gusset (https://github.com/bharathvbcr/gusset). It was validated against a second codebase — an engine written for neither project — running 12,800 calls from 64 concurrent goroutines on 8–10 OS threads.
+
+If you are running Rust inside a Go service, I would like to hear how it breaks for you. That is the whole point of publishing it.
+
+
+THE LINKEDIN POST
+=================
+
+The binding between Go and Rust took me twenty minutes.
+
+Making it survive production took the next several weeks.
+
+I build ScholarLM, DevCouncil and Manvi. DevCouncil started as Python orchestration and is now native Rust and Go binaries — the Python is retired. It got harder to break, and it got fast: 9.7 ms symbol lookups against 101 ms for the next-fastest tool I measured. That second half is the part Python was never going to give me.
+
+Rust at the core. Go at the edge. Kubernetes is Go, cloud control planes are Go, and Google's ADK ships for Python, Java, Go, TypeScript and now Kotlin — there is no official Rust ADK.
+
+Then you find the toll booth.
+
+You leave Python for speed and deployment. Go gives you both. But Python has better native interop than Go, and it isn't close — a de facto standard C-API, a stable ABI, PyO3 behind Polars, pydantic-core and cryptography. Go has cgo. That's the list.
+
+So you move toward native code and arrive holding worse tools for the thing you now need most.
+
+What that costs: a Rust panic hitting a NUL byte aborts your process — the safety net kills you. Concurrent requests each park an OS thread inside Rust until Go dies with "fatal error: thread exhaustion". musl's 128 KiB stack meets a recursive parser in an Alpine container.
+
+I measured the middle one. Raw cgo at 2,048 in-flight calls: 255 OS threads. Same work through a bounded pool: 21.
+
+So I built Gusset — a runtime contract for running Rust engines inside Go services.
+
+Open source, MIT/Apache-2.0 → github.com/bharathvbcr/gusset
+
+Cloudflare lost six hours last November to a Rust .unwrap(). Memory safety is not availability. Somebody has to decide what a panic means at the boundary.
+
+#Rust #Golang #SystemsProgramming #OpenSource
+
+[Post image: 01-threads-vs-concurrency.png]
+
+
+IMAGE PLACEMENT IN THE ARTICLE
+==============================
+Images live in docs/img/linkedin/ and are also in this chat.
+  IMAGE 1  01-threads-vs-concurrency.png   → "The honest number" section
+  IMAGE 2  02-crossover-cost-per-call.png  → "The honest number" section
+  IMAGE 3  03-peak-memory.png              → "The honest number" section
+  IMAGE 4  04-architecture.png             → "The apps that forced the question"
+  IMAGE 5  05-who-runs-both.png            → "Who already runs both"
+  IMAGE 6  06-devmap-benchmarks.png        → hold for the DevCouncil post
+
+Formatting notes for the LinkedIn article editor:
+  - Bold and italic were stripped; apply them with the toolbar where you want them.
+  - Section titles are on their own line — set each to Heading 2.
+  - Link URLs are in parentheses after the link text; convert to hyperlinks and delete the parenthetical.
+  - The one code line and the panic string are indented four spaces; LinkedIn has no code block, so either leave them as plain lines or italicise them.

@@ -26,12 +26,14 @@ completion path works there.
 
 I5 and R8 say heavy Rust work runs on Rust-spawned threads with an explicit 8 MiB
 stack, never on the caller's g0 stack. musl's default thread stack is 128 KiB,
-against 8 MiB on glibc and darwin.
+against 512 KiB for secondary threads on darwin and, on glibc, whatever
+`RLIMIT_STACK` says — commonly 8 MiB. A Rust thread spawned without an explicit
+`stack_size` gets Rust's own std default of 2 MiB regardless of platform.
 
 ```mermaid
 flowchart LR
     subgraph DangerZone ["The 128 KiB Hazard"]
-        MuslDefault["musl Default Stack: 128 KiB\n(vs glibc & darwin: 8 MiB)"]
+        MuslDefault["musl Default Stack: 128 KiB\n(darwin 512 KiB; glibc per RLIMIT_STACK)"]
         Recursion["Deep Recursion / Native Frames"]
         Crash["Process SIGSEGV\n(musl pthread default exhausted)"]
         MuslDefault --> Recursion --> Crash

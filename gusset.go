@@ -197,7 +197,13 @@ func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) 
 		Reserved: defaultOpcode,
 	}
 
-	if deadline, ok := ctx.Deadline(); ok {
+	if ctx == nil {
+		return header
+	}
+
+	if err := ctx.Err(); err != nil {
+		header.TimeoutNS = 1 // Already expired or cancelled
+	} else if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining > 0 {
 			header.TimeoutNS = uint64(remaining.Nanoseconds())
@@ -206,13 +212,22 @@ func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) 
 		}
 	}
 
-	if sc, ok := ctx.Value(SpanContextKey).(TraceCarrier); ok {
+	if sc, ok := ctx.Value(SpanContextKey).(TraceCarrier); ok && sc != nil {
 		header.TraceID = sc.TraceID()
 		header.SpanID = sc.SpanID()
 	}
 
-	if op, ok := ctx.Value(OpcodeContextKey).(uint32); ok {
-		header.Reserved = op
+	if opVal := ctx.Value(OpcodeContextKey); opVal != nil {
+		switch v := opVal.(type) {
+		case uint32:
+			header.Reserved = v
+		case int:
+			if v >= 0 {
+				header.Reserved = uint32(v)
+			}
+		case uint:
+			header.Reserved = uint32(v)
+		}
 	}
 
 	return header

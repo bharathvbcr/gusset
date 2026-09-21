@@ -93,7 +93,9 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         let size = layout.size();
         let ptr = unsafe { self.inner.alloc(layout) };
         if !ptr.is_null() {
-            let live = LIVE_BYTES.fetch_add(size, Ordering::Relaxed) + size;
+            let live = LIVE_BYTES
+                .fetch_add(size, Ordering::Relaxed)
+                .wrapping_add(size);
             update_peak(live);
             ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         }
@@ -112,7 +114,9 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         let size = layout.size();
         let ptr = unsafe { self.inner.alloc_zeroed(layout) };
         if !ptr.is_null() {
-            let live = LIVE_BYTES.fetch_add(size, Ordering::Relaxed) + size;
+            let live = LIVE_BYTES
+                .fetch_add(size, Ordering::Relaxed)
+                .wrapping_add(size);
             update_peak(live);
             ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         }
@@ -126,7 +130,9 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         if !new_ptr.is_null() {
             if new_size > old_size {
                 let diff = new_size - old_size;
-                let live = LIVE_BYTES.fetch_add(diff, Ordering::Relaxed) + diff;
+                let live = LIVE_BYTES
+                    .fetch_add(diff, Ordering::Relaxed)
+                    .wrapping_add(diff);
                 update_peak(live);
             } else if old_size > new_size {
                 let diff = old_size - new_size;
@@ -157,7 +163,9 @@ pub fn record_alloc(size: usize) {
     if counting_is_active() {
         return;
     }
-    let live = LIVE_BYTES.fetch_add(size, Ordering::Relaxed) + size;
+    let live = LIVE_BYTES
+        .fetch_add(size, Ordering::Relaxed)
+        .wrapping_add(size);
     update_peak(live);
     ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
 }

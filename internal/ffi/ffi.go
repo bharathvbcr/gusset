@@ -115,6 +115,9 @@ var (
 )
 
 func statusToError(st *C.FfiStatus) error {
+	if st == nil {
+		return nil
+	}
 	if st.code == C.FFI_OK {
 		return nil
 	}
@@ -122,13 +125,21 @@ func statusToError(st *C.FfiStatus) error {
 	code := int(st.code)
 	var msg string
 	if st.msg != nil && st.msg_len > 0 {
-		b := C.GoBytes(unsafe.Pointer(st.msg), C.int(st.msg_len))
+		msgLen := st.msg_len
+		if msgLen > 65536 {
+			msgLen = 65536
+		}
+		b := C.GoBytes(unsafe.Pointer(st.msg), C.int(msgLen))
 		msg = string(b)
 	}
 
 	var file string
 	if st.file != nil && st.file_len > 0 {
-		b := C.GoBytes(unsafe.Pointer(st.file), C.int(st.file_len))
+		fileLen := st.file_len
+		if fileLen > 4096 {
+			fileLen = 4096
+		}
+		b := C.GoBytes(unsafe.Pointer(st.file), C.int(fileLen))
 		file = string(b)
 	}
 	line := int(st.line)

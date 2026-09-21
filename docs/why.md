@@ -112,7 +112,7 @@ sequenceDiagram
 **The Problem:**
 - Go goroutines run on dynamic, growable stacks that start at 2 KiB and expand on demand.
 - A cgo call switches the goroutine to the host OS thread stack.
-- On glibc (standard Linux) and macOS, default pthread stacks are 8 MiB.
+- On glibc (standard Linux) the default pthread stack is whatever `RLIMIT_STACK` says at program start — commonly 8 MiB, but 2 MiB on most architectures when that limit is unlimited. On macOS the *main* thread gets 8 MB, but secondary pthreads default to only **512 KB** ([Apple, Thread Management, Table 2-1](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Multithreading/CreatingThreads/CreatingThreads.html)).
 - However, **`musl libc`** (the standard C library in Alpine Linux, used in millions of containerized Go deployments) specifies a default thread stack of only **128 KiB**!
 - Any non-trivial Rust engine (parsers, AST traversal, deep recursion, regex compilation, or large array allocations) will exhaust 128 KiB in microseconds.
 - Because static libraries do not run `std::rt::init`, Rust's stack overflow handler is absent. The process dies instantly with `SIGSEGV` before any Go recovery can intercept it.
