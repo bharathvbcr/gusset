@@ -15,33 +15,27 @@ use gusset::header::{CallHeader, GUSSET_FLAG_DIAGNOSTIC_ENGINE};
 use gusset::pool::{Handle, JobResult};
 use gusset_example::init_example_engine;
 
-fn make_pipe() -> (i32, i32) {
-    let mut fds = [0i32; 2];
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    assert_eq!(rc, 0, "pipe() failed");
-    (fds[0], fds[1])
-}
-
-/// Reads one completion ticket, so the worker never blocks writing it.
-fn read_ticket(fd: i32) -> u64 {
-    let mut buf = [0u8; 8];
-    let mut got = 0usize;
-    while got < buf.len() {
-        let n = unsafe {
-            libc::read(
-                fd,
-                buf.as_mut_ptr().add(got) as *mut libc::c_void,
-                buf.len() - got,
-            )
-        };
-        assert!(n > 0, "completion pipe read failed");
-        got += n as usize;
-    }
-    u64::from_ne_bytes(buf)
-}
+mod common;
+use common::{make_pipe, read_ticket};
 
 fn run(handle: &Handle, read_fd: i32, header: CallHeader, input: &[u8]) -> JobResult {
-    let ticket = match handle.submit(header, input, 0) {
+    // R16: inline submit copies on the caller thread. The 10_000-byte opcode-10
+    // payload is past the 4 KiB ceiling, so it has to travel as a Buffer — the
+    // same rule the Go side now enforces. Leaving this as an inline slice made
+    // the test pass against a submit that memcpy'd any size.
+    let (submit_input, buffer_id) = if input.len() > 4096 {
+        let (id, ptr) = match handle.buf_alloc(input.len()) {
+            Ok(v) => v,
+            Err(e) => panic!("buf_alloc failed: {}", e),
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(input.as_ptr(), ptr, input.len());
+        }
+        (&[][..], id)
+    } else {
+        (input, 0)
+    };
+    let ticket = match handle.submit(header, submit_input, buffer_id) {
         Ok(t) => t,
         Err(e) => panic!("submit failed: {}", e),
     };

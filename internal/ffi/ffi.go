@@ -59,6 +59,7 @@ package ffi
 */
 import "C"
 import (
+	"context"
 	"fmt"
 	"unsafe"
 )
@@ -87,11 +88,22 @@ func (e *Error) Error() string {
 }
 
 func (e *Error) Is(target error) bool {
-	t, ok := target.(*Error)
-	if !ok {
+	if e == nil {
 		return false
 	}
-	return e.Code == t.Code
+	if t, ok := target.(*Error); ok {
+		return e.Code == t.Code
+	}
+	// Rust reports cooperative cancel as FFI_ERR with "cancelled: {reason}".
+	// Callers already use errors.Is(..., context.DeadlineExceeded / Canceled);
+	// matching only *Error by code made a correctly cancelled job look unexpected.
+	switch target {
+	case context.DeadlineExceeded:
+		return e.Msg == "cancelled: DeadlineExceeded"
+	case context.Canceled:
+		return e.Msg == "cancelled: Explicit"
+	}
+	return false
 }
 
 // Sentinel errors for matching with errors.Is.
@@ -103,6 +115,9 @@ var (
 )
 
 func statusToError(st *C.FfiStatus) error {
+	if st == nil {
+		return nil
+	}
 	if st.code == C.FFI_OK {
 		return nil
 	}
@@ -110,13 +125,21 @@ func statusToError(st *C.FfiStatus) error {
 	code := int(st.code)
 	var msg string
 	if st.msg != nil && st.msg_len > 0 {
-		b := C.GoBytes(unsafe.Pointer(st.msg), C.int(st.msg_len))
+		msgLen := st.msg_len
+		if msgLen > 65536 {
+			msgLen = 65536
+		}
+		b := C.GoBytes(unsafe.Pointer(st.msg), C.int(msgLen))
 		msg = string(b)
 	}
 
 	var file string
 	if st.file != nil && st.file_len > 0 {
-		b := C.GoBytes(unsafe.Pointer(st.file), C.int(st.file_len))
+		fileLen := st.file_len
+		if fileLen > 4096 {
+			fileLen = 4096
+		}
+		b := C.GoBytes(unsafe.Pointer(st.file), C.int(fileLen))
 		file = string(b)
 	}
 	line := int(st.line)

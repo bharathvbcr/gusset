@@ -2,7 +2,7 @@
 #![allow(unsafe_code)]
 
 use super::status::{FfiStatus, FFI_ERR, FFI_OK, FFI_PANIC};
-use std::panic::{catch_unwind, set_hook, AssertUnwindSafe};
+use std::panic::{catch_unwind, set_hook, take_hook, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,6 +17,7 @@ pub struct PanicLocation {
     pub line: u32,
 }
 
+const MAX_INTERNED_FILES: usize = 1024;
 static FILE_STRING_CACHE: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
 /// Interns a file path string into a process-lifetime static string.
@@ -32,6 +33,9 @@ pub fn intern_file_string(file: &str) -> &'static str {
         if s == file {
             return s;
         }
+    }
+    if cache.len() >= MAX_INTERNED_FILES {
+        return "unknown_file";
     }
     let leaked: &'static str = Box::leak(file.to_string().into_boxed_str());
     cache.push(leaked);
@@ -69,7 +73,11 @@ pub fn take_panic_location() -> Option<PanicLocation> {
 pub fn install_panic_hook() {
     static INSTALLED: AtomicBool = AtomicBool::new(false);
     if !INSTALLED.swap(true, Ordering::SeqCst) {
-        set_hook(Box::new(|info| {
+        // Record the location, then call the hook we replaced. libtest prints
+        // assertion failures through its hook; replacing it outright made every
+        // Rust test that opened a handle fail with no message.
+        let previous = take_hook();
+        set_hook(Box::new(move |info| {
             if let Some(l) = info.location() {
                 let loc = PanicLocation {
                     file: intern_file_string(l.file()),
@@ -86,6 +94,7 @@ pub fn install_panic_hook() {
                     list.push((id, loc));
                 }
             }
+            previous(info);
         }));
     }
 }
@@ -98,16 +107,40 @@ pub fn panic_location_count() -> usize {
         .len()
 }
 
+const MAX_PANIC_PAYLOAD_BYTES: usize = 32 * 1024;
+
+fn truncate_payload(mut s: String) -> String {
+    if s.len() > MAX_PANIC_PAYLOAD_BYTES {
+        let mut cutoff = MAX_PANIC_PAYLOAD_BYTES;
+        while cutoff > 0 && !s.is_char_boundary(cutoff) {
+            cutoff -= 1;
+        }
+        s.truncate(cutoff);
+        s.push_str("... [truncated]");
+    }
+    s
+}
+
 /// Extracts a string representation from an arbitrary panic payload without unwrapping (R3).
 pub fn extract_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
+        truncate_payload((*s).to_string())
     } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
+        truncate_payload(s.clone())
     } else if let Some(i) = payload.downcast_ref::<i32>() {
         format!("panic payload (i32): {}", i)
+    } else if let Some(u) = payload.downcast_ref::<u32>() {
+        format!("panic payload (u32): {}", u)
+    } else if let Some(i) = payload.downcast_ref::<i64>() {
+        format!("panic payload (i64): {}", i)
     } else if let Some(u) = payload.downcast_ref::<u64>() {
         format!("panic payload (u64): {}", u)
+    } else if let Some(u) = payload.downcast_ref::<usize>() {
+        format!("panic payload (usize): {}", u)
+    } else if let Some(i) = payload.downcast_ref::<isize>() {
+        format!("panic payload (isize): {}", i)
+    } else if let Some(b) = payload.downcast_ref::<bool>() {
+        format!("panic payload (bool): {}", b)
     } else {
         "Unknown Rust panic payload".to_string()
     }

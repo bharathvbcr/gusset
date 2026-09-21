@@ -5,6 +5,27 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 #[no_mangle]
 pub extern "C" fn rs_noop(x: u64) -> u64 { std::hint::black_box(x).wrapping_add(1) }
 
+/// Fixed-cost CPU work, used as the *same* work unit on both sides of the
+/// raw-cgo-versus-Gusset comparison.
+///
+/// The interesting question about Gusset is not what a noop costs — a noop is
+/// where any coordination layer looks worst, and no adopter embeds Rust to do
+/// nothing. It is the work duration at which the coordination stops mattering.
+/// Answering that needs a dial, and it needs both transports to be turning the
+/// identical dial: `gusset::pool::diagnostic_dispatch` mode 11 runs this exact
+/// loop, so a difference between the two measurements is transport and nothing
+/// else.
+///
+/// Keep this and mode 11 byte-identical if either changes.
+#[no_mangle]
+pub extern "C" fn rs_spin(iters: u64) -> u64 {
+    let mut acc: u64 = 0;
+    for i in 0..iters {
+        acc = acc.wrapping_add(i.wrapping_mul(i) ^ acc.rotate_left(7));
+    }
+    std::hint::black_box(acc)
+}
+
 // batched: sum-and-square each element in place, returns count
 #[no_mangle]
 pub unsafe extern "C" fn rs_batch(ptr: *mut u64, len: usize) -> u64 {

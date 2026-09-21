@@ -227,10 +227,26 @@ Things worth knowing before you hit them:
 - **A caught panic poisons the handle**, permanently. Every later call returns
   `ErrPoisoned`. `Close` and reopen is the only way out; that is the bulkhead, not
   a bug.
-- **Cancellation is cooperative.** A deadline is enforced *between* work units, so
-  your engine must call `ctx.check()` inside long loops. An engine that never
-  checks cannot be cancelled, and `gusset_shutdown` will report it as still in
-  flight when the drain budget expires.
+- **A deadline bounds the caller, not the work.** `Call` and `Wait` return
+  `ctx.Err()` when your context expires, whatever the engine is doing. The pool
+  permit stays with the still-running job until it actually stops, so a caller
+  walking away never lets in-flight work exceed the pool size — which also means
+  a pool whose jobs all outlive their deadlines is a pool with no free permits,
+  and the next `Submit` will block until one comes back. That is backpressure
+  working, not a stall.
+- **Cancellation itself is cooperative**, and that is a separate thing. The flag
+  is only read where your engine calls `ctx.check()`, so an engine that never
+  checks runs to completion regardless — nothing is interrupted, the caller is
+  simply no longer blocked on it. Call `ctx.check()` inside long loops if you
+  want the work to stop early rather than merely be abandoned, and note that
+  `gusset.Shutdown` will report an engine that never checks as still in flight
+  when its drain budget expires.
+- **`Handle.Close` has no budget.** It cancels, then *joins* its worker threads,
+  so its latency is whatever your engine still has left to do — detaching them
+  would leave OS threads running against Rust memory `Close` is about to free.
+  For a bounded shutdown, call `gusset.Shutdown(budget)` first and then `Close`:
+  the cancel has already landed, so the join is short. `Shutdown` is process-wide
+  and one-way.
 - **A ticket has exactly one waiter.** `Wait` on an unknown ticket returns
   `ErrUnknownTicket`; a second concurrent `Wait` on the same ticket returns
   `ErrTicketBusy`. Both used to park the caller forever, ignoring its context.

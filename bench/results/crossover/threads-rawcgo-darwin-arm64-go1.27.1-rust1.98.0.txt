@@ -1,0 +1,21 @@
+# gusset-bench: v1
+# gusset-bench-recorded: 2026-09-21T03:04:56Z
+# gusset-bench-host: Mac.lan
+# gusset-bench-uname: Darwin 27.0.0 arm64
+# gusset-bench-package: bench/seed/go .
+# gusset-bench-arms: ThreadPressure/10000000it/RawCgo
+# gusset-bench-benchtime: 5x
+# gusset-bench-count: 1
+# gusset-bench-cpu-idle-before: 78.24
+# gusset-bench-cpu-idle-after: 79.69
+# gusset-bench-min-idle: 60
+# gusset-bench-exclusive: yes
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkThreadPressure/10000000it-7042us/RawCgo/conc512-18         	       5	 228421433 ns/op	        52.00 peakDthreads	       157.0 peakThreads	  153846 B/op	     785 allocs/op
+PASS
+ok  	ffibench	1.555s

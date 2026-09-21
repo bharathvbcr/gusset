@@ -1,56 +1,78 @@
+# gusset-bench: v1
+# gusset-bench-recorded: 2026-09-21T02:45:48Z
+# gusset-bench-host: Mac.lan
+# gusset-bench-uname: Darwin 27.0.0 arm64
+# gusset-bench-package: . ./bench/...
+# gusset-bench-arms: .
+# gusset-bench-benchtime: 1s
+# gusset-bench-count: 10
+# gusset-bench-cpu-idle-before: 83.75
+# gusset-bench-cpu-idle-after: 87.38
+# gusset-bench-min-idle: 60
+# gusset-bench-exclusive: yes
 goos: darwin
 goarch: arm64
 pkg: github.com/bharathvbcr/gusset/bench
 cpu: Apple M5 Pro
-BenchmarkGussetCallNoop-18        	   87318	     13417 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallNoop-18        	   89378	     13004 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallNoop-18        	   90586	     12615 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallNoop-18        	   92800	     13442 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallNoop-18        	   96283	     13024 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallNoop-18        	   95554	     14255 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallNoop-18        	   86144	     13581 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallNoop-18        	   92326	     13906 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallNoop-18        	   94471	     12827 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallNoop-18        	   92499	     14613 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallParallel-18    	  264466	      4436 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallParallel-18    	  280143	      4114 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallParallel-18    	  266373	      4737 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallParallel-18    	  297962	      4239 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallParallel-18    	  314046	      3862 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallParallel-18    	  323062	      3854 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallParallel-18    	  321015	      4322 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallParallel-18    	  291396	      4082 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallParallel-18    	  328564	      4060 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetCallParallel-18    	  312498	      4143 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetSubmitWait-18      	   79386	     15055 ns/op	     160 B/op	       2 allocs/op
-BenchmarkGussetSubmitWait-18      	   87118	     13422 ns/op	     160 B/op	       2 allocs/op
-BenchmarkGussetSubmitWait-18      	   93976	     12994 ns/op	     160 B/op	       2 allocs/op
-BenchmarkGussetSubmitWait-18      	   96064	     14595 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetSubmitWait-18      	   91015	     13163 ns/op	     161 B/op	       2 allocs/op
-BenchmarkGussetSubmitWait-18      	   96588	     13134 ns/op	     161 B/op	       2 allocs/op
-BenchmarkGussetSubmitWait-18      	   94861	     13336 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetSubmitWait-18      	   96348	     12957 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetSubmitWait-18      	   93182	     13880 ns/op	     161 B/op	       2 allocs/op
-BenchmarkGussetSubmitWait-18      	   73969	     14021 ns/op	     161 B/op	       3 allocs/op
-BenchmarkGussetBufferLarge-18     	   49741	     24663 ns/op	   65696 B/op	       3 allocs/op
-BenchmarkGussetBufferLarge-18     	   55864	     20556 ns/op	   65696 B/op	       3 allocs/op
-BenchmarkGussetBufferLarge-18     	   64632	     19193 ns/op	   65696 B/op	       3 allocs/op
-BenchmarkGussetBufferLarge-18     	   63327	     22089 ns/op	   65696 B/op	       3 allocs/op
-BenchmarkGussetBufferLarge-18     	   59889	     20321 ns/op	   65696 B/op	       3 allocs/op
-BenchmarkGussetBufferLarge-18     	   52992	     19444 ns/op	   65696 B/op	       3 allocs/op
-BenchmarkGussetBufferLarge-18     	   63108	     20995 ns/op	   65696 B/op	       3 allocs/op
-BenchmarkGussetBufferLarge-18     	   63258	     19403 ns/op	   65696 B/op	       3 allocs/op
-BenchmarkGussetBufferLarge-18     	   62667	     20672 ns/op	   65696 B/op	       3 allocs/op
-BenchmarkGussetBufferLarge-18     	   51939	     19516 ns/op	   65696 B/op	       3 allocs/op
-BenchmarkChannelHop-18            	65746219	        17.19 ns/op	       0 B/op	       0 allocs/op
-BenchmarkChannelHop-18            	70729344	        19.24 ns/op	       0 B/op	       0 allocs/op
-BenchmarkChannelHop-18            	62372898	        19.17 ns/op	       0 B/op	       0 allocs/op
-BenchmarkChannelHop-18            	62241338	        19.11 ns/op	       0 B/op	       0 allocs/op
-BenchmarkChannelHop-18            	63498924	        19.09 ns/op	       0 B/op	       0 allocs/op
-BenchmarkChannelHop-18            	64198158	        19.22 ns/op	       0 B/op	       0 allocs/op
-BenchmarkChannelHop-18            	62307990	        19.02 ns/op	       0 B/op	       0 allocs/op
-BenchmarkChannelHop-18            	61892223	        19.01 ns/op	       0 B/op	       0 allocs/op
-BenchmarkChannelHop-18            	62736621	        19.14 ns/op	       0 B/op	       0 allocs/op
-BenchmarkChannelHop-18            	63834879	        19.06 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetCallNoop-18               	   95326	     13052 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallNoop-18               	   97022	     13048 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallNoop-18               	   95737	     14034 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetCallNoop-18               	   85969	     13354 ns/op	     161 B/op	       2 allocs/op
+BenchmarkGussetCallNoop-18               	   94515	     12631 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallNoop-18               	   85215	     12915 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallNoop-18               	   95222	     12847 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallNoop-18               	   96890	     12802 ns/op	     161 B/op	       2 allocs/op
+BenchmarkGussetCallNoop-18               	   96020	     12853 ns/op	     161 B/op	       2 allocs/op
+BenchmarkGussetCallNoop-18               	   90537	     13255 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallParallel-18           	  278623	      4160 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-18           	  301401	      4052 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-18           	  298050	      4085 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-18           	  263937	      3995 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-18           	  270028	      4091 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-18           	  283617	      4156 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-18           	  289059	      4087 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-18           	  289656	      4149 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-18           	  303050	      4045 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-18           	  316581	      4066 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-18             	   97473	     12730 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetSubmitWait-18             	   96194	     12752 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetSubmitWait-18             	   96649	     12487 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetSubmitWait-18             	   96627	     12822 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetSubmitWait-18             	   88758	     12466 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetSubmitWait-18             	   97659	     12460 ns/op	     161 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-18             	   96762	     12951 ns/op	     161 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-18             	   90190	     13119 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetSubmitWait-18             	   96433	     12565 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetSubmitWait-18             	   98378	     12476 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18            	   56670	     19856 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18            	   61255	     19852 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18            	   61918	     19701 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18            	   57536	     19878 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18            	   61411	     19782 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18            	   61323	     19943 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18            	   56720	     19832 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18            	   60816	     20139 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18            	   60604	     20114 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLarge-18            	   57500	     20128 ns/op	   65696 B/op	       3 allocs/op
+BenchmarkGussetBufferLargeZeroCopy-18    	   80718	     14859 ns/op	     256 B/op	       5 allocs/op
+BenchmarkGussetBufferLargeZeroCopy-18    	   84548	     14485 ns/op	     256 B/op	       5 allocs/op
+BenchmarkGussetBufferLargeZeroCopy-18    	   81421	     14718 ns/op	     256 B/op	       5 allocs/op
+BenchmarkGussetBufferLargeZeroCopy-18    	   84279	     14510 ns/op	     256 B/op	       5 allocs/op
+BenchmarkGussetBufferLargeZeroCopy-18    	   82978	     14336 ns/op	     256 B/op	       5 allocs/op
+BenchmarkGussetBufferLargeZeroCopy-18    	   84439	     14700 ns/op	     256 B/op	       5 allocs/op
+BenchmarkGussetBufferLargeZeroCopy-18    	   78498	     14982 ns/op	     256 B/op	       5 allocs/op
+BenchmarkGussetBufferLargeZeroCopy-18    	   83582	     14827 ns/op	     256 B/op	       5 allocs/op
+BenchmarkGussetBufferLargeZeroCopy-18    	   83532	     14733 ns/op	     256 B/op	       5 allocs/op
+BenchmarkGussetBufferLargeZeroCopy-18    	   75049	     14723 ns/op	     256 B/op	       5 allocs/op
+BenchmarkChannelHop-18                   	73565473	        16.22 ns/op	       0 B/op	       0 allocs/op
+BenchmarkChannelHop-18                   	74344066	        16.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkChannelHop-18                   	74305893	        16.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkChannelHop-18                   	73699512	        16.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkChannelHop-18                   	73804332	        16.84 ns/op	       0 B/op	       0 allocs/op
+BenchmarkChannelHop-18                   	70320739	        16.86 ns/op	       0 B/op	       0 allocs/op
+BenchmarkChannelHop-18                   	69471746	        16.63 ns/op	       0 B/op	       0 allocs/op
+BenchmarkChannelHop-18                   	70387766	        16.77 ns/op	       0 B/op	       0 allocs/op
+BenchmarkChannelHop-18                   	68685249	        16.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkChannelHop-18                   	73994712	        16.49 ns/op	       0 B/op	       0 allocs/op
 PASS
-ok  	github.com/bharathvbcr/gusset/bench	68.698s
+ok  	github.com/bharathvbcr/gusset/bench	78.851s

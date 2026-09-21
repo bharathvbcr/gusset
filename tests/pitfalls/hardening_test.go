@@ -3,6 +3,8 @@ package pitfalls_test
 import (
 	"context"
 	"errors"
+	"runtime"
+	"runtime/metrics"
 	"strings"
 	"testing"
 	"time"
@@ -274,5 +276,117 @@ func TestHardening_OpcodeOptionsAndContext(t *testing.T) {
 
 	if op, ok := ctxOp.Value(gusset.OpcodeContextKey).(uint32); !ok || op != 99 {
 		t.Fatalf("expected opcode 99 attached to context, got %v", op)
+	}
+}
+
+// TestPitfall_PoolSizeOverflowIsRefusedNotTruncated pins the uint32 conversion.
+//
+// WithPoolSize stored uint32(n) and Open only compared the truncated value to
+// MaxPoolSize. WithPoolSize(1<<40) became 0 (a 0-capacity semaphore that hangs
+// every Call) and WithPoolSize(1<<32+4) silently became a 4-worker pool. The
+// contract is refuse, not clamp, including values that do not fit in uint32.
+func TestPitfall_PoolSizeOverflowIsRefusedNotTruncated(t *testing.T) {
+	for _, n := range []int{1 << 40, 1<<32 + 4, 0, -1} {
+		h, err := gusset.Open(gusset.WithPoolSize(n), gusset.WithDiagnosticEngine())
+		if err == nil {
+			_ = h.Close()
+			t.Fatalf("WithPoolSize(%d) must be refused, not truncated into a live handle", n)
+		}
+		if !strings.Contains(err.Error(), "pool_size") {
+			t.Fatalf("WithPoolSize(%d): expected the error to name pool_size, got: %v", n, err)
+		}
+	}
+}
+
+// TestPitfall_InlineSliceOver4KiBIsRefused is R16 at the Go boundary.
+//
+// Handle::submit copied every []byte into TaskPayload::Inline, including a 1 MiB
+// payload, so the cgo call itself did the copy and pinned an M for the duration.
+// Inputs above 4 KiB must arrive as a Rust-owned Buffer; a raw slice is refused.
+func TestPitfall_InlineSliceOver4KiBIsRefused(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	over := make([]byte, 4097)
+	over[0] = 0
+	if _, err := h.Call(ctx, over); err == nil {
+		t.Fatal("Call with 4097-byte []byte must be refused (R16); use NewBuffer")
+	}
+	if _, err := h.Submit(ctx, over); err == nil {
+		t.Fatal("Submit with 4097-byte []byte must be refused (R16); use NewBuffer")
+	}
+
+	// 4 KiB is the documented copy ceiling and must still work.
+	ok := make([]byte, 4096)
+	ok[0] = 0
+	if _, err := h.Call(ctx, ok); err != nil {
+		t.Fatalf("Call with 4096-byte []byte must still be copied, got: %v", err)
+	}
+
+	buf, err := h.NewBuffer(len(over))
+	if err != nil {
+		t.Fatalf("NewBuffer failed: %v", err)
+	}
+	defer buf.Free()
+	copy(buf.Bytes(), over)
+	ticket, err := h.Submit(ctx, buf)
+	if err != nil {
+		t.Fatalf("Submit of a Buffer above 4 KiB must succeed: %v", err)
+	}
+	got, err := h.Wait(ctx, ticket)
+	if err != nil {
+		t.Fatalf("Wait of a Buffer above 4 KiB failed: %v", err)
+	}
+	if len(got) != len(over) {
+		t.Fatalf("expected %d echoed bytes, got %d", len(over), len(got))
+	}
+}
+
+// TestPitfall_NewBufferRefusesPoisonedHandle is R10 for the alloc path.
+//
+// After a caught panic, Submit was refused but NewBuffer still entered Rust and
+// allocated. A poisoned handle must fail closed on every later call except Close
+// and the drain of tickets that were already in flight.
+func TestPitfall_NewBufferRefusesPoisonedHandle(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := h.Call(ctx, []byte{1}); !errors.Is(err, gusset.ErrPanic) {
+		t.Fatalf("expected a caught panic, got %v", err)
+	}
+	if _, err := h.NewBuffer(64); !errors.Is(err, gusset.ErrPoisoned) {
+		t.Fatalf("NewBuffer on a poisoned handle must return ErrPoisoned, got %v", err)
+	}
+}
+
+// TestPitfall_ThreadsMetricIsLive is the R11 soak's assertion source.
+//
+// Go 1.26 release notes named `/sched/threads:threads`. The 1.27 runtime/metrics
+// catalogue only lists `/sched/threads/total:threads`. Threads() must read a live
+// metric, not return -1 because the documented name drifted.
+func TestPitfall_ThreadsMetricIsLive(t *testing.T) {
+	if n := gusset.Threads(); n < 1 {
+		t.Fatalf("Threads() returned %d; the soak cannot assert I4 against a missing metric", n)
+	}
+
+	samples := []metrics.Sample{
+		{Name: "/sched/threads/total:threads"},
+		{Name: "/sched/threads:threads"},
+	}
+	metrics.Read(samples)
+	if samples[0].Value.Kind() != metrics.KindUint64 {
+		t.Fatalf("Go %s does not publish /sched/threads/total:threads (kind %v); update Threads()",
+			runtime.Version(), samples[0].Value.Kind())
 	}
 }

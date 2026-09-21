@@ -23,7 +23,7 @@ In production under load, this naive boundary crashes the service across six dis
 flowchart TD
     subgraph Naive ["Naive cgo / FFI Binding Under Production Load"]
         N1["Rust Panic!"] -->|"Unwinds across extern 'C'"| F1["SIGABRT: Process Crashed"]
-        N2["1,000 Concurrent Calls"] -->|"Goroutines pin OS threads (P handoff)"| F2["Thread Exhaustion: Fatal Error >10,000 Threads"]
+        N2["Sustained Concurrent Calls"] -->|"Goroutines pin OS threads (P handoff)"| F2["Thread Exhaustion: Fatal Error >10,000 Threads"]
         N3["Containerized Execution (musl)"] -->|"Worker runs on 128 KiB pthread stack"| F3["SIGSEGV: Stack Overflow Crash"]
         N4["context.WithTimeout Expiration"] -->|"Goroutine blocked inside cgo"| F4["Uninterruptible Hang: Request Leaks"]
         N5["Large Rust Allocations"] -->|"GOMEMLIMIT blind to Rust heap"| F5["OOM Killer (SIGKILL from cgroups)"]
@@ -64,7 +64,7 @@ flowchart TD
 **The Problem:**
 - Go goroutines are lightweight M:N green threads (millions can exist concurrently).
 - To the Go scheduler, a cgo call is treated as a blocking system call. The operating system thread (M) is pinned to the goroutine. If the call does not return within ~20 µs, the scheduler hands off the logical processor (P) and spawns or wakes a new OS thread to service remaining goroutines.
-- If a burst of 1,000 goroutines calls a Rust engine simultaneously (e.g. incoming HTTP/gRPC requests), the Go runtime spawns 1,000 OS threads.
+- A burst of 1,000 goroutines calling a Rust engine simultaneously therefore grows the thread pool — but *sub-linearly*, and how far depends on how long each call blocks. On an 18-core darwin/arm64 box with ~7 ms calls, `BenchmarkThreadScaling` puts 2,048 in-flight callers in the low hundreds of OS threads rather than at 2,048: on the order of **0.1–0.2 threads per in-flight call**, because Go reuses idle Ms and `sysmon` only retakes a P from a call that has already blocked for ~20 µs. Longer calls push the ratio toward 1:1; sub-20 µs calls barely move it at all. The claim to take from this is that the count tracks **concurrency** rather than cores — not that it equals it. Exact per-concurrency figures are generated from the committed recording in [the adoption guide's measured table](choosing.md#the-measured-numbers); they are deliberately not repeated here, because a hand-typed copy goes stale at the next recording and this one already did.
 - When the thread count reaches Go's hard limit (default 10,000 threads), the Go runtime fatally terminates the process:
   ```
   fatal error: runtime: program exceeds 10000-thread limit
@@ -73,28 +73,28 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     autonumber
-    participant HTTP as 1,000 Inbound Requests
+    participant HTTP as Inbound Requests
     participant GoSched as Go Runtime Scheduler
     participant OS as OS Threads (M)
     participant Rust as Native CGO Call
 
     rect rgb(255, 235, 235)
         Note over HTTP,Rust: Naive cgo: Thread Storm
-        HTTP->>GoSched: 1,000 Concurrent Goroutines
-        GoSched->>OS: Pin M0..M999 to foreign calls
-        OS->>Rust: Block in native execution (>20 µs)
-        GoSched->>OS: Scheduler hands off P, creating new OS threads
-        Note over OS: Thread count hits 10,000 ceiling
+        HTTP->>GoSched: Sustained concurrent goroutines
+        GoSched->>OS: Every call still blocking at ~20 µs pins an M
+        OS->>Rust: Block in native execution
+        GoSched->>OS: sysmon hands off P; runtime wakes or spawns more Ms
+        Note over OS: Count tracks concurrency, not cores.<br/>Hundreds of Ms at 2,048 in-flight 7 ms calls.<br/>The longer each call blocks, the closer to 1:1.
         OS-->>HTTP: fatal error: program exceeds 10000-thread limit
     end
 
     rect rgb(235, 255, 235)
         Note over HTTP,Rust: Gusset: Bounded Concurrency
-        HTTP->>GoSched: 1,000 Concurrent Goroutines
+        HTTP->>GoSched: Sustained concurrent goroutines
         GoSched->>GoSched: Park on Go Semaphore (permit queue)
         GoSched->>Rust: Submit work unit to bounded pool (e.g. 4 workers)
         Rust-->>GoSched: Return immediately (submit < 5 µs)
-        Note over GoSched: Callers wait on netpoller pipe (OS threads stay <= 10)
+        Note over GoSched: Callers wait on netpoller pipe.<br/>Around twenty Ms at 2,048 in-flight calls,<br/>set by pool size rather than concurrency.
     end
 ```
 
@@ -103,7 +103,7 @@ sequenceDiagram
 - Bounded concurrency: In-flight calls per handle can never exceed the configured pool size, capped at `gusset.MaxPoolSize` (1024). Requests exceeding the ceiling are refused, not clamped.
 - Submissions are strictly non-blocking (`gusset_submit` copies or references the input and returns a ticket ID in `< 5 µs`, well below the 20 µs P-handoff threshold).
 - Waiters park on Go's Netpoller via an `os.Pipe`, consuming 0 OS threads while awaiting completion.
-- Verified by the soak test (`TestSoak_ThreadCapUnderTenThousandCalls`), asserting that `/sched/threads:threads` stays under `pool_size + GOMAXPROCS + 8`.
+- Verified by `TestPitfall_ThreadCapBoundedSoak` (`tests/pitfalls/pitfalls_test.go`): 500 concurrent callers against a 4-worker pool, asserting that `/sched/threads/total:threads` finishes no more than `poolSize + GOMAXPROCS + 16` above where it started. It samples after the callers drain rather than during, which is sound for exactly the reason the thread-pressure benchmark has to run one transport per process: Go never destroys an M, so the count afterwards *is* the high-water mark.
 
 ---
 
@@ -112,7 +112,7 @@ sequenceDiagram
 **The Problem:**
 - Go goroutines run on dynamic, growable stacks that start at 2 KiB and expand on demand.
 - A cgo call switches the goroutine to the host OS thread stack.
-- On glibc (standard Linux) and macOS, default pthread stacks are 8 MiB.
+- On glibc (standard Linux) the default pthread stack is whatever `RLIMIT_STACK` says at program start — commonly 8 MiB, but 2 MiB on most architectures when that limit is unlimited. On macOS the *main* thread gets 8 MB, but secondary pthreads default to only **512 KB** ([Apple, Thread Management, Table 2-1](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Multithreading/CreatingThreads/CreatingThreads.html)).
 - However, **`musl libc`** (the standard C library in Alpine Linux, used in millions of containerized Go deployments) specifies a default thread stack of only **128 KiB**!
 - Any non-trivial Rust engine (parsers, AST traversal, deep recursion, regex compilation, or large array allocations) will exhaust 128 KiB in microseconds.
 - Because static libraries do not run `std::rt::init`, Rust's stack overflow handler is absent. The process dies instantly with `SIGSEGV` before any Go recovery can intercept it.
@@ -203,3 +203,32 @@ sequenceDiagram
 1. **Stateless math operations**: Trivial, microsecond C calculations that never allocate, never block, never recurse, and never panic.
 2. **Separate microservices**: Workloads where network latency (`> 500 µs`) is acceptable and components run in separate processes communicating via gRPC, HTTP, or Unix domain sockets.
 3. **Pure Go implementations**: Where Go's native standard library or third-party packages already meet performance requirements.
+
+---
+
+## 5. Language and framework landscape (verified 2026-09-20)
+
+Gusset is a **runtime contract**, not a binding generator. The languages and frameworks below were checked against that job, not against "can I call a function".
+
+| Surface | What it actually owns | What it does not own | Bearing on Gusset |
+| :--- | :--- | :--- | :--- |
+| **Go 1.27** | `goroutineleak` profile is GA (`runtime/pprof` + `/debug/pprof/goroutineleak`). `runtime/metrics` publishes `/sched/threads/total:threads` and `/sched/goroutines/not-in-go:goroutines` (cgo/syscall). Green Tea GC remains default from 1.26. | Recovering a panic that escaped `extern "C"`; seeing the Rust heap | Soak asserts the thread metric. Leak profile is the empty-after-drain gate. Heap-base randomization (1.26) still forbids pointer-value tests. |
+| **Rust 1.81+ (current develop: 1.98.x)** | Uncaught panic out of `extern "C"` **aborts**. `catch_unwind` only catches unwinding panics, not `panic=abort`, not C++ exceptions (unspecified: abort or opaque `Err`). `"C-unwind"` is the ABI that *intends* to unwind. | Go's scheduler, `GOMEMLIMIT`, SIGSEGV ownership in a `staticlib` | R2 forces `panic = "unwind"` at build time. Firewall is `catch_unwind` around the **work unit**, not hope that `extern "C"` is recoverable. Abort and GPU driver faults stay Phase 4. |
+| **cgo (this process)** | `#cgo noescape`/`nocallback` (Go 1.22+); ~20 µs P-handoff; `KeepAlive`; `AddCleanup` | A cross-language memory model; cancelling a call already inside C | Submit-and-return keeps every cgo call under the hand-off. The seed blocking no-op is **18.4 ns** on the current toolchain (Go 1.27.1 / Rust 1.98.0, darwin/arm64) and was **64 ns** on the older x86-64 Linux host, so the commonly quoted "~40 ns cgo call" brackets the range rather than describing it — and the cheaper the raw call gets, the larger Gusset's ratio, not the smaller. Gusset's no-op is **20.09 µs ± 11%**, roughly 1,100x the raw call, because the work is on a Rust worker and the waiter parks on `os.Pipe`. That gap is the product, not a regression: it buys the firewall, the deadline and the bounded thread count, and `docs/img/crossover.svg` shows where real work amortises it. |
+| **rust2go** | Rust-driving-Go async, generated bindings, optional ASM callbacks | Production cgocheck | README still tells callers to set `GODEBUG=invalidptr=0,cgocheck=0`. Issue #109 (open as of 2026-03-28) asks when that is required. Gusset refuses both flags in CI. |
+| **uniffi-bindgen-go** | Type marshalling, `RustBuffer` shape, generated Go | Panic firewall, pool, deadlines, poison | Sit *on top* of Gusset. Adopter example is staticlink; UniFFI's default dynamic load still needs `LD_LIBRARY_PATH`. |
+| **purego / Stoolap `asmcgocall`** | `CGO_ENABLED=0` containers | A supported calling convention | `asmcgocall` skips `entersyscall`; P stays pinned; STW waits. R13. Stoolap is honest that a Go minor can break it. |
+| **Wasm sandboxes** (wazero, Wasmtime, Extism) | A real fault domain *inside* the process: a trap, an out-of-bounds access or an abort is contained by the runtime, with a capability-scoped host interface | Native speed; running an existing native library unmodified | The honest alternative to Gusset's fault-domain trade-off, and the reason it is a trade-off rather than a win. 2026 measurements put **Wasmtime at 2.41x native and wazero at 4.72x** on compute-bound work, and every payload crosses a linear-memory copy. Gusset keeps native speed and gives up in-process fault isolation; Wasm takes the inverse trade. An engine that can genuinely fault — a GPU driver, an unaudited C dependency — wants one of these or Phase 4, not Gusset. |
+| **iceoryx2 v0.10.0** (PyPI 2026-09-18) | Lock-free zero-copy IPC, C/C++/C#/Python bindings, claimed sub-µs latency independent of payload | A Go binding | Language table still lists **Go as planned**. Phase 4 remains specified, not implemented. In-process Gusset cannot survive `SIGKILL` from a GPU driver reset. |
+| **Java FFM (JEP 454, Java 22+)** | Bounded off-heap `MemorySegment`, linker without JNI glue | Go services | The analogous *other-runtime* hardening: deterministic native lifetime, fail-loud bounds. Not a substitute. |
+| **Zig 0.15.1** (0.15.0 retracted) | First-class C ABI (`export fn`, `callconv(.C)`), `zig cc` for musl | A Go runtime contract | A Zig engine could sit behind Gusset's existing 14 C exports. It does not replace the Go-side semaphore, pipe, or poison latch. |
+| **Swift C++ interop** | In-process Swift↔C++ | Go, cgo, POSIX completion | Irrelevant to this binary. Same C ABI lesson: callbacks must not run on the foreign thread that cannot hop the main actor — the Gusset dual of "Rust never calls Go" (R5). |
+
+Handle and communication, at the language level:
+
+1. **Go `Handle`** is a GC object with an explicit `Close`, a bounded semaphore, and a dispatch goroutine parked on the netpoller. `AddCleanup` is a leak backstop, not the contract.
+2. **Rust `Handle`** is an `Arc` over a fixed worker pool, a results map, a buffer map, and a non-blocking pipe write fd. `Drop` joins workers; Go `HandleClose` is what actually drops it.
+3. **The only shared addresses** are Rust-owned (`Buffer`, cancel `AtomicBool`, status strings). Every cross-boundary value is copied into the 40-byte header or returned through `gusset_take`.
+4. **Clocks do not cross.** Go computes relative `timeout_ns`; Rust builds its own `Instant`. Overflow of that add is expiry, not infinity.
+5. **Upcoming runtimes** (Go tip weekly, Rust nightly monthly) are gates, never shipped code. A boundary-behaviour change is a version-gated path plus a test, not a raised floor.
+

@@ -119,6 +119,63 @@ func TestAdversarial_DoubleWaitOnSameTicketDoesNotOrphan(t *testing.T) {
 	}
 }
 
+// TestPitfall_DoubleWaitDoesNotReleaseSemaphore is the I4 half of ErrTicketBusy.
+//
+// waitInternal deferred releaseSem on every return, including ErrTicketBusy. The
+// second waiter therefore consumed the owner's semaphore permit while the job was
+// still running, so a third Submit on a pool-size-1 handle could enter Rust and
+// breach the in-flight bound. Ticket ownership (one waiter) is necessary but not
+// sufficient: the permit still belongs to the owner until that waiter returns.
+func TestPitfall_DoubleWaitDoesNotReleaseSemaphore(t *testing.T) {
+	const poolSize = 1
+	h, err := gusset.Open(gusset.WithPoolSize(poolSize), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	// Mode 5: 25 iterations × 10ms ≈ 250ms, long enough for the busy waiter and
+	// the probe Submit to run while the owner is still in flight.
+	ticket, err := h.Submit(context.Background(), []byte{5, 25})
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
+	}
+
+	ownerDone := make(chan error, 1)
+	go func() {
+		_, waitErr := h.Wait(context.Background(), ticket)
+		ownerDone <- waitErr
+	}()
+
+	// The owner must be the registered waiter before the busy probe runs.
+	time.Sleep(20 * time.Millisecond)
+
+	_, err = h.Wait(context.Background(), ticket)
+	if !errors.Is(err, gusset.ErrTicketBusy) {
+		t.Fatalf("expected ErrTicketBusy, got %v", err)
+	}
+
+	probeCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	probeTicket, err := h.Submit(probeCtx, []byte{0})
+	if err == nil {
+		_, _ = h.Wait(context.Background(), probeTicket)
+		t.Fatal("second Wait released the semaphore while the first job was still in flight (I4)")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected the probe Submit to wait on the held permit and time out, got %v", err)
+	}
+
+	select {
+	case waitErr := <-ownerDone:
+		if waitErr != nil {
+			t.Fatalf("owner Wait failed: %v", waitErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner Wait did not return")
+	}
+}
+
 // TestAdversarial_HandleChurnDoesNotLeakDescriptors.
 //
 // Each handle owns a completion-pipe write descriptor. Releasing it twice would
@@ -574,7 +631,10 @@ func TestAdversarial_EmptyAndOversizedInputs(t *testing.T) {
 		}
 	}
 
-	for _, n := range []int{1, 4095, 4096, 4097, 1 << 16, 1 << 20} {
+	// R16: []byte at or under 4 KiB is copied during submit. Above that the
+	// slice is refused — the previous version of this test expected a 1 MiB
+	// memcpy on the cgo thread, which is the long call I4/R16 forbid.
+	for _, n := range []int{1, 4095, 4096} {
 		in := make([]byte, n)
 		in[0] = 0 // echo
 		for i := 1; i < n; i++ {
@@ -589,6 +649,31 @@ func TestAdversarial_EmptyAndOversizedInputs(t *testing.T) {
 		}
 		if n > 1000 && out[999] != in[999] {
 			t.Fatalf("echo corrupted at offset 999 for %d-byte input", n)
+		}
+	}
+	for _, n := range []int{4097, 1 << 16, 1 << 20} {
+		in := make([]byte, n)
+		in[0] = 0
+		if _, err := h.Call(ctx, in); err == nil {
+			t.Fatalf("Call with %d-byte []byte must be refused (R16); use NewBuffer", n)
+		}
+		buf, err := h.NewBuffer(n)
+		if err != nil {
+			t.Fatalf("NewBuffer(%d) failed: %v", n, err)
+		}
+		copy(buf.Bytes(), in)
+		ticket, err := h.Submit(ctx, buf)
+		if err != nil {
+			_ = buf.Free()
+			t.Fatalf("Submit Buffer(%d) failed: %v", n, err)
+		}
+		out, err := h.Wait(ctx, ticket)
+		_ = buf.Free()
+		if err != nil {
+			t.Fatalf("Wait Buffer(%d) failed: %v", n, err)
+		}
+		if len(out) != n {
+			t.Fatalf("echo of %d-byte Buffer returned %d", n, len(out))
 		}
 	}
 }

@@ -57,13 +57,34 @@ static LOG_BUFFER: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 /// exactly the moment those diagnostics matter. A line longer than the whole budget
 /// is truncated instead of being appended wholesale, which previously let one
 /// oversized message push the buffer past its cap without limit.
-///
-/// Uses `try_lock`: the panic hook logs through here, and a panic raised while this
-/// lock was held would otherwise re-enter it on the same thread and deadlock.
+/// Recovers from lock poisoning and performs a short spin-retry loop if the buffer
+/// is contended with `gusset_drain_logs`. Returns if still blocked (avoiding deadlock
+/// on re-entrancy from panic hooks).
 pub fn log_event(line: &str) {
     let mut buf = match LOG_BUFFER.try_lock() {
         Ok(b) => b,
-        Err(_) => return,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            let mut acquired = None;
+            for _ in 0..16 {
+                std::hint::spin_loop();
+                match LOG_BUFFER.try_lock() {
+                    Ok(b) => {
+                        acquired = Some(b);
+                        break;
+                    }
+                    Err(std::sync::TryLockError::Poisoned(p)) => {
+                        acquired = Some(p.into_inner());
+                        break;
+                    }
+                    Err(std::sync::TryLockError::WouldBlock) => {}
+                }
+            }
+            match acquired {
+                Some(b) => b,
+                None => return,
+            }
+        }
     };
 
     // Reserve one byte for the newline. Truncate on a char boundary so the ring
@@ -110,24 +131,26 @@ pub fn log_event(line: &str) {
 #[no_mangle]
 pub unsafe extern "C" fn gusset_abi_layout(out: *mut AbiLayout) {
     if !out.is_null() {
-        let layout = AbiLayout {
-            version: GUSSET_ABI_VERSION,
-            sizes: [
-                size_of::<CallHeader>() as u32,
-                size_of::<FfiStatus>() as u32,
-                size_of::<AbiLayout>() as u32,
-                size_of::<AllocStats>() as u32,
-            ],
-            aligns: [
-                align_of::<CallHeader>() as u32,
-                align_of::<FfiStatus>() as u32,
-                align_of::<AbiLayout>() as u32,
-                align_of::<AllocStats>() as u32,
-            ],
-        };
-        unsafe {
-            ptr::write(out, layout);
-        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let layout = AbiLayout {
+                version: GUSSET_ABI_VERSION,
+                sizes: [
+                    size_of::<CallHeader>() as u32,
+                    size_of::<FfiStatus>() as u32,
+                    size_of::<AbiLayout>() as u32,
+                    size_of::<AllocStats>() as u32,
+                ],
+                aligns: [
+                    align_of::<CallHeader>() as u32,
+                    align_of::<FfiStatus>() as u32,
+                    align_of::<AbiLayout>() as u32,
+                    align_of::<AllocStats>() as u32,
+                ],
+            };
+            unsafe {
+                ptr::write(out, layout);
+            }
+        }));
     }
 }
 
@@ -138,10 +161,13 @@ pub unsafe extern "C" fn gusset_abi_layout(out: *mut AbiLayout) {
 /// Safe to call across FFI. Modifies global process panic state.
 #[no_mangle]
 pub unsafe extern "C" fn gusset_init() -> i32 {
-    install_panic_hook();
-    // Re-arm after a previous shutdown so init/shutdown is a reversible pair.
-    crate::pool::rearm();
-    FFI_OK
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        install_panic_hook();
+        crate::pool::rearm();
+    })) {
+        Ok(()) => FFI_OK,
+        Err(_) => FFI_ERR,
+    }
 }
 
 /// 3. Shuts down the Gusset runtime, draining in-flight work.
@@ -158,15 +184,20 @@ pub unsafe extern "C" fn gusset_init() -> i32 {
 /// Safe to call across FFI.
 #[no_mangle]
 pub unsafe extern "C" fn gusset_shutdown(drain_ms: u32) -> i32 {
-    let remaining = crate::pool::shutdown(std::time::Duration::from_millis(drain_ms as u64));
-    if remaining == 0 {
-        FFI_OK
-    } else {
-        log_event(&format!(
-            "gusset: shutdown drain budget of {} ms expired with {} work unit(s) still in flight",
-            drain_ms, remaining
-        ));
-        FFI_ERR
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let remaining = crate::pool::shutdown(std::time::Duration::from_millis(drain_ms as u64));
+        if remaining == 0 {
+            FFI_OK
+        } else {
+            log_event(&format!(
+                "gusset: shutdown drain budget of {} ms expired with {} work unit(s) still in flight",
+                drain_ms, remaining
+            ));
+            FFI_ERR
+        }
+    })) {
+        Ok(code) => code,
+        Err(_) => FFI_ERR,
     }
 }
 
@@ -295,6 +326,15 @@ pub unsafe extern "C" fn gusset_submit(
 
     if res.is_some() {
         FFI_OK
+    } else if h.is_poisoned() {
+        // submit() returns Err(String) for the poison latch, which ffi_guard
+        // maps to FFI_ERR. R10 is FFI_POISONED without a second reading.
+        if !status.is_null() {
+            unsafe {
+                ptr::write(status, FfiStatus::poisoned("handle is poisoned"));
+            }
+        }
+        FFI_POISONED
     } else if !status.is_null() {
         unsafe { (*status).code }
     } else {
@@ -463,9 +503,9 @@ pub unsafe extern "C" fn gusset_cancel_all(handle: *mut Handle, status: *mut Ffi
 #[no_mangle]
 pub unsafe extern "C" fn gusset_status_free(status: *mut FfiStatus) {
     if !status.is_null() {
-        unsafe {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             (*status).free_msg();
-        }
+        }));
     }
 }
 
@@ -477,8 +517,14 @@ pub unsafe extern "C" fn gusset_status_free(status: *mut FfiStatus) {
 #[no_mangle]
 pub unsafe extern "C" fn gusset_alloc_stats(out: *mut AllocStats) {
     if !out.is_null() {
+        let stats = std::panic::catch_unwind(std::panic::AssertUnwindSafe(get_alloc_stats))
+            .unwrap_or(AllocStats {
+                live_bytes: 0,
+                peak_bytes: 0,
+                alloc_count: 0,
+            });
         unsafe {
-            ptr::write(out, get_alloc_stats());
+            ptr::write(out, stats);
         }
     }
 }
@@ -499,17 +545,17 @@ pub unsafe extern "C" fn gusset_drain_logs(buf: *mut u8, len: usize, out_written
         return;
     }
 
-    if let Ok(mut log_buf) = LOG_BUFFER.lock() {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut log_buf = LOG_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
         let count = log_buf.len().min(len);
         unsafe {
             ptr::copy_nonoverlapping(log_buf.as_ptr(), buf, count);
-            ptr::write(out_written, count);
         }
         log_buf.drain(..count);
-    } else {
-        unsafe {
-            ptr::write(out_written, 0);
-        }
+        count
+    }));
+    unsafe {
+        ptr::write(out_written, result.unwrap_or(0));
     }
 }
 
@@ -539,6 +585,15 @@ pub unsafe extern "C" fn gusset_buf_alloc(
     }
 
     let h = unsafe { &*handle };
+    if h.is_poisoned() {
+        if !status.is_null() {
+            unsafe {
+                ptr::write(status, FfiStatus::poisoned("handle is poisoned"));
+            }
+        }
+        return FFI_POISONED;
+    }
+
     let res = unsafe {
         ffi_guard(status, || {
             let (id, p) = h.buf_alloc(len)?;
@@ -550,6 +605,13 @@ pub unsafe extern "C" fn gusset_buf_alloc(
 
     if res.is_some() {
         FFI_OK
+    } else if h.is_poisoned() {
+        if !status.is_null() {
+            unsafe {
+                ptr::write(status, FfiStatus::poisoned("handle is poisoned"));
+            }
+        }
+        FFI_POISONED
     } else if !status.is_null() {
         unsafe { (*status).code }
     } else {

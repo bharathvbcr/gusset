@@ -9,7 +9,7 @@ use crate::header::{
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::thread;
 use sys::RawBuffer;
@@ -27,6 +27,12 @@ struct WorkUnit {
     ticket: u64,
     ctx: JobContext,
     payload: TaskPayload,
+    /// Buffer id this unit's input came from, or 0 for an inline payload.
+    ///
+    /// Carried so the worker can refuse an engine that returns its own input as
+    /// its output. `TaskPayload::Shared` holds an `Arc`, not the id, and the id
+    /// is what Go frees.
+    input_buffer_id: u64,
 }
 
 /// Output produced by an engine execution.
@@ -352,16 +358,56 @@ pub fn diagnostic_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, St
         }
         // Mode 8: report the executing worker's real stack size (I5/R8).
         //
-        // Mode 6 recurses to prove the stack is deep enough, but on glibc and
-        // darwin the pthread default is already 8 MiB, so it passes there whether
-        // or not Gusset set the size — it proves the platform. Reading the size
-        // back from the thread that actually ran the job is what distinguishes
-        // "Gusset sized this stack" from "the platform happened to agree", which
-        // is the claim a musl host would otherwise be needed to test.
+        // Mode 6 recurses to prove the stack is deep enough, but a worker Gusset
+        // did not size explicitly would still get Rust's own std default of 2 MiB
+        // (see RUST_MIN_STACK) rather than the platform's pthread default, so any
+        // recursion that fits in 2 MiB passes whether or not Gusset set the size.
+        // Reading the size back from the thread that actually ran the job is what
+        // distinguishes "Gusset sized this stack" from "the default happened to be
+        // enough", which is the claim a musl host would otherwise be needed to test.
         8 => Ok(sys::current_thread_stack_size()
             .unwrap_or(0)
             .to_le_bytes()
             .to_vec()),
+        // Mode 9: sleep without ever calling `ctx.check()` — a deliberately
+        // *non-cooperative* engine.
+        //
+        // Mode 5 is the cooperative twin: it checks every iteration, so Rust
+        // notices the deadline itself and posts a `Cancelled` completion, and it
+        // is that completion which wakes the waiting Go caller. Every real
+        // adopter engine — a tokenizer, a regex scan, a proof verifier, a SIMD
+        // transform — looks like mode 9, not mode 5: it runs a tight loop that
+        // never asks whether it should stop.
+        //
+        // Without this mode the deadline suite only ever measured engines that
+        // cancel themselves, so it could not tell "Gusset enforced the caller's
+        // deadline" apart from "the engine happened to stop on its own".
+        //
+        // Duration is `input[1]` units of 10 ms, so the byte caps it at 2.55 s —
+        // exactly mode 5's existing fuzz exposure.
+        //
+        // Mode 9 is a *delay prefix*: after sleeping it dispatches the remainder
+        // of the payload. `[9, 10, 1]` is a panic 100 ms late, `[9, 10, 0, ..]`
+        // is a slow echo of a large payload. Without that, proving that an
+        // abandoned *large* result is reclaimed, or that an abandoned *panic*
+        // still poisons, is impossible: an instant result is taken by the caller
+        // before it can be abandoned, so those paths were never reached.
+        //
+        // A remainder that starts with 9 echoes instead of recursing. Nesting
+        // would let `[9,255,9,255,...]` chain 2.55 s sleeps one per two bytes,
+        // turning a 2 KiB fuzz input into a 43-minute work unit.
+        9 => {
+            let units = if input.len() >= 2 {
+                input[1] as u64
+            } else {
+                10
+            };
+            thread::sleep(std::time::Duration::from_millis(units * 10));
+            match input.get(2) {
+                None | Some(9) => Ok(input.to_vec()),
+                Some(_) => diagnostic_dispatch(ctx, &input[2..]),
+            }
+        }
         // Mode 10: Vector sum-and-square computation (Phase 2 CPU-bound engine)
         10 => {
             let mut acc = 0u64;
@@ -373,6 +419,54 @@ pub fn diagnostic_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, St
                 acc = acc.wrapping_add(val.wrapping_mul(val));
             }
             Ok(acc.to_le_bytes().to_vec())
+        }
+        // Mode 11: fixed-cost CPU work, `u32` iterations little-endian at
+        // input[1..5]. The arithmetic is byte-identical to `rs_spin` in
+        // bench/seed/rs, which is the raw-cgo half of the same measurement: a
+        // difference between the two is transport cost and nothing else.
+        //
+        // This is what makes the crossover measurable — the work duration at
+        // which Gusset's coordination stops mattering against a blocking cgo
+        // call. A noop benchmark cannot answer that, and a noop is not why
+        // anyone embeds Rust in Go.
+        //
+        // Capped like mode 6's recursion depth: the count is input-derived, and
+        // uncapped `[11, 0xFF, 0xFF, 0xFF, 0xFF]` is 4.29 billion iterations.
+        // 50 million is roughly 50 ms here, well under mode 5's 2.55 s fuzz
+        // exposure, and two orders past the crossover the benchmark looks for.
+        11 => {
+            const MAX_SPIN_ITERS: u32 = 50_000_000;
+            let requested = if input.len() >= 5 {
+                u32::from_le_bytes([input[1], input[2], input[3], input[4]])
+            } else {
+                1_000
+            };
+            let iters = requested.min(MAX_SPIN_ITERS) as u64;
+            let mut acc: u64 = 0;
+            for i in 0..iters {
+                acc = acc.wrapping_add(i.wrapping_mul(i) ^ acc.rotate_left(7));
+            }
+            Ok(std::hint::black_box(acc).to_le_bytes().to_vec())
+        }
+        // Mode 12: Megabyte string panic to test payload truncation (R3 hardening)
+        12 => {
+            panic!("{}", "A".repeat(1024 * 1024));
+        }
+        // Mode 13: Various non-string primitive panics
+        13 => match input.get(1).copied().unwrap_or(0) {
+            0 => std::panic::panic_any(12345u32),
+            1 => std::panic::panic_any(-9876543210i64),
+            2 => std::panic::panic_any(true),
+            3 => std::panic::panic_any(999999usize),
+            _ => std::panic::panic_any(-42isize),
+        },
+        // Mode 14: Log burst from worker thread to test log ring concurrency
+        14 => {
+            let count = input.get(1).copied().unwrap_or(10) as usize;
+            for i in 0..count {
+                crate::ffi::log_event(&format!("worker log event {}", i));
+            }
+            Ok(vec![14, count as u8])
         }
         // Default: echo
         _ => Ok(input.to_vec()),
@@ -390,6 +484,7 @@ pub struct Handle {
     /// descriptor the caller is still responsible for, and no descriptor is closed
     /// twice — which would otherwise shut an unrelated file that reused the number.
     pipe_write_fd: AtomicI32,
+    pipe_write_lock: Mutex<()>,
     poisoned: AtomicBool,
     closed: AtomicBool,
     sender: Mutex<Option<SyncSender<WorkUnit>>>,
@@ -407,6 +502,14 @@ pub struct Handle {
 /// Default worker count when the caller passes 0.
 pub const DEFAULT_POOL_SIZE: usize = 4;
 
+/// R16 copy ceiling: inputs this size and under are memcpy'd during submit.
+/// Larger inputs must arrive as a Rust-owned Buffer. Copying a megabyte on the
+/// cgo thread is the long call the submit-and-return contract forbids.
+pub const MAX_INLINE_INPUT: usize = 4096;
+
+/// Re-export of the per-buffer ceiling enforced at allocation (R16).
+pub const MAX_BUFFER_BYTES: usize = sys::MAX_BUFFER_BYTES;
+
 /// Hard ceiling on workers per handle.
 ///
 /// Each worker is a real OS thread with an 8 MiB stack, so an unbounded pool size
@@ -415,6 +518,60 @@ pub const DEFAULT_POOL_SIZE: usize = 4;
 /// behind the completion pipe, which is what keeps `write_ticket` from ever facing
 /// a full pipe under the documented bounded-concurrency contract (I4, R11).
 pub const MAX_POOL_SIZE: usize = 1024;
+
+/// Tickets and buffer ids occupy the low 63 bits and start at 1.
+///
+/// Zero means "no buffer" on the submit header. A counter that wraps, or that
+/// advances while refusing, later reissues an id that is still live.
+const ID_CEILING: u64 = 1 << 63;
+
+/// Reserves the next id, or refuses without advancing once the space is exhausted.
+fn reserve_id(counter: &AtomicU64) -> Result<u64, String> {
+    loop {
+        let cur = counter.load(Ordering::Relaxed);
+        if cur == 0 || cur >= ID_CEILING {
+            return Err(
+                "id space exhausted; refusing to wrap onto a live ticket or buffer".to_string(),
+            );
+        }
+        match counter.compare_exchange_weak(cur, cur + 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Ok(cur),
+            Err(_) => continue,
+        }
+    }
+}
+
+/// Writes a completion ticket, sleeping on a full pipe outside the exclusivity lock.
+///
+/// `write_ticket` backs off for up to 10s. Holding `pipe_write_lock` across that
+/// sleep stalls every other worker and `Handle::close` behind one full pipe.
+fn write_completion(lock: &Mutex<()>, fd: i32, ticket: u64) -> std::io::Result<()> {
+    let started = std::time::Instant::now();
+    let mut backoff = std::time::Duration::from_micros(50);
+    loop {
+        let attempt = {
+            let _guard = lock_recover(lock);
+            sys::write_ticket_attempt(fd, ticket)
+        };
+        match attempt {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if started.elapsed() >= sys::WRITE_TICKET_TIMEOUT {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "completion pipe full for {:?}; reader is not draining",
+                            sys::WRITE_TICKET_TIMEOUT
+                        ),
+                    ));
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(sys::WRITE_TICKET_MAX_BACKOFF);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
 
 /// Explicit worker stack size (R8).
 ///
@@ -458,6 +615,7 @@ impl Handle {
             pool_size,
             // Not owned yet: published below, only once the pool is fully up.
             pipe_write_fd: AtomicI32::new(-1),
+            pipe_write_lock: Mutex::new(()),
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             sender: Mutex::new(Some(sender)),
@@ -611,6 +769,34 @@ impl Handle {
 
                                 match dispatch_res {
                                     Ok(Ok(JobOutput::Bytes(out))) => JobResult::Ok(out),
+                                    // An engine that returns its *input* buffer as
+                                    // its output aliases memory the caller still
+                                    // owns. Go frees a take buffer once it has
+                                    // copied the result out, so the caller's live
+                                    // `*Buffer` would be released underneath it and
+                                    // its `Bytes()` slice left pointing at freed
+                                    // pages — a use-after-free an adopter engine can
+                                    // open by writing the obvious echo. Refusing it
+                                    // turns that into a returned error.
+                                    //
+                                    // Id 0 is refused for the same reason it can
+                                    // never be valid: ids start at 1, so a zero here
+                                    // is an engine returning a default rather than a
+                                    // buffer it allocated.
+                                    Ok(Ok(JobOutput::Buffer(buf_id)))
+                                        if buf_id == 0 || buf_id == unit.input_buffer_id =>
+                                    {
+                                        JobResult::Err(format!(
+                                            "engine returned buffer id {} as its output: {}; \
+                                             allocate a new buffer for the result",
+                                            buf_id,
+                                            if buf_id == 0 {
+                                                "id 0 is never a live buffer"
+                                            } else {
+                                                "that is the input buffer, which the caller still owns"
+                                            }
+                                        ))
+                                    }
                                     Ok(Ok(JobOutput::Buffer(buf_id))) => JobResult::Buffer(buf_id),
                                     Ok(Err(err)) => JobResult::Err(err),
                                     Err(payload) => {
@@ -632,11 +818,16 @@ impl Handle {
 
                         // Store result and wake netpoller if handle still alive
                         if let Some(h) = weak_clone.upgrade() {
+                            let result = h.materialize_result(result);
                             lock_recover(&h.results).insert(unit.ticket, result);
                             lock_recover(&h.cancel_flags).remove(&unit.ticket);
 
                             let fd = h.pipe_write_fd.load(Ordering::Acquire);
-                            if let Err(e) = sys::write_ticket(fd, unit.ticket) {
+                            // The lock covers one syscall attempt. write_ticket's
+                            // backoff sleeps for up to 10s; holding the lock across
+                            // that stalls every other worker's completion and
+                            // Handle::close behind them.
+                            if let Err(e) = write_completion(&h.pipe_write_lock, fd, unit.ticket) {
                                 // The waiting Go caller will never be woken for this
                                 // ticket, so say so rather than dropping it in silence.
                                 crate::ffi::log_event(&format!(
@@ -657,11 +848,13 @@ impl Handle {
 
     /// Verifies worker health and respawns replacement workers if any died (I5).
     fn ensure_workers(&self) -> Result<(), String> {
+        let mut workers = lock_recover(&self.workers);
+        // Re-check under the lock: close drains this vec and then joins. A spawn
+        // that raced past a pre-lock closed check would leave JoinHandles nobody
+        // joins, detaching OS threads on a handle that is already shut down.
         if self.closed.load(Ordering::Acquire) {
             return Ok(());
         }
-
-        let mut workers = lock_recover(&self.workers);
         workers.retain(|h| !h.is_finished());
 
         if workers.len() < self.pool_size {
@@ -697,37 +890,56 @@ impl Handle {
         // Auto-respawn replacement workers if any died (I5)
         self.ensure_workers()?;
 
-        // R16: inputs up to 4 KiB copied during submit; larger inputs live in Buffer
-        // Shared buffers are passed as Arc<RawBuffer> without extra byte copy
+        // R16: inputs up to 4 KiB copied during submit; larger inputs live in Buffer.
+        // Shared buffers are passed as Arc<RawBuffer> without extra byte copy.
         let payload = if buffer_id > 0 {
             let buffers = lock_recover(&self.buffers);
             let rec = buffers
                 .get(&buffer_id)
                 .ok_or_else(|| format!("buffer id {} not found", buffer_id))?;
             TaskPayload::Shared(Arc::clone(rec))
+        } else if input.len() > MAX_INLINE_INPUT {
+            return Err(format!(
+                "inline input {} bytes exceeds {}-byte copy limit; use a Buffer",
+                input.len(),
+                MAX_INLINE_INPUT
+            ));
         } else {
             TaskPayload::Inline(input.to_vec())
         };
 
-        let ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);
+        let ticket = reserve_id(&self.next_ticket)?;
         let cancel_flag = Arc::new(AtomicBool::new(false));
 
-        // Registered before the unit is queued: a flag registered afterwards could
-        // miss a cancel that arrives while the job is already running.
-        lock_recover(&self.cancel_flags).insert(ticket, Arc::clone(&cancel_flag));
-
-        let ctx = JobContext::new(header, cancel_flag);
+        let ctx = JobContext::new(header, Arc::clone(&cancel_flag));
         let unit = WorkUnit {
             ticket,
             ctx,
             payload,
+            input_buffer_id: buffer_id,
         };
 
-        let sender_guard = lock_recover(&self.sender);
-        let sender = sender_guard
-            .as_ref()
-            .ok_or_else(|| "handle is closed".to_string())?;
-        sender.send(unit).map_err(|e| e.to_string())?;
+        // try_send under the sender lock. `send` blocks when the queue is full,
+        // and holding the lock across that block stops `close` from disconnecting
+        // the workers. Cloning the sender and sending after the lock drops keeps
+        // the channel alive across `close`, so `join` waits on a recv that will
+        // not see a disconnect. A full queue is a contract break (the Go
+        // semaphore is the bound); refuse it instead of blocking.
+        {
+            let sender_guard = lock_recover(&self.sender);
+            let sender = match sender_guard.as_ref() {
+                Some(s) => s,
+                None => return Err("handle is closed".to_string()),
+            };
+            lock_recover(&self.cancel_flags).insert(ticket, Arc::clone(&cancel_flag));
+            if let Err(err) = sender.try_send(unit) {
+                lock_recover(&self.cancel_flags).remove(&ticket);
+                return Err(match err {
+                    TrySendError::Full(_) => "submission queue is full".to_string(),
+                    TrySendError::Disconnected(_) => "handle is closed".to_string(),
+                });
+            }
+        }
 
         Ok(ticket)
     }
@@ -770,14 +982,53 @@ impl Handle {
 
     /// Allocates 64-byte aligned Rust-owned buffer memory (R16).
     pub fn buf_alloc(&self, len: usize) -> Result<(u64, *mut u8), String> {
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err("handle is poisoned".to_string());
+        }
+        if self.closed.load(Ordering::Acquire) {
+            return Err("handle is closed".to_string());
+        }
+        let id = reserve_id(&self.next_buffer_id)?;
         let buf = RawBuffer::allocate(len)?;
         let ptr = buf.as_mut_ptr();
 
-        let id = self.next_buffer_id.fetch_add(1, Ordering::Relaxed);
         let mut map = lock_recover(&self.buffers);
         map.insert(id, Arc::new(buf));
 
         Ok((id, ptr))
+    }
+
+    /// Copies `data` into a new buffer and returns its id.
+    ///
+    /// The memcpy runs on the calling thread. Workers use this to promote a
+    /// large `JobResult::Ok` off the cgo take path (R16 egress).
+    fn buf_from_bytes(&self, data: &[u8]) -> Result<u64, String> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err("handle is closed".to_string());
+        }
+        let id = reserve_id(&self.next_buffer_id)?;
+        let buf = RawBuffer::from_bytes(data)?;
+        lock_recover(&self.buffers).insert(id, Arc::new(buf));
+        Ok(id)
+    }
+
+    /// Moves a large `JobResult::Ok` onto a Buffer so `gusset_take` does not
+    /// memcpy on the cgo thread.
+    fn materialize_result(&self, result: JobResult) -> JobResult {
+        match result {
+            JobResult::Ok(data) if data.len() > MAX_BUFFER_BYTES => JobResult::Err(format!(
+                "output {} bytes exceeds maximum {} bytes",
+                data.len(),
+                MAX_BUFFER_BYTES
+            )),
+            JobResult::Ok(data) if data.len() > MAX_INLINE_INPUT => {
+                match self.buf_from_bytes(&data) {
+                    Ok(id) => JobResult::Buffer(id),
+                    Err(e) => JobResult::Err(e),
+                }
+            }
+            other => other,
+        }
     }
 
     /// Looks up a live buffer by id, returning its mutable pointer and byte length.
@@ -791,13 +1042,14 @@ impl Handle {
     }
 
     /// Frees a Rust-owned buffer by id (R4, R16).
+    ///
+    /// Missing ids are success: `Free` and the `AddCleanup` backstop can race, and
+    /// treating a second free as an error turns a safety net into a user-visible
+    /// failure on the path that already released the memory.
     pub fn buf_free(&self, id: u64) -> Result<(), String> {
         let mut map = lock_recover(&self.buffers);
-        if map.remove(&id).is_some() {
-            Ok(())
-        } else {
-            Err(format!("buffer id {} not found", id))
-        }
+        map.remove(&id);
+        Ok(())
     }
 
     /// Closes the handle, disconnects workers, joins worker threads, and closes write fd.
@@ -810,11 +1062,15 @@ impl Handle {
             // 2. Signal cooperative cancellation to all active jobs
             self.cancel_all();
 
-            // 3. Join all worker threads to guarantee zero leaked threads
-            let handles: Vec<_> = lock_recover(&self.workers).drain(..).collect();
+            // 3. Join all worker threads to guarantee zero leaked threads.
+            // The workers mutex stays held across join so ensure_workers cannot
+            // spawn replacements onto a handle that is already shutting down.
+            let mut workers = lock_recover(&self.workers);
+            let handles: Vec<_> = workers.drain(..).collect();
             for handle in handles {
                 let _ = handle.join();
             }
+            drop(workers);
 
             // 4. Release the completion pipe now that every worker has finished.
             // The swap makes this a once-only transfer: a second close, or a Drop
@@ -1013,6 +1269,317 @@ mod tests {
             reported,
             WORKER_STACK_SIZE
         );
+
+        handle.close();
+        // SAFETY: the read end is still owned by this test; close() took the write end.
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// A submit that cannot queue the work unit must not leave a cancel flag
+    /// behind. `in_flight` is the flag count; `gusset_shutdown` waits on it, so a
+    /// leaked flag after a failed send makes a clean drain impossible.
+    ///
+    /// The production path inserts the flag and then looks up the sender. If the
+    /// sender is already gone, that insert is a leak the worker will never clear.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn submit_does_not_leave_a_cancel_flag_when_the_sender_is_gone() {
+        let _serialise = lock_recover(&INJECT_LOCK);
+        let (r, w) = make_pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        lock_recover(&handle.sender).take();
+
+        let header = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..Default::default()
+        };
+        if let Ok(ticket) = handle.submit(header, &[0u8], 0) {
+            panic!(
+                "submit must fail once the sender is gone, queued ticket {}",
+                ticket
+            );
+        }
+
+        assert_eq!(
+            handle.in_flight(),
+            0,
+            "a failed submit must not leak a cancel flag; shutdown drain waits on in_flight"
+        );
+
+        handle.close();
+        // SAFETY: the read end is still owned by this test; close() took the write end.
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// Advancing the id counter past the 63-bit ceiling wraps it onto ids that
+    /// are still live. `fetch_add` does that even when the call then returns an
+    /// error, so the next successful allocation reuses buffer 1.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn buffer_ids_stop_at_the_ceiling_instead_of_wrapping() {
+        let _serialise = lock_recover(&INJECT_LOCK);
+        let (r, w) = make_pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        let (live_id, _) = match handle.buf_alloc(32) {
+            Ok(v) => v,
+            Err(e) => panic!("first buffer must allocate: {}", e),
+        };
+        assert_eq!(live_id, 1, "ids start at 1; 0 means no buffer");
+
+        handle.next_buffer_id.store(1 << 63, Ordering::Relaxed);
+        if let Ok((id, _)) = handle.buf_alloc(32) {
+            panic!("id {id} is past the ceiling and must be refused");
+        }
+        assert_eq!(
+            handle.next_buffer_id.load(Ordering::Relaxed),
+            1 << 63,
+            "a refused id must not advance the counter; the next success would wrap onto buffer 1"
+        );
+        assert!(
+            handle.buf_get(live_id).is_ok(),
+            "the live buffer must still be the one issued before the ceiling"
+        );
+
+        handle.close();
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// Same ceiling for tickets. A wrapped ticket id aliases an in-flight job,
+    /// so the completion pipe wakes the wrong waiter.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ticket_ids_stop_at_the_ceiling_instead_of_wrapping() {
+        let _serialise = lock_recover(&INJECT_LOCK);
+        let (r, w) = make_pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        handle.next_ticket.store(1 << 63, Ordering::Relaxed);
+        let header = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..Default::default()
+        };
+        if let Ok(ticket) = handle.submit(header, &[0u8], 0) {
+            panic!("ticket {ticket} is past the ceiling and must be refused");
+        }
+        assert_eq!(
+            handle.next_ticket.load(Ordering::Relaxed),
+            1 << 63,
+            "a refused ticket must not advance the counter"
+        );
+        assert_eq!(
+            handle.in_flight(),
+            0,
+            "a refused submit must not leak a flag"
+        );
+
+        handle.close();
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// `SyncSender::send` blocks when the queue is full. Held across the sender
+    /// lock, that blocks `close` forever; released before the send, it reopens
+    /// the cancel-flag leak. `try_send` fails in microseconds and leaves
+    /// `in_flight` unchanged.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn submit_on_a_full_queue_fails_without_blocking_or_leaking() {
+        let _serialise = lock_recover(&INJECT_LOCK);
+        let (r, w) = make_pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        let header = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..Default::default()
+        };
+        // Every accepted job sleeps. One worker cannot drain them before the
+        // bounded queue fills, so a correct submit refuses instead of blocking
+        // inside `send` until a worker finishes.
+        let mut accepted = 0usize;
+        let overall = std::time::Instant::now();
+        loop {
+            if overall.elapsed() > std::time::Duration::from_millis(500) {
+                panic!("submit never refused a full queue; accepted {accepted}");
+            }
+            let started = std::time::Instant::now();
+            match handle.submit(header, &[9, 30], 0) {
+                Ok(_) => {
+                    let elapsed = started.elapsed();
+                    assert!(
+                        elapsed < std::time::Duration::from_millis(200),
+                        "submit blocked for {:?} instead of queueing or refusing",
+                        elapsed
+                    );
+                    accepted += 1;
+                }
+                Err(e) => {
+                    let elapsed = started.elapsed();
+                    assert!(
+                        elapsed < std::time::Duration::from_millis(200),
+                        "a full queue must fail without blocking; took {:?}",
+                        elapsed
+                    );
+                    assert!(
+                        e.contains("full"),
+                        "expected a full-queue refusal, got: {e}"
+                    );
+                    assert_eq!(
+                        handle.in_flight(),
+                        accepted,
+                        "the refused submit must not leave a cancel flag"
+                    );
+                    break;
+                }
+            }
+        }
+        assert!(accepted > 0, "the queue should accept at least one job");
+
+        handle.close();
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// Drain one 8-byte ticket from the completion pipe.
+    fn drain_ticket(read_fd: i32) -> u64 {
+        let mut buf = [0u8; 8];
+        let mut got = 0usize;
+        while got < buf.len() {
+            // SAFETY: reading into a valid stack buffer from the pipe's read end.
+            let n = unsafe {
+                libc::read(
+                    read_fd,
+                    buf.as_mut_ptr().add(got) as *mut libc::c_void,
+                    buf.len() - got,
+                )
+            };
+            assert!(n > 0, "completion pipe read failed");
+            got += n as usize;
+        }
+        u64::from_ne_bytes(buf)
+    }
+
+    /// Large `JobResult::Ok` used to be copied into a fresh `RawBuffer` inside
+    /// `gusset_take` — on the cgo thread, with an M pinned for the memcpy.
+    /// Promoting on the worker keeps take() a pointer return (R16 egress).
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn large_ok_result_is_promoted_off_the_cgo_thread() {
+        let _serialise = lock_recover(&INJECT_LOCK);
+        let (r, w) = make_pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        let len = MAX_INLINE_INPUT + 1;
+        let (buf_id, ptr) = match handle.buf_alloc(len) {
+            Ok(v) => v,
+            Err(e) => panic!("buf_alloc failed: {}", e),
+        };
+        unsafe {
+            std::ptr::write(ptr, 0u8);
+            for i in 1..len {
+                std::ptr::write(ptr.add(i), (i % 256) as u8);
+            }
+        }
+
+        let header = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..Default::default()
+        };
+        let ticket = match handle.submit(header, &[], buf_id) {
+            Ok(t) => t,
+            Err(e) => panic!("submit failed: {}", e),
+        };
+        assert_eq!(drain_ticket(r), ticket);
+
+        let result = match handle.take(ticket) {
+            Ok(r) => r,
+            Err(e) => panic!("take failed: {}", e),
+        };
+        match result {
+            JobResult::Buffer(id) => {
+                assert_ne!(id, buf_id, "echo must not alias the input buffer id");
+                let (out_ptr, out_len) = match handle.buf_get(id) {
+                    Ok(v) => v,
+                    Err(e) => panic!("buf_get failed: {}", e),
+                };
+                assert_eq!(out_len, len);
+                unsafe {
+                    assert_eq!(*out_ptr, 0);
+                    assert_eq!(*out_ptr.add(100), 100u8);
+                }
+                let _ = handle.buf_free(id);
+            }
+            JobResult::Ok(data) => panic!(
+                "large JobResult::Ok must be promoted to Buffer on the worker, still Ok ({} bytes)",
+                data.len()
+            ),
+            other => panic!(
+                "large JobResult::Ok must be promoted to Buffer on the worker, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+
+        let _ = handle.buf_free(buf_id);
+        handle.close();
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// R16: a raw inline slice above 4 KiB must be refused, not memcpy'd on the
+    /// submit path. The Go side parks an M for the whole cgo call; a 1 MiB copy
+    /// here is exactly the long cgo call the submit-and-return contract forbids.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn submit_rejects_inline_input_over_4kib() {
+        let _serialise = lock_recover(&INJECT_LOCK);
+        let (r, w) = make_pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        let header = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..Default::default()
+        };
+        let over = vec![0u8; 4096 + 1];
+        match handle.submit(header, &over, 0) {
+            Ok(ticket) => panic!(
+                "inline submit of {} bytes must be refused, queued ticket {}",
+                over.len(),
+                ticket
+            ),
+            Err(e) => assert!(
+                e.contains("copy limit"),
+                "refusal must name the copy limit, got: {}",
+                e
+            ),
+        }
 
         handle.close();
         // SAFETY: the read end is still owned by this test; close() took the write end.

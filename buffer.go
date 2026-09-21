@@ -2,12 +2,18 @@ package gusset
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"sync/atomic"
 
 	"github.com/bharathvbcr/gusset/internal/ffi"
 )
+
+// MaxBufferBytes is the largest single Rust-owned buffer this process will
+// allocate (1 GiB). Matching MAX_BUFFER_BYTES in pool::sys. Larger payloads
+// belong in Phase 4 isolation, not in-process posix_memalign.
+const MaxBufferBytes = 1 << 30
 
 // Buffer wraps a 64-byte aligned Rust-owned buffer (R16).
 type Buffer struct {
@@ -26,6 +32,9 @@ type bufferCleanupInfo struct {
 // NewBuffer allocates a 64-byte aligned buffer in Rust-owned memory (R16).
 // Suitable for inputs larger than 4 KiB to avoid double copying across FFI.
 func (h *Handle) NewBuffer(n int) (*Buffer, error) {
+	if h == nil || h.state == nil {
+		return nil, errors.New("gusset: handle is nil")
+	}
 	buf, err := h.state.newBuffer(n)
 	runtime.KeepAlive(h)
 	return buf, err
@@ -35,6 +44,12 @@ func (s *handleState) newBuffer(n int) (*Buffer, error) {
 	if n <= 0 {
 		return nil, errors.New("gusset: buffer size must be greater than zero")
 	}
+	if n > MaxBufferBytes {
+		return nil, fmt.Errorf("gusset: buffer size exceeds maximum %d bytes", MaxBufferBytes)
+	}
+	if s.poisoned.Load() {
+		return nil, ErrPoisoned
+	}
 	if s.closed.Load() {
 		return nil, errors.New("gusset: handle is closed")
 	}
@@ -43,6 +58,10 @@ func (s *handleState) newBuffer(n int) (*Buffer, error) {
 	if s.closed.Load() || s.ptr == nil {
 		s.cgoMu.RUnlock()
 		return nil, errors.New("gusset: handle is closed")
+	}
+	if s.poisoned.Load() {
+		s.cgoMu.RUnlock()
+		return nil, ErrPoisoned
 	}
 	id, slice, err := ffi.BufAlloc(s.ptr, n)
 	s.cgoMu.RUnlock()
@@ -105,7 +124,7 @@ func (s *handleState) bufFree(id uint64) error {
 // must not use a previously obtained slice after Free or Handle.Close, and should
 // keep the *Buffer reachable (runtime.KeepAlive) for as long as they use its bytes.
 func (b *Buffer) Bytes() []byte {
-	if b.freed.Load() || b.state.closed.Load() {
+	if b == nil || b.freed.Load() || b.state == nil || b.state.closed.Load() {
 		return nil
 	}
 	return b.data
@@ -113,19 +132,28 @@ func (b *Buffer) Bytes() []byte {
 
 // ID returns the internal buffer ticket identifier.
 func (b *Buffer) ID() uint64 {
+	if b == nil || b.state == nil {
+		return 0
+	}
 	return b.id
 }
 
 // Free explicitly releases the Rust-owned buffer memory (R4).
 // If the parent handle is already closed, safely returns nil without use-after-free.
 func (b *Buffer) Free() error {
+	if b == nil {
+		return nil
+	}
 	if b.freed.Swap(true) {
 		return nil
 	}
 	if b.id > 0 {
 		b.cleanup.Stop()
 	}
-	err := b.state.bufFree(b.id)
+	var err error
+	if b.state != nil {
+		err = b.state.bufFree(b.id)
+	}
 	// Drop our own view of the released memory so nothing here can resurrect it.
 	b.data = nil
 	return err

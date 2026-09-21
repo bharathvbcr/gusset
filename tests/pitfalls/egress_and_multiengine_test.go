@@ -393,3 +393,130 @@ func TestHardening_AdviseMemoryLimitNegativeQuery(t *testing.T) {
 	}
 }
 
+// TestPitfall_WaitBufferDoesNotCopyTakeAllocation is the R16 WaitBuffer contract
+// for JobResult::Ok, not just JobResult::Buffer.
+//
+// gusset_take copies engine bytes into a Rust-owned buffer and returns that id.
+// drainPipe then allocated a Go slice, copied the bytes, and freed the Rust
+// buffer; WaitBuffer allocated a *second* Rust buffer and copied again. A 64 KiB
+// result therefore hit the Go heap once per completion, which is exactly the copy
+// WaitBuffer exists to avoid. The take buffer is now the WaitBuffer result.
+func TestPitfall_WaitBufferDoesNotCopyTakeAllocation(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	const payload = 64 * 1024
+	in, err := h.NewBuffer(payload)
+	if err != nil {
+		t.Fatalf("NewBuffer failed: %v", err)
+	}
+	defer in.Free()
+	b := in.Bytes()
+	b[0] = 0 // diagnostic echo
+	for i := 1; i < len(b); i++ {
+		b[i] = byte(i)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const runs = 8
+	var totalDelta uint64
+	for i := 0; i < runs; i++ {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		before := ms.TotalAlloc
+
+		ticket, err := h.Submit(ctx, in)
+		if err != nil {
+			t.Fatalf("Submit %d failed: %v", i, err)
+		}
+		out, err := h.WaitBuffer(ctx, ticket)
+		if err != nil {
+			t.Fatalf("WaitBuffer %d failed: %v", i, err)
+		}
+		got := out.Bytes()
+		if len(got) != payload {
+			t.Fatalf("expected %d bytes, got %d", payload, len(got))
+		}
+		if got[100] != byte(100) {
+			t.Fatalf("echo corrupted at 100: %d", got[100])
+		}
+		if err := out.Free(); err != nil {
+			t.Fatalf("Free %d failed: %v", i, err)
+		}
+
+		runtime.ReadMemStats(&ms)
+		totalDelta += ms.TotalAlloc - before
+	}
+
+	avg := totalDelta / runs
+	// drainPipe used to make([]byte, 64KiB) per completion. Wrapper bookkeeping
+	// sits in the low kilobytes; a payload copy cannot hide under 32 KiB.
+	if avg >= 32*1024 {
+		t.Fatalf("WaitBuffer averaged %d Go-heap bytes per 64 KiB result; the take buffer must be wrapped, not copied", avg)
+	}
+}
+
+// TestPitfall_WaitOfLargeTakeBufferDoesNotPayWrapperAllocs is the Wait() twin
+// of TestPitfall_WaitBufferDoesNotCopyTakeAllocation.
+//
+// drainPipe wrapping take()'s buffer as a *Buffer so WaitBuffer can steal it
+// taxes every Wait() of a large result: a Buffer object, AddCleanup, then a
+// 64 KiB copy, then Free. HEAD copied once in drainPipe (3 allocs/op). The
+// wrapper belongs at WaitBuffer consume time, not at take time.
+func TestPitfall_WaitOfLargeTakeBufferDoesNotPayWrapperAllocs(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	const payload = 64 * 1024
+	in, err := h.NewBuffer(payload)
+	if err != nil {
+		t.Fatalf("NewBuffer failed: %v", err)
+	}
+	defer in.Free()
+	b := in.Bytes()
+	b[0] = 0
+	for i := 1; i < len(b); i++ {
+		b[i] = byte(i)
+	}
+
+	ctx := context.Background()
+	// Warm the path so AllocsPerRun does not count first-call setup.
+	ticket, err := h.Submit(ctx, in)
+	if err != nil {
+		t.Fatalf("warmup Submit failed: %v", err)
+	}
+	out, err := h.Wait(ctx, ticket)
+	if err != nil {
+		t.Fatalf("warmup Wait failed: %v", err)
+	}
+	if len(out) != payload || out[100] != byte(100) {
+		t.Fatalf("warmup echo mismatch: len=%d byte100=%d", len(out), out[100])
+	}
+
+	allocs := testing.AllocsPerRun(20, func() {
+		ticket, err := h.Submit(ctx, in)
+		if err != nil {
+			t.Fatalf("Submit failed: %v", err)
+		}
+		out, err := h.Wait(ctx, ticket)
+		if err != nil {
+			t.Fatalf("Wait failed: %v", err)
+		}
+		if len(out) != payload {
+			t.Fatalf("expected %d bytes, got %d", payload, len(out))
+		}
+	})
+	// Submit+Wait bookkeeping on the small path is 2 allocs/op. The 64 KiB
+	// copy is the third. An eager *Buffer wrap in drainPipe pushes this to 6.
+	if allocs > 4 {
+		t.Fatalf("Wait of a 64 KiB take buffer allocated %.1f objects/op; want ≤ 4 (copy + submit bookkeeping). Eager Buffer wrap in drainPipe is the extra tax", allocs)
+	}
+}

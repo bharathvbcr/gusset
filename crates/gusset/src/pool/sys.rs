@@ -5,6 +5,28 @@ use crate::alloc::{record_alloc, record_dealloc};
 use std::alloc::Layout;
 use std::io::{Error, ErrorKind, Result};
 
+/// Hard ceiling on a single Rust-owned buffer.
+///
+/// `NewBuffer` and take-side promotion feed a caller-controlled length into the
+/// allocator. An unbounded length is an unbounded address-space request. 1 GiB
+/// is well above the 200 MiB memlimit assertion and the 64 KiB egress benches;
+/// anything larger belongs in Phase 4 isolation, not in-process.
+pub const MAX_BUFFER_BYTES: usize = 1 << 30;
+
+/// Refuses a zero or oversized buffer length without touching the allocator.
+pub fn check_buffer_len(len: usize) -> std::result::Result<(), String> {
+    if len == 0 {
+        return Err("buffer length must be greater than zero".to_string());
+    }
+    if len > MAX_BUFFER_BYTES {
+        return Err(format!(
+            "buffer length {} exceeds maximum {} bytes",
+            len, MAX_BUFFER_BYTES
+        ));
+    }
+    Ok(())
+}
+
 /// Raw buffer allocated in Rust memory with 64-byte alignment (R16).
 #[derive(Debug)]
 pub struct RawBuffer {
@@ -19,9 +41,7 @@ unsafe impl Sync for RawBuffer {}
 impl RawBuffer {
     /// Allocates 64-byte aligned memory.
     pub fn allocate(len: usize) -> std::result::Result<Self, String> {
-        if len == 0 {
-            return Err("buffer length must be greater than zero".to_string());
-        }
+        check_buffer_len(len)?;
         let layout =
             Layout::from_size_align(len, 64).map_err(|e| format!("invalid layout: {}", e))?;
         let ptr = unsafe { std::alloc::alloc(layout) };
@@ -30,6 +50,19 @@ impl RawBuffer {
         }
         record_alloc(len);
         Ok(Self { ptr, len, layout })
+    }
+
+    /// Copies `src` into a newly allocated buffer.
+    ///
+    /// Used to promote a large `JobResult::Ok` onto a `Buffer` on the worker
+    /// thread so `gusset_take` is a pointer return rather than a memcpy on the
+    /// cgo thread (R16 egress).
+    pub fn from_bytes(src: &[u8]) -> std::result::Result<Self, String> {
+        let buf = Self::allocate(src.len())?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), buf.ptr, src.len());
+        }
+        Ok(buf)
     }
 
     /// Returns the raw pointer.
@@ -90,12 +123,15 @@ impl Drop for SigAltStackGuard {
 /// Reports the calling OS thread's stack size, or `None` where the platform
 /// cannot be asked.
 ///
-/// I5/R8 claim a worker runs on an explicit 8 MiB stack rather than the pthread
-/// default, which is 128 KiB on musl. On glibc and darwin the default is already
-/// 8 MiB, so a deep-recursion probe there passes whether or not Gusset set the
-/// size — it proves the platform, not the runtime. Reading the size back off the
-/// thread distinguishes the two on every platform, which is what makes R8
-/// testable without a musl host.
+/// I5/R8 claim a worker runs on an explicit 8 MiB stack rather than whatever it
+/// would otherwise inherit. A `thread::Builder` without `stack_size` gets Rust's
+/// std default of 2 MiB (overridable by `RUST_MIN_STACK`), not the platform's
+/// pthread default — which is 128 KiB on musl, 512 KiB for secondary threads on
+/// darwin, and on glibc whatever `RLIMIT_STACK` says (commonly 8 MiB, but 2 MiB
+/// on most architectures when that limit is unlimited). A deep-recursion probe
+/// that fits in 2 MiB therefore passes whether or not Gusset set the size.
+/// Reading the size back off the thread distinguishes the two on every platform,
+/// which is what makes R8 testable without a musl host.
 pub fn current_thread_stack_size() -> Option<usize> {
     #[cfg(target_vendor = "apple")]
     unsafe {
@@ -161,21 +197,20 @@ pub fn install_sigaltstack() -> Option<SigAltStackGuard> {
 /// bytes), which every supported platform's pipe buffer holds, so a full pipe means
 /// the reader has stalled. Waiting forever there would hang `Handle::close` in
 /// `join`; this bound turns that deadlock into a reported error.
-const WRITE_TICKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const WRITE_TICKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Upper bound on the backoff sleep between retries on a full pipe.
-const WRITE_TICKET_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(8);
+pub(crate) const WRITE_TICKET_MAX_BACKOFF: std::time::Duration =
+    std::time::Duration::from_millis(8);
 
-/// Writes an 8-byte ticket to the pipe file descriptor with EINTR/EAGAIN retries.
+/// One non-blocking attempt to write an 8-byte ticket.
 ///
-/// POSIX guarantees atomic writes for payloads up to PIPE_BUF (>= 512 bytes).
-///
-/// `EINTR` is retried without limit: Go's async preemption (`SIGURG`) interrupts
-/// syscalls on this thread constantly and makes no progress claim either way.
-/// `EAGAIN` means the pipe is genuinely full, so it backs off exponentially instead
-/// of spinning `yield_now` at 100% CPU, and gives up once [`WRITE_TICKET_TIMEOUT`]
-/// has elapsed.
-pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
+/// Returns [`ErrorKind::WouldBlock`] when the pipe is full and no byte of this
+/// ticket has been committed, so the caller can sleep without holding the
+/// exclusivity lock. A short write is finished inside this call: releasing the
+/// lock between the two halves would let another ticket interleave and break
+/// framing for every later completion.
+pub fn write_ticket_attempt(fd: i32, ticket: u64) -> Result<()> {
     if fd < 0 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
@@ -185,8 +220,8 @@ pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
 
     let bytes = ticket.to_ne_bytes();
     let mut remaining = &bytes[..];
-    let mut backoff = std::time::Duration::from_micros(50);
-    let mut blocked_since: Option<std::time::Instant> = None;
+    let mut committed = false;
+    let mut partial_spins = 0u32;
 
     while !remaining.is_empty() {
         let n = unsafe {
@@ -201,19 +236,18 @@ pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
             let err = Error::last_os_error();
             match err.raw_os_error() {
                 Some(libc::EINTR) => continue,
-                Some(libc::EAGAIN) => {
-                    let since = *blocked_since.get_or_insert_with(std::time::Instant::now);
-                    if since.elapsed() >= WRITE_TICKET_TIMEOUT {
+                Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK => {
+                    if !committed {
+                        return Err(Error::new(ErrorKind::WouldBlock, "completion pipe full"));
+                    }
+                    partial_spins = partial_spins.saturating_add(1);
+                    if partial_spins > 10_000 {
                         return Err(Error::new(
                             ErrorKind::TimedOut,
-                            format!(
-                                "completion pipe full for {:?}; reader is not draining",
-                                WRITE_TICKET_TIMEOUT
-                            ),
+                            "torn completion write; pipe stayed full after a short write",
                         ));
                     }
-                    std::thread::sleep(backoff);
-                    backoff = (backoff * 2).min(WRITE_TICKET_MAX_BACKOFF);
+                    std::thread::yield_now();
                     continue;
                 }
                 _ => return Err(err),
@@ -221,15 +255,48 @@ pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
         } else if n == 0 {
             return Err(Error::new(ErrorKind::WriteZero, "pipe write zero bytes"));
         } else {
-            // Progress: reset the stall window so a slow-but-live reader is not
-            // timed out by the cumulative wait of earlier partial writes.
-            blocked_since = None;
-            backoff = std::time::Duration::from_micros(50);
+            committed = true;
+            partial_spins = 0;
             remaining = &remaining[n as usize..];
         }
     }
 
     Ok(())
+}
+
+/// Writes an 8-byte ticket to the pipe file descriptor with EINTR/EAGAIN retries.
+///
+/// POSIX guarantees atomic writes for payloads up to PIPE_BUF (>= 512 bytes).
+///
+/// `EINTR` is retried without limit: Go's async preemption (`SIGURG`) interrupts
+/// syscalls on this thread constantly and makes no progress claim either way.
+/// `EAGAIN` means the pipe is genuinely full, so it backs off exponentially instead
+/// of spinning `yield_now` at 100% CPU, and gives up once [`WRITE_TICKET_TIMEOUT`]
+/// has elapsed.
+pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
+    let mut backoff = std::time::Duration::from_micros(50);
+    let mut blocked_since: Option<std::time::Instant> = None;
+
+    loop {
+        match write_ticket_attempt(fd, ticket) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                let since = *blocked_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= WRITE_TICKET_TIMEOUT {
+                    return Err(Error::new(
+                        ErrorKind::TimedOut,
+                        format!(
+                            "completion pipe full for {:?}; reader is not draining",
+                            WRITE_TICKET_TIMEOUT
+                        ),
+                    ));
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(WRITE_TICKET_MAX_BACKOFF);
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 /// Sets the given file descriptor to non-blocking mode (O_NONBLOCK).
@@ -263,6 +330,35 @@ pub fn close_fd(fd: i32) {
                 }
                 break;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_buffer_len_refuses_zero_and_the_ceiling_without_allocating() {
+        match check_buffer_len(0) {
+            Ok(()) => panic!("zero length must be refused"),
+            Err(e) => assert!(e.contains("greater than zero"), "got: {}", e),
+        }
+        match check_buffer_len(MAX_BUFFER_BYTES) {
+            Ok(()) => {}
+            Err(e) => panic!("exactly MAX_BUFFER_BYTES must be accepted, got: {}", e),
+        }
+        match check_buffer_len(MAX_BUFFER_BYTES.saturating_add(1)) {
+            Ok(()) => panic!("MAX_BUFFER_BYTES + 1 must be refused without allocating"),
+            Err(e) => assert!(e.contains("maximum"), "got: {}", e),
+        }
+    }
+
+    #[test]
+    fn allocate_refuses_above_maximum_without_touching_the_allocator() {
+        match RawBuffer::allocate(MAX_BUFFER_BYTES.saturating_add(1)) {
+            Ok(_) => panic!("allocate must refuse before posix_memalign"),
+            Err(e) => assert!(e.contains("maximum"), "got: {}", e),
         }
     }
 }

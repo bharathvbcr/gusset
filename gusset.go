@@ -2,7 +2,9 @@ package gusset
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"runtime/metrics"
 	"time"
 
@@ -90,11 +92,15 @@ func init() {
 }
 
 // Threads returns the current number of OS threads allocated by the Go scheduler.
-// Reads the /sched/threads:threads runtime metric (R11).
+// Reads `/sched/threads/total:threads` (R11; Go 1.27 catalogue name).
 func Threads() int64 {
+	// Go 1.26 release notes named `/sched/threads:threads`. The 1.27
+	// runtime/metrics catalogue publishes `/sched/threads/total:threads` and
+	// does not list the shorter name. Read the live name first so a KindBad
+	// on the historical alias cannot hide a real reading.
 	samples := []metrics.Sample{
-		{Name: "/sched/threads:threads"},
 		{Name: "/sched/threads/total:threads"},
+		{Name: "/sched/threads:threads"},
 	}
 	metrics.Read(samples)
 	for _, s := range samples {
@@ -109,6 +115,50 @@ func Threads() int64 {
 func DrainLogs(buf []byte) int {
 	return ffi.DrainLogs(buf)
 }
+
+// Shutdown drains the whole runtime within a budget: it refuses further
+// submissions, cancels every job on every live handle, and waits up to drain for
+// the work already running to finish.
+//
+// This is the bounded half of shutdown, and it is what [Handle.Close] is not.
+// Close joins its worker threads, so its latency is whatever the engine still
+// has left to do — the right trade, since detaching those threads would leave
+// them running against Rust memory that is about to be freed, but it means
+// Close alone gives an operator no way to cap shutdown. Shutdown first, with a
+// budget, then Close each handle: the cancel has already landed, so the join
+// is short.
+//
+// Returns nil when every work unit finished inside the budget. A non-nil error
+// means work was still in flight at the deadline and says so rather than
+// reporting a success the caller cannot rely on. Cancellation is cooperative:
+// an engine that never calls JobContext::check cannot be drained at all, so
+// that error is the expected outcome for one, not a malfunction.
+//
+// Process-wide and one-way. The refusal latch is global to the process and is
+// cleared only by re-initialising the runtime, which package init does once. A
+// process that has called Shutdown will refuse every later submission on every
+// handle, which is the intent — this is for shutting the process down, not for
+// quiescing one handle. To drain a single handle, close it.
+//
+// A drain longer than [MaxDrain] is capped to it; a negative drain is treated
+// as zero, which cancels everything and reports immediately.
+func Shutdown(drain time.Duration) error {
+	ms := drain.Milliseconds()
+	if ms < 0 {
+		ms = 0
+	}
+	if ms > int64(MaxDrain/time.Millisecond) {
+		ms = int64(MaxDrain / time.Millisecond)
+	}
+	return ffi.Shutdown(uint32(ms))
+}
+
+// MaxDrain caps [Shutdown]'s budget.
+//
+// The budget crosses the ABI as a uint32 of milliseconds, so it is bounded by
+// construction; capping here means a caller passing, say, a duration built from
+// a misparsed config never silently wraps into a short drain.
+const MaxDrain = time.Duration(^uint32(0)) * time.Millisecond
 
 // SpanContextKey is the context key Gusset reads trace correlation from.
 //
@@ -143,13 +193,22 @@ func ContextWithOpcode(ctx context.Context, opcode uint32) context.Context {
 }
 
 // extractCallHeader extracts timeout, trace/span context, and opcode if present.
-func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) ffi.CallHeader {
+//
+// An opcode that does not fit in the header's u32 is an error. Narrowing it
+// used to store the low 32 bits, and `1<<32` became 0 — the diagnostic engine.
+func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) (ffi.CallHeader, error) {
 	header := ffi.CallHeader{
 		Flags:    flags,
 		Reserved: defaultOpcode,
 	}
 
-	if deadline, ok := ctx.Deadline(); ok {
+	if ctx == nil {
+		return header, nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		header.TimeoutNS = 1 // Already expired or cancelled
+	} else if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining > 0 {
 			header.TimeoutNS = uint64(remaining.Nanoseconds())
@@ -158,14 +217,53 @@ func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) 
 		}
 	}
 
-	if sc, ok := ctx.Value(SpanContextKey).(TraceCarrier); ok {
+	if sc, ok := ctx.Value(SpanContextKey).(TraceCarrier); ok && sc != nil {
 		header.TraceID = sc.TraceID()
 		header.SpanID = sc.SpanID()
 	}
 
-	if op, ok := ctx.Value(OpcodeContextKey).(uint32); ok {
+	if opVal := ctx.Value(OpcodeContextKey); opVal != nil {
+		op, err := opcodeFromContext(opVal)
+		if err != nil {
+			return header, err
+		}
 		header.Reserved = op
 	}
 
-	return header
+	return header, nil
+}
+
+func opcodeFromContext(opVal any) (uint32, error) {
+	const reject = "gusset: opcode does not fit in uint32"
+	switch v := opVal.(type) {
+	case uint32:
+		return v, nil
+	case int32:
+		if v < 0 {
+			return 0, errors.New(reject)
+		}
+		return uint32(v), nil
+	case int:
+		if v < 0 || uint64(v) > math.MaxUint32 {
+			return 0, errors.New(reject)
+		}
+		return uint32(v), nil
+	case int64:
+		if v < 0 || v > math.MaxUint32 {
+			return 0, errors.New(reject)
+		}
+		return uint32(v), nil
+	case uint:
+		if uint64(v) > math.MaxUint32 {
+			return 0, errors.New(reject)
+		}
+		return uint32(v), nil
+	case uint64:
+		if v > math.MaxUint32 {
+			return 0, errors.New(reject)
+		}
+		return uint32(v), nil
+	default:
+		return 0, errors.New("gusset: opcode context value must be a 32-bit unsigned integer")
+	}
 }

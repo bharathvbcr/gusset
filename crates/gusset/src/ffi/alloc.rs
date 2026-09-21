@@ -46,6 +46,44 @@ pub fn counting_is_active() -> bool {
     COUNTING_ACTIVE.load(Ordering::Relaxed)
 }
 
+/// Adds `size` to the live counter without wrapping.
+///
+/// `fetch_add` plus `wrapping_add` turns a counter near `usize::MAX` into a
+/// small total. `AdviseMemoryLimit` would then treat a saturated Rust heap as
+/// nearly empty and raise the Go limit. Saturation sticks at the top.
+#[inline]
+fn add_live_bytes(size: usize) -> usize {
+    if size == 0 {
+        return LIVE_BYTES.load(Ordering::Relaxed);
+    }
+    let mut current = LIVE_BYTES.load(Ordering::Relaxed);
+    loop {
+        let next = current.saturating_add(size);
+        match LIVE_BYTES.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => {
+                update_peak(next);
+                return next;
+            }
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+/// Advances the allocation count, saturating at `usize::MAX`.
+#[inline]
+fn add_alloc_count() {
+    let mut current = ALLOC_COUNT.load(Ordering::Relaxed);
+    loop {
+        let next = current.saturating_add(1);
+        match ALLOC_COUNT.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 #[inline]
 fn update_peak(current_live: usize) {
     let mut peak = PEAK_BYTES.load(Ordering::Relaxed);
@@ -93,9 +131,8 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         let size = layout.size();
         let ptr = unsafe { self.inner.alloc(layout) };
         if !ptr.is_null() {
-            let live = LIVE_BYTES.fetch_add(size, Ordering::Relaxed) + size;
-            update_peak(live);
-            ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+            add_live_bytes(size);
+            add_alloc_count();
         }
         ptr
     }
@@ -112,9 +149,8 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         let size = layout.size();
         let ptr = unsafe { self.inner.alloc_zeroed(layout) };
         if !ptr.is_null() {
-            let live = LIVE_BYTES.fetch_add(size, Ordering::Relaxed) + size;
-            update_peak(live);
-            ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+            add_live_bytes(size);
+            add_alloc_count();
         }
         ptr
     }
@@ -125,14 +161,12 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
         let new_ptr = unsafe { self.inner.realloc(ptr, layout, new_size) };
         if !new_ptr.is_null() {
             if new_size > old_size {
-                let diff = new_size - old_size;
-                let live = LIVE_BYTES.fetch_add(diff, Ordering::Relaxed) + diff;
-                update_peak(live);
+                add_live_bytes(new_size - old_size);
             } else if old_size > new_size {
                 let diff = old_size - new_size;
                 dec_live_bytes(diff);
             }
-            ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+            add_alloc_count();
         }
         new_ptr
     }
@@ -157,9 +191,8 @@ pub fn record_alloc(size: usize) {
     if counting_is_active() {
         return;
     }
-    let live = LIVE_BYTES.fetch_add(size, Ordering::Relaxed) + size;
-    update_peak(live);
-    ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+    add_live_bytes(size);
+    add_alloc_count();
 }
 
 /// Records a deallocation that bypassed the counting wrapper.
@@ -232,6 +265,25 @@ mod tests {
             get_alloc_stats().live_bytes,
             0,
             "over-release must saturate at zero, never wrap around"
+        );
+
+        // `fetch_add` + `wrapping_add` turns a counter near usize::MAX into a
+        // small live total. AdviseMemoryLimit then treats a saturated Rust heap
+        // as nearly empty and raises the Go limit. Saturation must stick at
+        // the top, and this probe must restore the globals before it returns:
+        // they are process-wide and a later test reads the delta.
+        let saved_live = LIVE_BYTES.swap(usize::MAX - 8, Ordering::Relaxed);
+        let saved_peak = PEAK_BYTES.swap(0, Ordering::Relaxed);
+        let saved_count = ALLOC_COUNT.load(Ordering::Relaxed);
+        record_alloc(64);
+        let saturated = LIVE_BYTES.load(Ordering::Relaxed);
+        LIVE_BYTES.store(saved_live, Ordering::Relaxed);
+        PEAK_BYTES.store(saved_peak.max(saved_live), Ordering::Relaxed);
+        ALLOC_COUNT.store(saved_count, Ordering::Relaxed);
+        assert_eq!(
+            saturated,
+            usize::MAX,
+            "live bytes must saturate at usize::MAX; wrapping reports a tiny heap"
         );
     }
 }
