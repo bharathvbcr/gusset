@@ -22,11 +22,56 @@ jobs:
       - name: Build Rust static library
         run: cargo build --release
 
+      # Go tip (1.28) requires a bootstrap >= Go 1.26.0: src/make.bash sets
+      # bootgo=1.26.0, and src/cmd/dist/notgo126.go is //go:build !go1.26.
+      # Run 35594759554 died before any test, bootstrapping from the runner:
+      #   Building Go cmd/dist using /opt/hostedtoolcache/go/1.24.13/x64. (go1.24.13 linux/amd64)
+      #   found packages main (build.go) and building_Go_requires_Go_1_26_0_or_later (notgo126.go) in /home/runner/gotip/src/cmd/dist
+      # make.bash takes the first `go` on PATH when GOROOT_BOOTSTRAP is unset,
+      # and ubuntu-latest still has Go 1.24 in the toolcache. The pin matches
+      # the matrix (1.27.x), which is ahead of that floor.
+      - name: Set up Go bootstrap
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: false
+
       - name: Set up Go Tip
         run: |
-          git clone --depth=1 https://go.googlesource.com/go $HOME/gotip
-          cd $HOME/gotip/src && ./make.bash
-          echo "$HOME/gotip/bin" >> $GITHUB_PATH
+          gov="$(go env GOVERSION)"
+          bootstrap="$(go env GOROOT)"
+          echo "bootstrap ${gov} at ${bootstrap}"
+          ver="${gov#go}"
+          major="${ver%%.*}"
+          minor="${ver#*.}"
+          minor="${minor%%.*}"
+          minor="${minor%%[^0-9]*}"
+          if [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 26 ]; }; then
+            echo "bootstrap ${gov} is older than Go 1.26.0; src/cmd/dist/notgo126.go will refuse it" >&2
+            exit 1
+          fi
+          git clone --depth=1 https://go.googlesource.com/go "$HOME/gotip"
+          cd "$HOME/gotip/src" && GOROOT_BOOTSTRAP="$bootstrap" ./make.bash
+          echo "$HOME/gotip/bin" >> "$GITHUB_PATH"
+          # Subsequent steps must run this tree, not the bootstrap and not a
+          # toolchain line in go.mod. GITHUB_ENV applies on the next step.
+          echo "GOROOT=$HOME/gotip" >> "$GITHUB_ENV"
+          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+
+      - name: Confirm the test steps run on tip
+        run: |
+          go version
+          case "$(go version)" in
+            *devel*) ;;
+            *)
+              echo "expected a devel toolchain built from tip; got: $(go version)" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${GOROOT:-}" != "$HOME/gotip" ]; then
+            echo "GOROOT=${GOROOT:-<unset>} is not the tip tree at $HOME/gotip" >&2
+            exit 1
+          fi
 
       # The full unit and soak surface, not just `go test ./...`. A toolchain
       # change that breaks the thread-cap invariant would not show up in the

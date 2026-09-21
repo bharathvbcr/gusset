@@ -27,7 +27,7 @@ Develop on the latest stable of both languages; support latest and latest-minus-
 | --- | --- | --- | --- |
 | Develop and release | 1.27.x | 1.98.x | Everything shipped; `go.mod` says `go 1.26`, `rust-version = "1.97"` |
 | Supported floor | 1.26 | 1.97 | CI leg; a floor bump is a minor release with a changelog line |
-| Gates only | gotip (weekly job) | nightly (pinned by date, bumped monthly) | Go tip catches boundary changes early; nightly runs Miri, `-Zsanitizer=address`, `cargo-fuzz` |
+| Gates only | gotip (weekly job), bootstrapped from Go 1.27.x because tip requires >= 1.26.0 | nightly (pinned by date, bumped monthly) | Go tip catches boundary changes early; nightly runs Miri, `-Zsanitizer=address`, `cargo-fuzz` |
 | Never | anything below 1.22 | anything below 1.81 | 1.22 introduced `#cgo noescape`/`nocallback`; 1.81 made panics escaping `extern "C"` abort |
 
 Release-note facts to design around: Go 1.26 cut baseline cgo call overhead by about 30% and made the Green Tea GC default, so re-run `bench/` on every Go minor and never hard-code a nanosecond figure in docs; Go 1.26 randomizes the heap base on 64-bit builds, so any test that assumes pointer values is invalid; Go 1.26 added a scheduler thread metric; Go 1.27's `runtime/metrics` catalogue publishes it as `/sched/threads/total:threads` (the 1.26 notes named `/sched/threads:threads`), which is the thread-cap soak's assertion source; Go 1.27 made the `goroutineleak` pprof profile GA, which the completion-channel tests use to prove no waiter is leaked.
@@ -239,7 +239,7 @@ Three workflows: `matrix.yml` on every PR, `nightly.yml` daily, `tip.yml` weekly
 | `asan` | nightly | linux | `RUSTFLAGS=-Zsanitizer=address` + Rust suite; `go test -asan` for cross-free | Cross-free detected; everything else clean | live. `TestR4_CrossFreeIsDetectedUnderASan` detects double-free under ASan |
 | `miri` | nightly | linux | `cargo miri test -p gusset --lib` (non-FFI modules) | Header, alloc counting | live. Runs 7 core unit tests (`pool` tests carry `#[cfg_attr(miri, ignore)]`) |
 | `fuzz` | matrix | linux | `make fuzz` (Go native fuzzing) | Call boundary, diagnostic engine, buffer lifecycle | live. 4.56M execs on refusal path, 178K against diagnostic engine, 0 crashers |
-| `tip` | tip | linux | `gotip` + Rust beta | Full `unit` + `soak`; failure opens an issue tagged `toolchain` | live. Issue step reuses open `toolchain` issue |
+| `tip` | tip | linux | Go `1.27.x` bootstrap, then `./make.bash` with `GOROOT_BOOTSTRAP`; Rust stable | Full `unit` + `soak` on the built devel toolchain; failure opens an issue tagged `toolchain` | Bootstrap must be >= Go 1.26.0 (`notgo126.go`). `TestTipWorkflowBootstrapsFromGo1_26OrNewer` refuses a workflow that runs `./make.bash` on the runner's Go. Run 35594759554 died on Go 1.24.13 before tests |
 
 Panic zoo cases (all return `FFI_PANIC`, process alive, message and location populated): `&str` payload; `String` payload; non-string payload (`panic_any(42)`); NUL byte in message; panic inside error's `Display` impl.
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased] - 2026-09-21 · Go tip bootstrap
+
+- **The weekly tip job could not build Go (run 35594759554).** `Set up Go Tip` cloned tip and ran `./make.bash` with `GOROOT_BOOTSTRAP` unset, so the build used the runner image's Go: `Building Go cmd/dist using /opt/hostedtoolcache/go/1.24.13/x64. (go1.24.13 linux/amd64)` then `found packages main (build.go) and building_Go_requires_Go_1_26_0_or_later (notgo126.go)`. Go tip (1.28) requires a bootstrap >= Go 1.26.0 (`src/make.bash` `bootgo=1.26.0`, `src/cmd/dist/notgo126.go` `//go:build !go1.26`). The job now installs the matrix pin (`1.27.x`) and passes that tree as `GOROOT_BOOTSTRAP`. The suite's `go` floor stays 1.26; this is the compiler that builds tip, not the compiler Gusset ships against. `TestTipWorkflowBootstrapsFromGo1_26OrNewer` fails against the pre-fix workflow.
+
 ## [Unreleased] - 2026-09-20 · Audit and hardening
 
 Findings from a full audit of the v0.0.1 tree, validated by adopting Gusset in a
