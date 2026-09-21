@@ -34,9 +34,22 @@ func TestPhase2_CpuBoundEngine(t *testing.T) {
 		expectedAcc += v64 * v64
 	}
 
-	res, err := h.Call(ctx, payload)
+	// 10_001 bytes is past the 4 KiB inline copy ceiling (R16). Call would
+	// refuse a raw []byte; the CPU-bound path is a Rust-owned Buffer.
+	buf, err := h.NewBuffer(len(payload))
 	if err != nil {
-		t.Fatalf("CPU-bound Call failed: %v", err)
+		t.Fatalf("NewBuffer failed: %v", err)
+	}
+	defer buf.Free()
+	copy(buf.Bytes(), payload)
+
+	ticket, err := h.Submit(ctx, buf)
+	if err != nil {
+		t.Fatalf("CPU-bound Submit failed: %v", err)
+	}
+	res, err := h.Wait(ctx, ticket)
+	if err != nil {
+		t.Fatalf("CPU-bound Wait failed: %v", err)
 	}
 
 	if len(res) != 8 {

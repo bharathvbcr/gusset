@@ -201,17 +201,26 @@ Gusset exports strictly 14 C ABI functions from `libgusset.a` (enforced by `test
 - `gusset_buf_alloc(handle, len, out_id, out_ptr, status)`: Allocates 64-byte aligned Rust buffer.
 - `gusset_buf_free(handle, id, status)`: Frees Rust-owned buffer.
 
-### 10 Go Public Entry Points
+### 12 Go Public Entry Points
 - `gusset.Open(opts ...Option) (*Handle, error)`
-- `(*Handle).Close() error`
+- `(*Handle).Close() error` — cancels, then **joins** the pool. Its latency is whatever the engine still has left to do; see `gusset.Shutdown` for the budgeted half.
 - `(*Handle).Call(ctx context.Context, in []byte) ([]byte, error)`
+- `(*Handle).CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error)` — the zero-copy round trip. `Call` refuses `[]byte` over 4 KiB, so the payloads zero-copy is for are the ones it cannot carry.
 - `(*Handle).Submit(ctx context.Context, in any) (uint64, error)`
 - `(*Handle).Wait(ctx context.Context, ticket uint64) ([]byte, error)` (and `WaitBuffer` for zero-copy egress)
 - `(*Handle).NewBuffer(n int) (*Buffer, error)` (with `(*Buffer).Free() error`)
+- `gusset.Shutdown(drain time.Duration) error` — process-wide, one-way, budgeted drain. Returns non-nil when work was still in flight at the deadline rather than reporting a success the caller cannot rely on.
 - `gusset.Stats() AllocStats`
 - `gusset.AdviseMemoryLimit(total int64) int64`
 - `gusset.Threads() int64`
 - `gusset.DrainLogs(buf []byte) int`
+
+A context deadline bounds **the caller**, not the work. `Call` and `Wait` return
+`ctx.Err()` when the context expires, whatever the engine is doing; the pool
+permit stays with the still-running job until it actually stops, so in-flight
+work never exceeds the pool size. Cancellation itself is cooperative — an engine
+that never calls `JobContext::check` keeps running until it is done, and the only
+thing that changes is that nobody is blocked on it.
 
 ### 4 Boundary `#[repr(C)]` Types (ABI Version 2)
 At startup, `gusset_abi_layout` exports the memory layout of all four types crossing the FFI boundary. Go's `init()` checks them against both compiled-in constants and cgo's compiled struct layouts to prevent silent memory corruption:
@@ -250,13 +259,50 @@ cpu: Apple M5 Pro
 
 | Benchmark | sec/op | B/op | allocs/op |
 | :--- | ---: | ---: | ---: |
-| **Gusset Call No-op** | 13.43µ ± 6% | 161.0 ± 0% | 3.000 ± 0% |
-| **Gusset Call Parallel** | 4.128µ ± 7% | 161.0 ± 0% | 3.000 ± 0% |
-| **Gusset Submit & Wait** | 13.38µ ± 9% | 161.0 ± 1% | 2.000 ± 50% |
-| **Large Buffer (64 KiB)** | 20.44µ ± 8% | 64.16Ki ± 0% | 3.000 ± 0% |
-| **Channel Hop Baseline** | 19.10n ± 1% | 0.000 ± 0% | 0.000 ± 0% |
-
+| **Gusset Call No-op** | 12.98µ ± 3% | 161.0 ± 0% | 3.000 ± 33% |
+| **Gusset Call Parallel** | 4.086µ ± 2% | 159.0 ± 0% | 2.000 ± 0% |
+| **Gusset Submit & Wait** | 12.65µ ± 2% | 161.0 ± 0% | 3.000 ± 33% |
+| **Large Buffer (64 KiB, Copy)** | 19.87µ ± 1% | 64.16Ki ± 0% | 3.000 ± 0% |
+| **Large Buffer (64 KiB, Zero-Copy)** | 14.72µ ± 2% | 256.0 ± 0% | 5.000 ± 0% |
+| **Channel Hop Baseline** | 16.56n ± 2% | 0.000 ± 0% | 0.000 ± 0% |
 <!-- BENCHDOC:END -->
+
+### Raw blocking cgo versus Gusset
+
+The table above measures Gusset against itself. These charts measure it against
+the alternative it replaces — one blocking cgo call per request — on
+byte-identical work: `rs_spin` in `bench/seed/rs` and diagnostic mode 11 run the
+same integer loop, so the only difference between the two curves is transport.
+`make docs` redraws them from the committed raw data in
+`bench/results/crossover/`, and `make docs-check` fails if they drift.
+
+![Serial and parallel cost against work size](docs/img/crossover.svg)
+
+Fixed overhead and how quickly it stops mattering. Gusset loses on a no-op by
+construction; the question an adopter actually has is where the curves meet.
+
+![OS threads against in-flight requests](docs/img/threads.svg)
+
+The measurement the design rests on. A blocking cgo call parks an M inside Rust
+for its whole duration, so the thread count tracks **concurrency**; Gusset's
+callers park on a Go channel, so it tracks the **pool**.
+
+Each transport is measured in its own process (`make bench-crossover`,
+`make bench-scaling`). Go never destroys an M, so a shared process makes the
+second transport inherit every thread the first created and report that nothing
+happened — the benchmark now withholds its absolute thread count when it detects
+that case rather than printing an inherited number as a measurement.
+
+![Peak RSS against in-flight requests](docs/img/memory.svg)
+
+What those threads cost in resident memory — which is tens of megabytes, not the
+gigabytes the thread count invites you to assume. Reserved address space is the
+number that grows; it is not RAM.
+
+**[Should you adopt Gusset?](docs/choosing.md)** turns these charts into a
+decision: the two measurements that settle it, what an average, commercial or
+enterprise adopter each has to do differently, and the cases where the answer is
+"use raw cgo".
 
 ---
 
@@ -345,6 +391,7 @@ We welcome contributions! Please review our community guidelines before submitti
 - [Security Policy](SECURITY.md) — Responsible disclosure process for memory safety and panic firewall vulnerabilities.
 - [Code of Conduct](CODE_OF_CONDUCT.md) — Contributor Covenant v2.1.
 - [Why Gusset is Needed](docs/why.md) — The engineering rationale behind runtime impedance mismatches.
+- [Should you adopt Gusset?](docs/choosing.md) — Fit assessment by adoption tier, with the measured thresholds and the cases where raw cgo wins.
 
 ---
 

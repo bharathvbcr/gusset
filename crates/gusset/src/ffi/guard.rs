@@ -2,7 +2,7 @@
 #![allow(unsafe_code)]
 
 use super::status::{FfiStatus, FFI_ERR, FFI_OK, FFI_PANIC};
-use std::panic::{catch_unwind, set_hook, AssertUnwindSafe};
+use std::panic::{catch_unwind, set_hook, take_hook, AssertUnwindSafe};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -69,7 +69,11 @@ pub fn take_panic_location() -> Option<PanicLocation> {
 pub fn install_panic_hook() {
     static INSTALLED: AtomicBool = AtomicBool::new(false);
     if !INSTALLED.swap(true, Ordering::SeqCst) {
-        set_hook(Box::new(|info| {
+        // Record the location, then call the hook we replaced. libtest prints
+        // assertion failures through its hook; replacing it outright made every
+        // Rust test that opened a handle fail with no message.
+        let previous = take_hook();
+        set_hook(Box::new(move |info| {
             if let Some(l) = info.location() {
                 let loc = PanicLocation {
                     file: intern_file_string(l.file()),
@@ -86,6 +90,7 @@ pub fn install_panic_hook() {
                     list.push((id, loc));
                 }
             }
+            previous(info);
         }));
     }
 }

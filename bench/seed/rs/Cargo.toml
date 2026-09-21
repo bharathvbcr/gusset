@@ -7,3 +7,5 @@ crate-type = ["staticlib"]
 [profile.release]
 panic = "unwind"
 opt-level = 3
+
+[workspace]

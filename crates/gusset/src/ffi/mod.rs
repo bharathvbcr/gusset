@@ -295,6 +295,15 @@ pub unsafe extern "C" fn gusset_submit(
 
     if res.is_some() {
         FFI_OK
+    } else if h.is_poisoned() {
+        // submit() returns Err(String) for the poison latch, which ffi_guard
+        // maps to FFI_ERR. R10 is FFI_POISONED without a second reading.
+        if !status.is_null() {
+            unsafe {
+                ptr::write(status, FfiStatus::poisoned("handle is poisoned"));
+            }
+        }
+        FFI_POISONED
     } else if !status.is_null() {
         unsafe { (*status).code }
     } else {
@@ -499,18 +508,13 @@ pub unsafe extern "C" fn gusset_drain_logs(buf: *mut u8, len: usize, out_written
         return;
     }
 
-    if let Ok(mut log_buf) = LOG_BUFFER.lock() {
-        let count = log_buf.len().min(len);
-        unsafe {
-            ptr::copy_nonoverlapping(log_buf.as_ptr(), buf, count);
-            ptr::write(out_written, count);
-        }
-        log_buf.drain(..count);
-    } else {
-        unsafe {
-            ptr::write(out_written, 0);
-        }
+    let mut log_buf = LOG_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
+    let count = log_buf.len().min(len);
+    unsafe {
+        ptr::copy_nonoverlapping(log_buf.as_ptr(), buf, count);
+        ptr::write(out_written, count);
     }
+    log_buf.drain(..count);
 }
 
 /// 13. Allocates 64-byte aligned Rust-owned buffer memory (R16).
@@ -539,6 +543,15 @@ pub unsafe extern "C" fn gusset_buf_alloc(
     }
 
     let h = unsafe { &*handle };
+    if h.is_poisoned() {
+        if !status.is_null() {
+            unsafe {
+                ptr::write(status, FfiStatus::poisoned("handle is poisoned"));
+            }
+        }
+        return FFI_POISONED;
+    }
+
     let res = unsafe {
         ffi_guard(status, || {
             let (id, p) = h.buf_alloc(len)?;
@@ -550,6 +563,13 @@ pub unsafe extern "C" fn gusset_buf_alloc(
 
     if res.is_some() {
         FFI_OK
+    } else if h.is_poisoned() {
+        if !status.is_null() {
+            unsafe {
+                ptr::write(status, FfiStatus::poisoned("handle is poisoned"));
+            }
+        }
+        FFI_POISONED
     } else if !status.is_null() {
         unsafe { (*status).code }
     } else {

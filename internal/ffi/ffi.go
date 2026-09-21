@@ -59,6 +59,7 @@ package ffi
 */
 import "C"
 import (
+	"context"
 	"fmt"
 	"unsafe"
 )
@@ -87,11 +88,22 @@ func (e *Error) Error() string {
 }
 
 func (e *Error) Is(target error) bool {
-	t, ok := target.(*Error)
-	if !ok {
+	if e == nil {
 		return false
 	}
-	return e.Code == t.Code
+	if t, ok := target.(*Error); ok {
+		return e.Code == t.Code
+	}
+	// Rust reports cooperative cancel as FFI_ERR with "cancelled: {reason}".
+	// Callers already use errors.Is(..., context.DeadlineExceeded / Canceled);
+	// matching only *Error by code made a correctly cancelled job look unexpected.
+	switch target {
+	case context.DeadlineExceeded:
+		return e.Msg == "cancelled: DeadlineExceeded"
+	case context.Canceled:
+		return e.Msg == "cancelled: Explicit"
+	}
+	return false
 }
 
 // Sentinel errors for matching with errors.Is.

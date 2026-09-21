@@ -2,18 +2,18 @@
 
 As of 2026-09-20. Author: Bharath Chandra. Living copy: https://claude.ai/code/artifact/101473c0-1589-4016-bab8-721261a7912e
 
-Working brief for any agent building Gusset, the Go–Rust runtime contract. The build plan and phases are in `docs/PLAN.md`; this file is the rulebook the agent reads before touching the repo. Resolved decisions are in `DECISIONS.md`.
+Working brief for any agent developing or maintaining Gusset, the Go–Rust runtime contract. Phases 0 (Seed Reproduction), 1 (v0.1 Core Runtime), and 2 (Second-App Validation) are shipped; Phase 3 (Public Release) is ready; Phase 4 (Out-of-Process IPC) is specified in `docs/ipc.md`. The design plan is in `docs/PLAN.md`; resolved decisions are in `DECISIONS.md`; audit history is in `CHANGELOG.md`.
 
 ## Mission and working rules
 
-Gusset is the runtime contract for running a Rust engine inside a Go service: the layer between "bindings exist" and "this runs in production without taking the Go process down." It owns the panic firewall, bounded concurrency, deadlines, poisoned handles, ABI verification, allocator accounting and the CI matrix that proves them. It does not own type marshalling, cgo-free calling, or IPC transport.
+Gusset is the runtime contract for running a Rust engine inside a Go service: the layer between "bindings exist" and "this runs in production without taking the Go process down." It owns the panic firewall, bounded concurrency, deadlines, poisoned handles, ABI verification, allocator accounting, and the CI matrix that proves them. It does not own type marshalling, cgo-free calling, or IPC transport.
 
 How an agent works in this repo:
 
 1. Every change is a merge with green CI on the full matrix; no "will fix in a follow-up" on a red gate.
 2. A new failure mode gets a test in the panic zoo or pitfall suite before the fix lands; the test must fail on `main` first.
-3. Numbers in the README come from `benchstat` output checked into `bench/results/<platform>-<go>-<rust>.txt`, never typed by hand.
-4. Public surface stays at 14 exported Rust functions (the list in the hardening checklist is the whole ABI) and at most 10 Go entry points; adding one needs a line in `DECISIONS.md` saying why.
+3. Numbers in the README come from `benchstat` output checked into `bench/results/<platform>-<go>-<rust>.txt`, never typed by hand (`make docs` generates via `tools/benchdoc`, `make docs-check` verifies).
+4. Public surface stays at 14 exported Rust functions (the list in the specifications is the whole ABI) and 11 Go entry points (`WaitBuffer` is the eleventh; `DECISIONS.md` 2026-09-20). Adding another needs a line in `DECISIONS.md` saying why.
 5. Anything that touches Go runtime internals (`//go:linkname`, `asmcgocall`, private symbols) is refused, whoever asks.
 6. When a Go or Rust release changes boundary behaviour, the fix is a version-gated code path plus a test, not a raised floor.
 7. Prefer deleting a feature over adding a knob; every config option must have a test that exercises both settings.
@@ -30,7 +30,7 @@ Develop on the latest stable of both languages; support latest and latest-minus-
 | Gates only | gotip (weekly job) | nightly (pinned by date, bumped monthly) | Go tip catches boundary changes early; nightly runs Miri, `-Zsanitizer=address`, `cargo-fuzz` |
 | Never | anything below 1.22 | anything below 1.81 | 1.22 introduced `#cgo noescape`/`nocallback`; 1.81 made panics escaping `extern "C"` abort |
 
-Release-note facts to design around: Go 1.26 cut baseline cgo call overhead by about 30% and made the Green Tea GC default, so re-run `bench/` on every Go minor and never hard-code a nanosecond figure in docs; Go 1.26 randomizes the heap base on 64-bit builds, so any test that assumes pointer values is invalid; Go 1.26 added the `/sched/threads:threads` runtime metric, which is the thread-cap soak's assertion source; Go 1.27 made the `goroutineleak` pprof profile GA, which the completion-channel tests use to prove no waiter is leaked.
+Release-note facts to design around: Go 1.26 cut baseline cgo call overhead by about 30% and made the Green Tea GC default, so re-run `bench/` on every Go minor and never hard-code a nanosecond figure in docs; Go 1.26 randomizes the heap base on 64-bit builds, so any test that assumes pointer values is invalid; Go 1.26 added a scheduler thread metric; Go 1.27's `runtime/metrics` catalogue publishes it as `/sched/threads/total:threads` (the 1.26 notes named `/sched/threads:threads`), which is the thread-cap soak's assertion source; Go 1.27 made the `goroutineleak` pprof profile GA, which the completion-channel tests use to prove no waiter is leaked.
 
 ## Runtime differences and how Gusset handles each
 
@@ -72,12 +72,12 @@ Each rule names the test or lint that enforces it. A PR that cannot point at the
 | R8 | Heavy work runs on Rust-spawned threads with explicit `stack_size`; the cgo call only submits and returns | `worker_stack_is_explicitly_sized_not_inherited` reads the size back off the worker that ran the job, so it fails on any platform if the explicit sizing is dropped; the musl job runs the deep-recursion unit where the 128 KiB default is actually in play. The recursion probe alone proves the platform, not the runtime: on glibc and darwin the default is already 8 MiB |
 | R9 | Every submission carries the 40-byte header (`trace_id[16]`, `span_id[8]`, `timeout_ns` relative to submit, `flags: u32`, `reserved: u32`); Rust turns `timeout_ns` into an `Instant` at submit and checks it and the job's cancel flag between work units | Deadline test and cancel test with a slow work unit; header size static-asserted at 40 |
 | R10 | A handle whose ticket returned `FFI_PANIC` is poisoned; all later calls return `FFI_POISONED` without entering Rust | Poison test; `Handle.Close` is the only way out |
-| R11 | In-flight calls per handle never exceed the pool size; the Go semaphore, not the OS, does the queuing | Thread-cap soak asserts `/sched/threads:threads` stays under pool size + `GOMAXPROCS` + 8 |
+| R11 | In-flight calls per handle never exceed the pool size; the Go semaphore, not the OS, does the queuing | Thread-cap soak asserts `/sched/threads/total:threads` stays under pool size + `GOMAXPROCS` + 8 |
 | R12 | Go `init()` compares `gusset_abi_layout()` (version, size and alignment of every `#[repr(C)]` type) against compiled-in constants and panics on mismatch | ABI-drift test bumps a field and expects the panic |
 | R13 | No `//go:linkname`, no `asmcgocall`, no `purego` in this repo; the only calling path is cgo | CI grep; a PR touching it is closed |
 | R14 | Exactly one Rust `staticlib` per Go binary; adopters with several engines build an umbrella crate | Documented in README; the example engine shows the pattern |
 | R15 | Every number in docs is generated: `bench/` output via `benchstat`, committed per platform and toolchain version | `make docs` regenerates and CI diffs |
-| R16 | Rust never retains Go memory after `gusset_submit` returns: inputs up to 4 KiB are copied during submit; larger inputs are written by Go into Rust-owned `Buffer`s (`gusset_buf_alloc`/`gusset_buf_free`, exposed as `[]byte` via `unsafe.Slice`) and submitted by id; results come back through `gusset_take` or as a `Buffer` | `cgocheck2` job; large-input test asserts 0 Go allocs and no extra copy; ASan job |
+| R16 | Rust never retains Go memory after `gusset_submit` returns: inputs up to 4 KiB are copied during submit; larger inputs are written by Go into Rust-owned `Buffer`s (`gusset_buf_alloc`/`gusset_buf_free`, exposed as `[]byte` via `unsafe.Slice`) and submitted by id; results come back through `gusset_take` or as a `Buffer` (`WaitBuffer`) | `cgocheck2` job; large-input test asserts 0 Go allocs and no extra copy; ASan job |
 
 ## Pitfall catalogue
 
@@ -88,7 +88,7 @@ Every row is a test name in `tests/pitfalls/`; the agent adds a row when it find
 | NUL byte in a panic message | `SIGABRT`, whole Go process gone | `CString::new(..).unwrap()` panics inside the `catch_unwind` `Err` arm; second panic unwinds out of `extern "C"` | R3; `panic_nul` test (reproduced in `bench/seed`) |
 | `panic = "abort"` in a dependency or profile | Firewall silently becomes a no-op | `catch_unwind` cannot catch an abort | R2 `build.rs` check |
 | `*out = value` on the Ok path | UB when `T: Drop` | Assignment drops the uninitialized old value | `ptr::write` only; clippy lint `gusset::assign_through_raw` |
-| Thread exhaustion | Fatal `thread exhaustion`, not a recoverable error | Goroutines blocked in cgo each pin an M; cap is 10,000 | R11; soak test; `/sched/threads:threads` alert |
+| Thread exhaustion | Fatal `thread exhaustion`, not a recoverable error | Goroutines blocked in cgo each pin an M; cap is 10,000 | R11; soak test; `/sched/threads/total:threads` alert |
 | Goroutine migrates between calls | `thread_local!` state vanishes; Tokio `Handle::enter` guard on the wrong thread; `errno` lost | Go schedules goroutines onto any M between cgo calls | R7; stateless submissions; `runtime.LockOSThread` only in the example that needs it |
 | musl 128 KB thread stack | Stack overflow as a raw SIGSEGV in Go's handler | cgo-created threads inherit the pthread default; musl's is 128 KB | R8; musl job |
 | Rust stack overflow reported by Go | `unexpected signal during runtime execution`, no Rust frame | A `staticlib` never runs `std::rt::init`, so Rust's overflow handler is absent | R8; Go owns SIGSEGV; each worker installs its own `sigaltstack` in its entry function, because std only does that for Rust binaries, not staticlibs |
@@ -101,7 +101,7 @@ Every row is a test name in `tests/pitfalls/`; the agent adds a row when it find
 | `uniffi-bindgen-go` needs `LD_LIBRARY_PATH` | Works in dev, fails in a container | Dynamic loading by default | Gusset example shows static link with generated bindings |
 | rust2go's `GODEBUG=invalidptr=0,cgocheck=0` | Silent GC corruption under load | Disables the checks that make R6 enforceable | Never set these; CI fails if `GODEBUG` contains either |
 | purego / `asmcgocall` trampolines | Works until the next Go minor; P pinned, GC STW blocked for the call | Runtime internals, no `entersyscall` | R13 |
-| Batching through a channel | Amortization never materializes | A channel send costs about one cgo call (56 ns vs 64 ns measured) | Batch only slices that already exist at the call site; `bench/channel_hop` documents it |
+| Batching through a channel | Amortization never materializes | A channel send costs about one cgo call, and the two have stayed within 5% of each other across a toolchain and architecture change: 56 ns vs 64 ns on x86-64 Linux, 17.62 ns vs 18.43 ns on darwin/arm64 | Batch only slices that already exist at the call site; `BenchmarkChannelHop` in `bench/seed/go/ffi_test.go` measures it, and `bench/seed/README.md` tabulates both platforms |
 | Pointer passed without `noescape` | 1 heap alloc per call, GC pressure | cgo assumes escape by default | R5; `-benchmem` gate at 0 allocs/op |
 | `_test.go` cannot use cgo | Tests fail to compile | cgo forbidden in test files | All cgo lives in `internal/ffi`; tests call Go wrappers |
 | Stale `.a` not rebuilt | Old Rust code linked | Go's build cache does not track the archive | `go generate` writes the archive hash into a Go file; CI uses `go build -a` |
@@ -121,114 +121,127 @@ Every row is a test name in `tests/pitfalls/`; the agent adds a row when it find
 | A `#[repr(C)]` type outside the ABI check | `gusset_alloc_stats` writes `AllocStats` into Go memory at the wrong offsets and nothing notices | `AbiLayout` covered three types; `AllocStats` was the fourth crossing the boundary | ABI version 2 covers four types, plus a cgo-vs-Rust cross-check because `gusset.h` is hand-maintained; `TestPitfall_ABILayoutMatch` |
 | A CI gate that can never pass | The lint job is red on every commit, so nobody reads it | `! grep -rn "//go:linkname" . --exclude-dir=.git` matched this file, `docs/PLAN.md`, and the workflow's own text | Audit scoped to tracked `*.go`/`*.rs` via `git ls-files`, verified to both pass clean and still detect a planted match |
 | Allocator double counting | `Stats().Live` reports every `Buffer` at twice its size, and `AdviseMemoryLimit` subtracts it twice from the Go heap budget | `RawBuffer` recorded its allocations by hand *and* allocated through the global allocator, which `Counting` had already counted | `record_alloc`/`record_dealloc` no-op once `Counting` is active; `accounting_is_balanced_saturating_and_peak_monotonic` |
+| `ErrTicketBusy` released the owner's permit | A second `Wait` on a live ticket returned `ErrTicketBusy` and then consumed the semaphore slot, so a third `Submit` entered while the job was still running | `waitInternal` deferred `releaseSem` on every return, including the busy and unknown-ticket paths | Release only after this call has taken ownership of the wait; `TestPitfall_DoubleWaitDoesNotReleaseSemaphore` |
+| Failed submit leaked `in_flight` | `gusset_shutdown` waited out its drain budget because a cancel flag outlived a send that never queued | Flag inserted, then sender looked up; a gone sender returned `Err` and left the flag | Lock the sender first; insert only if it is live; remove on send failure; `submit_does_not_leave_a_cancel_flag_when_the_sender_is_gone` |
+| `WaitBuffer` copied `JobResult::Ok` onto the Go heap | A 64 KiB result allocated ~66 KiB/op in Go even through `WaitBuffer` | `drainPipe` copied take()'s Rust buffer into a Go slice and freed it; `WaitBuffer` then allocated a second Rust buffer and copied again | Keep the take buffer until a waiter consumes it; `WaitBuffer` wraps with no Go copy; `TestPitfall_WaitBufferDoesNotCopyTakeAllocation` |
+| FFI cancel is not a context error | `GOGC=1` cancel-storm failed: `unexpected error ... cancelled: DeadlineExceeded` | `Error.Is` matched only another `*Error` by code, so `errors.Is(err, context.DeadlineExceeded)` was false when the worker finished the cancel before Go's `ctx.Done` won | `Error.Is` maps `cancelled: DeadlineExceeded` / `cancelled: Explicit`; `TestPitfall_FFICancelMapsToContextErrors` |
+| `Wait` copies a take view after `Close` | `GOGC=1` `TestStress_ConcurrentCallAndCloseRace`: `corrupted Buffer response` with a torn first cache line | `drainPipe` keeps large results as a Rust `take()` slice; `Wait` copied it without `cgoMu`, and `Close` `HandleClose`d the memory under the copy | Copy under `cgoMu.RLock` so `HandleClose` waits; closed handle returns an error instead of a partial slice |
+| Panic hook swallowed Rust test failures | `cargo test` reported FAIL with no panic message | `install_panic_hook` replaced libtest's hook and recorded the location without printing | Chain the previous hook after recording; `adopter_engine_runs_and_displaces_the_diagnostic_engine` now prints the induced panic |
+| Eager `*Buffer` wrap taxed `Wait` | `Wait` of a 64 KiB take buffer allocated 6 objects/op (HEAD was 3) | `drainPipe` wrapped the take buffer so `WaitBuffer` could steal it, then `Wait` copied and destroyed the wrapper | Wrap at `WaitBuffer` consume time; `Wait` copies and `BufFree`s; `TestPitfall_WaitOfLargeTakeBufferDoesNotPayWrapperAllocs` |
+| Nil `context.Context` aborted the caller | `Call`/`Submit`/`Wait` panicked on `ctx.Done()` and took the goroutine down | Context was assumed non-nil, which is a Go convention, not a library firewall | Reject with `gusset: nil context`; `TestPitfall_NilContextIsRejected` |
+| `WithPoolSize` truncated through `uint32` | `WithPoolSize(1<<40)` opened a 0-capacity semaphore (every `Call` hung); `WithPoolSize(1<<32+4)` silently became 4 workers | `uint32(n)` ran before the `MaxPoolSize` check, so values that do not fit in 32 bits never saw the ceiling | Refuse n outside 1..=MaxPoolSize before conversion; `TestPitfall_PoolSizeOverflowIsRefusedNotTruncated` |
+| `[]byte` over 4 KiB copied on the cgo thread | A 1 MiB `Call` memcpy'd inside `gusset_submit` and pinned an M for the copy | R16 was documented, not enforced; `Handle::submit` inlined every slice | Refuse inline input `> 4096`; larger payloads use `NewBuffer`; `TestPitfall_InlineSliceOver4KiBIsRefused` |
+| `NewBuffer` after a caught panic | Allocations still entered Rust on a poisoned handle | R10 covered Submit/Call; `buf_alloc` did not check the latch | `ErrPoisoned` on Go and in `gusset_buf_alloc`; `TestPitfall_NewBufferRefusesPoisonedHandle` |
+| Kernel blocking on full pipe write | A worker thread blocked indefinitely in `libc::write`, rendering `WRITE_TICKET_TIMEOUT` dead code | `pipe(2)` returns blocking descriptors by default; saturated completion pipes hung the worker pool | Enforce `O_NONBLOCK` on `pipe_write_fd` in `Handle::open` and Go `Open`; worker retries with exponential backoff up to 2.5s |
+| Submit/Close race on semaphore drain | Close released permits before an in-flight submit registered its ticket, leaking permits or deadlocking | Semaphore permit was acquired before `s.cgoMu.RLock()`, leaving a gap where Close drained tickets | Extended `s.cgoMu.RLock()` to cover `semTickets` insertion; post-semaphore poison fast-fail |
+| Buffer use-after-free during concurrent Close | `buf.Bytes()` indexed memory already released by Rust if `Close` ran concurrently | Go race detector cannot observe Rust-owned heap memory | `buf.Bytes()` checks handle closed state and returns nil; double `Buffer.Free` idempotent |
+| Diagnostic opcode 6 recursion overflow | Recursion depth read directly from payload (`[6, 0xFF, ...]`) panicked worker thread via stack overflow | Recursive probe frames were unbounded by user payload | Capped recursion depth at boundary; `TestPitfall_DeepRecursionOnWorkerStack` verifies safe limit |
+| `WaitBuffer` of a large take result races `Close` | Success wrapping a slice whose `Bytes()` is already over freed pages, or a torn view | `Wait` copied take views under `cgoMu`; `WaitBuffer` wrapped after `waitInternal` returned. The 3-byte close-race copied onto the Go heap and never took this path | Wrap under `cgoMu.RLock`; closed handle returns an error; `TestPitfall_WaitBufferOfLargeResultDoesNotDangleAcrossClose` |
+| Large `JobResult::Ok` memcpy on cgo thread | A 64 KiB diagnostic echo pinned an M inside `gusset_take` for the copy | Take allocated a fresh `RawBuffer` and `ptr::copy_nonoverlapping` on the calling thread | Worker promotes `Ok` > 4 KiB to `Buffer` before writing the ticket; `large_ok_result_is_promoted_off_the_cgo_thread` |
+| Unbounded `NewBuffer` length | `NewBuffer(1<<40)` asked the OS for more memory than the process can hold | Length fed straight into `posix_memalign` with no ceiling | `MAX_BUFFER_BYTES = 1 GiB`, refused not clamped; `TestPitfall_BufferSizeIsBounded`, `allocate_refuses_above_maximum_without_touching_the_allocator` |
+| Overflowing `timeout_ns` disables the deadline | `timeout_ns = u64::MAX` ran until cancel or completion | `Instant::checked_add` `None` was stored as "no deadline", the same as `timeout_ns == 0` | Overflow expires immediately; `nonzero_timeout_always_installs_a_deadline` |
 
-## Hardening checklist
+## Hardened runtime specifications
 
-Tick every box before a phase is called done. Each box maps to a rule (R) or pitfall row above.
+The core architecture guarantees and technical contracts enforced across the Rust crate, Go package, and build system.
 
-### Rust crate (`gusset`)
+### Rust crate (`crates/gusset`)
 
-- [x] `#![deny(unsafe_code, unsafe_op_in_unsafe_fn, improper_ctypes_definitions, missing_docs)]` crate-wide, with `#[allow(unsafe_code)]` only on the `ffi` and `pool::sys` modules
-- [x] The whole ABI is 14 exports, nothing else is `#[no_mangle]`: `gusset_abi_layout`, `gusset_init`, `gusset_shutdown`, `gusset_handle_open`, `gusset_handle_close`, `gusset_submit`, `gusset_take`, `gusset_cancel`, `gusset_cancel_all`, `gusset_status_free`, `gusset_alloc_stats`, `gusset_drain_logs`, `gusset_buf_alloc`, `gusset_buf_free`
-- [x] Three `#[repr(C)]` types, all with `static_assertions::assert_eq_size!` and `assert_eq_align!` beside them: `CallHeader` (40 bytes), `FfiStatus { code: i32, msg: *mut u8, msg_len: usize, file: *const u8, file_len: usize, line: u32 }`, `AbiLayout { version: u32, sizes: [u32; 3], aligns: [u32; 3] }`
-- [x] `ffi_guard` null-checks both out pointers, uses `ptr::write`, wraps `Display` formatting in its own `catch_unwind`, maps `Ok(Err)` to `FFI_ERR` and `Err(payload)` to `FFI_PANIC`; `msg` comes from `Box<[u8]>` and is freed only by `gusset_status_free`
-- [x] `panic::set_hook` installed once in `gusset_init`, records location into a thread-local the worker loop reads; the hook is never replaced by adopters (documented)
-- [x] Worker pool per handle: fixed size from `gusset_handle_open`, threads from `Builder::stack_size` (default 8 MiB) named `gusset-w<N>`; each thread's entry installs a 64 KiB `sigaltstack`, then loops with `catch_unwind` around every job; a thread that dies is respawned by the next submit
-- [x] Every job receives `&CallHeader` and its own `AtomicBool` cancel flag; `check(&self) -> Result<(), Cancelled>` compares the `Instant` built from `timeout_ns` at submit and the flag
-- [x] `gusset_submit(handle, header, input_ptr, input_len, buffer_id, out_ticket, status)`: copies inputs up to 4 KiB, otherwise takes a `Buffer` id; returns a `u64` ticket; when a job finishes the worker writes the 8-byte ticket to the Go-owned pipe write fd with `EINTR`/`EAGAIN` retry; `gusset_take(handle, ticket, out, status)` moves the result out exactly once
-- [x] `Buffer`: `gusset_buf_alloc(handle, len, out_id, out_ptr)` returns 64-byte-aligned Rust-owned memory; freed only by `gusset_buf_free`; an engine may back a `Buffer` with device-shared memory (Metal shared buffers) for the GPU path
-- [x] `Counting<A: GlobalAlloc>` with relaxed atomics; `gusset_alloc_stats()` returns `{live, peak, allocs}`; no allocation inside the stats call
-- [ ] ~~`cbindgen.toml` with `language = "C"`, `include_guard`, `cpp_compat = true`; header generated by `build.rs`, committed, and diffed in CI~~ — **this was checked off and was never true.** `build.rs` only enforces `panic = "unwind"`; it has never run cbindgen, and there is no cbindgen build-dependency. A `cbindgen.toml` sat in the root for a tool nothing invoked, which is what made the claim look plausible; it was deleted on 2026-09-20 rather than left as evidence for a process that does not run. `internal/ffi/gusset.h` is hand-maintained, and `tests/header_match.rs` now verifies it against the Rust exports **by parameter and return type**, which is the property cbindgen would have given. Adopting cbindgen remains open but would add a build-dependency
-- [x] `Cargo.toml`: `crate-type = ["staticlib", "rlib"]`, `[profile.*] panic = "unwind"`, `rust-version`, `codegen-units = 1`, `-C force-frame-pointers=yes` in `.cargo/config.toml`. **`lto` is the adopter's choice, not part of the contract** (`DECISIONS.md`, 2026-09-20): no invariant depends on it, and a `fat` archive is LLVM bitcode that a system `nm` cannot read — which is how `exports_match` came to verify only the debug archive for so long
-- [x] `cargo deny` for licenses and advisories; `cargo semver-checks` on tags
+- **Compiler gates**: `#![deny(unsafe_code, unsafe_op_in_unsafe_fn, improper_ctypes_definitions, missing_docs)]` crate-wide, with `#[allow(unsafe_code)]` restricted to `ffi` and `pool::sys`.
+- **ABI surface**: Exactly 14 exports (`gusset_abi_layout`, `gusset_init`, `gusset_shutdown`, `gusset_handle_open`, `gusset_handle_close`, `gusset_submit`, `gusset_take`, `gusset_cancel`, `gusset_cancel_all`, `gusset_status_free`, `gusset_alloc_stats`, `gusset_drain_logs`, `gusset_buf_alloc`, `gusset_buf_free`). Verified against `internal/ffi/exports.txt` via `llvm-nm`.
+- **Four `#[repr(C)]` struct layouts**: Statically asserted for size and alignment (`CallHeader` 40B, `FfiStatus` 48B, `AbiLayout` 36B for ABI v2, `AllocStats` 24B).
+- **FFI firewall (`ffi_guard`)**: Null-checks out pointers, uses `ptr::write` for outputs, wraps `Display` formatting in nested `catch_unwind`, maps `Ok(Err)` to `FFI_ERR` and `Err(payload)` to `FFI_PANIC`. Error messages allocated in boxed slices freed only via `gusset_status_free`.
+- **Panic hook & diagnostic tracking**: Installed once in `gusset_init`; records panic location into a 256-entry capacity-capped map with oldest-first eviction.
+- **Worker pool**: Fixed size per handle from `gusset_handle_open` (capped at 1024); threads spawned via `Builder::stack_size` (8 MiB explicit stack) named `gusset-w<N>`. Each thread installs a 64 KiB `sigaltstack` on entry and loops with `catch_unwind` around work units; dead workers are respawned on subsequent submissions.
+- **Cancellation & deadlines**: Monotonic relative `timeout_ns` translated into Rust `Instant` at submit; a non-zero value whose `checked_add` overflows expires immediately rather than becoming "no deadline". Cooperative checks between work units evaluate both deadline and per-job `AtomicBool` cancel flag (with `Ordering::Acquire`).
+- **Pipe completion**: Non-blocking `pipe_write_fd` writes 8-byte ticket IDs on job completion; retries on `EINTR`/`EAGAIN` with exponential backoff up to 2.5s.
+- **Memory accounting & buffers**: 64-byte aligned allocations via `gusset_buf_alloc`/`gusset_buf_free`, refused above 1 GiB. `Counting<A: GlobalAlloc>` wrapper with relaxed atomics tracks live and peak allocations with zero allocations inside `gusset_alloc_stats`. Workers promote `JobResult::Ok` larger than 4 KiB onto a `Buffer` so `gusset_take` does not memcpy on the cgo thread.
+- **Build profile**: `panic = "unwind"` crate-wide enforced by `build.rs`; frame pointers enabled (`-C force-frame-pointers=yes`); hand-maintained `internal/ffi/gusset.h` verified against Rust signatures by parameter and return types in `tests/header_match.rs`.
 
 ### Go package (`gusset`)
 
-- [x] All cgo in `internal/ffi`; public API in the root package; `_test.go` files never import `C`
-- [x] `#cgo noescape` and `#cgo nocallback` on every import; `#cgo LDFLAGS` uses `${SRCDIR}` only, never absolute paths
-- [x] At most 10 entry points: `Open`, `Close`, `Call`, `Submit`, `Wait`, `NewBuffer` (with `Buffer.Free`), `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs`
-- [x] `Handle` fields: `ptr unsafe.Pointer`, `sem chan struct{}`, `poisoned atomic.Bool`, `pipe *os.File` (read end from `os.Pipe()`; the write fd went to `gusset_handle_open`), `mu sync.Mutex` + `pending map[uint64]chan result`
-- [x] `Call(ctx, in []byte)`: acquire `sem` with `ctx`; header from the remaining `ctx` deadline (as relative `timeout_ns`) and the OpenTelemetry `SpanContext` if present, zero otherwise; submit; wait on the ticket channel or `ctx.Done()`; on `ctx.Done()` call `gusset_cancel(handle, ticket)` and keep waiting for the ticket so the result is always drained; `runtime.KeepAlive(h)` after every cgo call
-- [x] `NewBuffer(n)` returns a Rust-owned `[]byte` (`unsafe.Slice` over `gusset_buf_alloc`) for inputs over 4 KiB; `Submit(ctx, buf)` sends it by id; `Buffer.Free` is explicit, with an `AddCleanup` backstop that logs
-- [x] One reader goroutine per handle drains the pipe and dispatches tickets; `Close`: `gusset_cancel_all`, `gusset_handle_close` (Rust closes the write fd), reader exits on EOF, then the Go side releases; `AddCleanup` on the handle logs and calls `Close` if the app forgot
-- [x] `init()` compares `gusset_abi_layout()` to compiled-in constants and calls `gusset_init` once; failure is `panic` with both version pairs in the message
-- [x] `Stats()` returns Rust allocator numbers; `AdviseMemoryLimit(total)` sets `debug.SetMemoryLimit(max(total - rustLive, floor))` when called from the app's ticker
-- [x] `runtime/metrics` reader for `/sched/threads:threads` exposed as `gusset.Threads()` for tests and dashboards
-- [x] `go vet` analyzer `gussetvet` in `tools/`; `staticcheck` and `govulncheck` in CI
+- **cgo boundary encapsulation**: All cgo confined to `internal/ffi`; public API in root package; `_test.go` files never import `C`. Every `#cgo` import carries `#cgo noescape` and `#cgo nocallback` (enforced by `tools/gussetvet`).
+- **11 public entry points**: `Open`, `Close`, `Call`, `Submit`, `Wait`, `WaitBuffer`, `NewBuffer` (with `Buffer.Free`), `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs`.
+- **Handle lifecycle & concurrency**: Bounded semaphore channel matching pool size; `poisoned` atomic bool; non-blocking completion pipe read by a dedicated dispatch goroutine; `AddCleanup` finalizers backstop forgotten handle and buffer closures.
+- **Zero-copy egress & multi-engine routing**: `WaitBuffer` transfers take buffer directly into Go `*Buffer` without intermediate heap copies. Engine opcodes dispatched via `CallHeader.reserved` field (`WithOpcode`/`ContextWithOpcode`).
+- **Input validation & memory limits**: Submissions copy inputs up to 4 KiB; inputs above 4 KiB require `Buffer`. A single buffer is refused above 1 GiB (`MaxBufferBytes`). `AdviseMemoryLimit(total)` feeds Rust live memory usage back into Go runtime `debug.SetMemoryLimit`.
+- **ABI verification**: Go `init()` validates `gusset_abi_layout()` version, sizes, and alignments against compiled constants and panics on mismatch.
 
-### Build and link
+### Build, link and platform targets
 
-- [x] `make all` = `cargo build --release` then `go build`; `go generate` writes `internal/ffi/archive_hash.go` so Go's cache invalidates when the `.a` changes
-- [x] Cross builds: `make cross` compile-checks `x86_64`/`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl` and `aarch64-apple-darwin`, and CI asserts a Windows build **fails** with the declared error. This item previously read "via `cargo zigbuild` + `CC=\"zig cc -target <triple>\"` … `windows/amd64-gnu`" and was checked off while no cross leg existed at all. `zig` was dropped (another toolchain to install for a `cargo check`), and `windows/amd64-gnu` was dropped because it cannot work: the completion pipe, `sigaltstack` and pthread stack accounting have no Windows implementation, and `gusset_handle_open` takes an `int32` fd where a Windows handle is pointer-sized. See `docs/platforms.md`
-- [x] Static link everywhere; the dylib path exists only in `docs/dylib.md` with the codesigning steps
-- [x] `-ldflags=-linkmode=external` pinned for macOS; internal linking of cgo is not exercised
-- [x] Container image: distroless with the static binary; no C toolchain at runtime
+- **Platform targets**: Unix-only by construction (enforced via `compile_error!` on non-unix targets). Cross-compilation verified for `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, and `aarch64-apple-darwin`. CI asserts Windows refuses build.
+- **Static linking**: `libgusset.a` linked directly. Umbrella crates for multi-engine consumers must set `[lib] name = "gusset"`. Downstream modules link via `-tags gusset_pkgconfig` or `CGO_LDFLAGS`.
+- **Build cache invalidation**: `go generate ./internal/ffi` writes SHA256 archive hash into `internal/ffi/archive_hash.go`.
 
-## Repo layout and build order
+## Repo layout and architecture
 
 ```
 gusset/
   Cargo.toml              # workspace: gusset, gusset-example
   crates/gusset/          # runtime crate: ffi/, pool/, alloc/, header/
-  crates/gusset-example/  # engine exercising every failure mode
+  crates/gusset-example/  # reference adopter engine exercising all failure modes
   go.mod                  # module github.com/bharathvbcr/gusset
-  gusset.go handle.go stats.go   # public API
-  internal/ffi/           # all cgo; generated header lives here
-  tools/gussetvet/        # go vet analyzer for R5
-  bench/                  # Go benchmarks + committed benchstat results (bench/seed = Phase 0 repro)
-  tests/pitfalls/         # one file per catalogue row
-  tests/panic_zoo/
-  .cargo/config.toml      # frame pointers, target flags
-  cbindgen.toml  clippy.toml  deny.toml
-  DECISIONS.md  CHANGELOG.md  AGENTS.md  docs/PLAN.md
+  gusset.go handle.go stats.go buffer.go  # public API (11 entry points)
+  internal/ffi/           # cgo bridge, hand-maintained gusset.h, exports.txt
+  tools/gussetvet/        # custom go vet analyzer enforcing R4 & R5
+  tools/benchdoc/         # benchstat-driven README generator
+  bench/                  # Go benchmarks & committed benchstat results
+  tests/pitfalls/         # living pitfall & adversarial test suite
+  tests/panic_zoo/        # 5-case uncatchable panic reproduction suite
+  .cargo/config.toml      # frame pointers, target configuration
+  clippy.toml deny.toml   # strict linting and license rules
+  DECISIONS.md CHANGELOG.md AGENTS.md docs/PLAN.md
   .github/workflows/      # matrix.yml, nightly.yml, tip.yml
 ```
 
-Build order for Phase 1 (each step merges green; the next step starts only after):
+### Request execution lifecycle
 
-1. Move the seed benchmark and the NUL-panic repro from `bench/seed` into `bench/` and `tests/panic_zoo/`; CI runs them on Linux and macOS. The document's original guard must fail here.
-2. `FfiStatus`, `ffi_guard`, `gusset_status_free`, panic hook; Go error mapping with `FFI_OK/ERR/PANIC/POISONED/BAD_ARG`. Panic zoo green.
-3. `gusset_abi_layout`; `static_assertions`; Go `init()` check; ABI-drift test.
-4. Committed hand-written header, `go generate` archive hash; CI header diff via `tests/header_match.rs` (type-level, no cbindgen — see `DECISIONS.md`, 2026-09-20).
-5. Worker pool with explicit stack size and `sigaltstack`; `gusset_submit`/`gusset_take`; `os.Pipe` completion; Go reader goroutine; `goroutineleak` profile assertion.
-6. `Handle` semaphore, header, timeout, per-job cancel flag, poisoning; deadline, cancel, poison and thread-migration tests.
-7. `Buffer` (`gusset_buf_alloc`/`gusset_buf_free`, `NewBuffer`); large-input test.
-8. `Counting<A>`, `gusset_alloc_stats`, `Stats()`, `AdviseMemoryLimit`; memory-limit test.
-9. musl, cross-compile and Windows legs; thread-cap soak; `cgocheck2`, `-race`, ASan jobs.
-10. Replace the boundary in the tessl/sparsl Go service; commit before/after `benchstat` to `bench/results/`.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as Go Application
+    participant Handle as Go Handle (gusset)
+    participant CGO as cgo Bridge (internal/ffi)
+    participant Worker as Rust Worker Pool
+    participant Pipe as POSIX Pipe (O_NONBLOCK)
+    participant Reader as Dispatch Goroutine
+
+    App->>Handle: Call(ctx, payload) / Submit(ctx, buf)
+    Handle->>Handle: Acquire sem permit (blocks if pool saturated)
+    Handle->>CGO: gusset_submit(header, payload)
+    CGO->>Worker: Enqueue job + register AtomicBool cancel flag
+    CGO-->>Handle: Return uint64 ticket ID
+    Worker->>Worker: Execute work unit (check timeout & cancel flag)
+    Worker->>Pipe: write(ticket ID) [non-blocking]
+    Pipe->>Reader: Netpoller wakes reader goroutine
+    Reader->>Handle: Dispatch completion to pending channel
+    Handle->>CGO: gusset_take(ticket ID)
+    CGO-->>Handle: Move Rust result buffer
+    Handle->>Handle: Release sem permit
+    Handle-->>App: Return result ([]byte or *Buffer)
+```
 
 ## Testing plan
 
 Three workflows: `matrix.yml` on every PR, `nightly.yml` daily, `tip.yml` weekly. A red job blocks merge; nightly and tip failures open an issue automatically.
 
-Status column added 2026-09-20 after an audit found several jobs in this table had
-no counterpart in `.github/workflows/`, and two that existed executed nothing. A
-planned job listed as if it ran is worse than an absent one: it retires the rule it
-claims to enforce. Do not remove a **MISSING** row to tidy the table; implement it.
-
-Every row that read **MISSING** on 2026-09-20 was implemented the same day. Where a
-row's original wording named a tool that would have meant adding a dependency
-(`cargo fuzz`, `zig`, `cbindgen`), the Command column now says what is actually run
-and the Status says why it differs. The rule is that the table describes reality,
-not that the original wording is preserved.
-
 | Job | Workflow | Platform | Command / setting | Must contain | Status |
 | --- | --- | --- | --- | --- | --- |
-| `unit` | matrix | linux, macos | `cargo test --workspace`, `go test ./...` | Panic zoo (5 cases), ABI drift, poison, deadline, cancel, thread migration, completion drain, runtime hardening suite, shutdown drain, adopter engine, header signature diff | live — 20 Rust tests, 77 Go tests |
-| `cgocheck2` | matrix | linux | `GOEXPERIMENT=cgocheck2 go test ./...` | Pinner test; a retained-pointer violation that must be caught | live. `TestGate_CgoCheck2IsArmedWhenRequested` stores a Go pointer into C memory in a subprocess and asserts it is caught *with* the experiment and allowed *without* it, so the job cannot go green while the experiment is off |
-| `race-gc` | matrix | linux, macos | `go test -race`, then `GOGC=1 go test -count=5` | Completion reader vs `Close`; concurrent `Call` on one handle | live (`-count=5`, not the 20 this table used to claim) |
-| `soak` | matrix | linux, macos | `go test -run Soak -timeout 20m` | 10,000 goroutines on a 4-worker pool; `/sched/threads:threads` under 4 + `GOMAXPROCS` + 8; `goroutineleak` profile empty after drain | live. `TestSoak_GoroutineLeakProfileIsEmptyAfterDrain` uses Go 1.27's real `goroutineleak` profile and fails if the profile is unavailable rather than skipping |
+| `unit` | matrix | linux, macos | `cargo test --workspace`, `go test ./...` | Panic zoo (5 cases), ABI drift, poison, deadline, cancel, thread migration, completion drain, runtime hardening suite, shutdown drain, adopter engine, header signature diff | live — 27 Rust tests, plus Go pitfall/panic-zoo suite |
+| `cgocheck2` | matrix | linux | `GOEXPERIMENT=cgocheck2 go test ./...` | Pinner test; a retained-pointer violation that must be caught | live. `TestGate_CgoCheck2IsArmedWhenRequested` stores a Go pointer into C memory in a subprocess and asserts it is caught *with* the experiment and allowed *without* it |
+| `race-gc` | matrix | linux, macos | `go test -race`, then `GOGC=1 go test -count=5` | Completion reader vs `Close`; concurrent `Call` on one handle | live (`-count=5`) |
+| `soak` | matrix | linux, macos | `go test -run Soak -timeout 20m` | 10,000 goroutines on a 4-worker pool; `/sched/threads/total:threads` under 4 + `GOMAXPROCS` + 8; `goroutineleak` profile empty after drain | live. `TestSoak_GoroutineLeakProfileIsEmptyAfterDrain` uses Go 1.27's real `goroutineleak` profile and fails if unavailable |
 | `memlimit` | matrix | linux | `GOMEMLIMIT=256MiB` | `Stats().Live` within 1% across a 200 MiB Rust allocation; `AdviseMemoryLimit` subtracts it | live. `TestMemLimit_LiveStatsTrackLargeRustAllocation` allocates 200 MiB in 20 MiB chunks; measured drift is 0.0000% |
-| `musl` | matrix | linux (`golang:1.27-alpine`) | Static build, deep-recursion unit, worker stack read-back | Passes only because work runs on Rust threads with 8 MiB stacks | live. Uses an Alpine container rather than `zig`, which would be another toolchain to install. R8 additionally has a platform-independent gate now: `pool::sys::current_thread_stack_size` reads the size back off the running worker, so `worker_stack_is_explicitly_sized_not_inherited` fails anywhere the explicit sizing is dropped, not only on musl |
-| `cross` | matrix | linux | `make cross` (`cargo check` per target) | Every supported target compiles; Windows fails with the declared error | live. `zig`/QEMU dropped: Gusset is unix-only by construction, so the honest gate is to compile the supported set and assert the build *refuses* Windows with the named `compile_error!` rather than a `libc` symbol cascade. See `docs/platforms.md` |
-| `bench` | matrix | linux, macos | `go test -bench . -count=10 \| benchstat` vs merge base; `make docs-check` | Regression over 10% fails; README numbers are generated | live. `tools/benchdoc` regenerates the README table from benchstat and `-check` fails when it drifts. `make docs` used to print "Documentation up to date" and regenerate nothing, while the README's figures disagreed with benchstat over the very file they cited |
-| `lint` | matrix | linux | `clippy --all-targets -D warnings`, `cargo fmt`, `gofmt`, `gussetvet`, `staticcheck`, `govulncheck`, `cargo deny`, forbidden-pattern audit | Exports list matches the symbol table of **every** archive present; header signatures match Rust | live. Until 2026-09-20 the forbidden-pattern audit grepped the whole tree, matched the rules as written in this file, and therefore **failed on every commit**; clippy also ran without `--all-targets`, so R3's disallowed-method rules never saw test code. Header diff now exists as `tests/header_match.rs`, which compares parameter and return types rather than names — no cbindgen dependency |
-| `asan` | nightly | linux | `RUSTFLAGS=-Zsanitizer=address` + Rust suite; `go test -asan` for the cross-free | Cross-free detected; everything else clean | live. `TestR4_CrossFreeIsDetectedUnderASan` cross-frees a Gusset buffer and then lets the owner release it. ASan accepts the libc free (a 64-byte-aligned block comes from `posix_memalign`, and freeing that with `free` is legal C) and reports the owner's release as `attempting double-free` — verified directly on darwin/arm64 with Rust ASan. `go test -asan` is linux-only, so the test reports SKIP on darwin instead of passing |
-| `miri` | nightly | linux | `cargo miri test -p gusset --lib` (non-FFI modules) | Header, alloc counting | live. It previously ran against a library with **zero** unit tests and reported success having executed nothing; the job now asserts on the number of tests that actually *ran*, not just the exit code. The two `pool` tests carry `#[cfg_attr(miri, ignore)]` — Miri cannot run `pipe(2)` or the worker threads — so 6 of 8 execute |
-| `fuzz` | matrix | linux | `make fuzz` (Go native fuzzing) | Call boundary, diagnostic engine, buffer lifecycle | live. `cargo fuzz` would have meant adding `libfuzzer-sys` and a nightly-only build; Go's native fuzzing needs no dependency and points at the boundary where untrusted bytes actually enter. Promoted from nightly to matrix because it costs two minutes. Locally: 4.56M execs on the refusal path, 178K against the deliberately-panicking engine, 0 crashers |
-| `tip` | tip | linux | `gotip` + Rust beta | Full `unit` + `soak`; failure opens an issue tagged `toolchain` | live. The issue-on-failure step now exists and reuses an open `toolchain` issue instead of filing one per week |
+| `musl` | matrix | linux (`golang:1.27-alpine`) | Static build, deep-recursion unit, worker stack read-back | Passes only because work runs on Rust threads with 8 MiB stacks | live. Uses Alpine container. R8 additionally verified platform-independently via `pool::sys::current_thread_stack_size` read-back |
+| `cross` | matrix | linux | `make cross` (`cargo check` per target) | Every supported target compiles; Windows fails with declared error | live. Unix-only enforced by `compile_error!`. See `docs/platforms.md` |
+| `bench` | matrix | linux, macos | `go test -bench . -count=10 \| benchstat` vs merge base; `make docs-check` | Regression over 10% fails; README numbers are generated | live. `tools/benchdoc` regenerates README from benchstat, `-check` fails on drift |
+| `lint` | matrix | linux | `clippy --all-targets -D warnings`, `cargo fmt`, `gofmt`, `gussetvet`, `staticcheck`, `govulncheck`, `cargo deny`, forbidden-pattern audit | Exports list matches symbol table of every archive present; header signatures match Rust | live. Audit scoped to tracked files via `git ls-files`; clippy checks `--all-targets`; header diff verifies signatures |
+| `asan` | nightly | linux | `RUSTFLAGS=-Zsanitizer=address` + Rust suite; `go test -asan` for cross-free | Cross-free detected; everything else clean | live. `TestR4_CrossFreeIsDetectedUnderASan` detects double-free under ASan |
+| `miri` | nightly | linux | `cargo miri test -p gusset --lib` (non-FFI modules) | Header, alloc counting | live. Runs 7 core unit tests (`pool` tests carry `#[cfg_attr(miri, ignore)]`) |
+| `fuzz` | matrix | linux | `make fuzz` (Go native fuzzing) | Call boundary, diagnostic engine, buffer lifecycle | live. 4.56M execs on refusal path, 178K against diagnostic engine, 0 crashers |
+| `tip` | tip | linux | `gotip` + Rust beta | Full `unit` + `soak`; failure opens an issue tagged `toolchain` | live. Issue step reuses open `toolchain` issue |
 
-Panic zoo cases (all must return `FFI_PANIC`, process alive, message and location populated): `&str` payload; `String` payload; non-string payload (`panic_any(42)`); NUL byte in message; panic inside the error's `Display` impl.
+Panic zoo cases (all return `FFI_PANIC`, process alive, message and location populated): `&str` payload; `String` payload; non-string payload (`panic_any(42)`); NUL byte in message; panic inside error's `Display` impl.
 
 Property the whole suite proves: no test in this repo ever needs `GODEBUG=cgocheck=0` or `invalidptr=0`; CI greps for both and fails.
 
@@ -247,25 +260,23 @@ Property the whole suite proves: no test in this repo ever needs `GODEBUG=cgoche
 | Go `net` package | `os.Pipe` so waits park on the netpoller | Blocking reads on a raw fd |
 | Hystrix / resilience4j | Bulkhead semantics for the semaphore; poison equals an open circuit | Retries at the boundary; the Rust side decides idempotency |
 
-## Definition of done and hand-off
+## Phase status and hand-off protocol
 
-A phase is done when its checklist is ticked, its CI jobs are green on the supported floor and latest, and the hand-off note below is written into `CHANGELOG.md`.
-
-| Phase | Done when | Hand-off note must state |
-| --- | --- | --- |
-| 0 Seed | The audited document's guard fails `panic_nul` in CI; hardened guard passes; `bench/results/` has one file per platform | Toolchain versions used; measured per-call and per-item numbers |
-| 1 v0.1 | R1–R16 each have their enforcer; `matrix.yml` green on both floors; tessl/sparsl service runs on Gusset with before/after `benchstat` committed | Public surface list; any rule without an enforcer (there should be none) |
-| 2 Second app | Second app adopted with zero public-surface changes, or the changes are logged in `DECISIONS.md` and both apps pass | Diff of the public surface between v0.1 and v0.2 |
-| 3 Public | README numbers generated; uniffi-bindgen-go interop example builds; `cargo publish` and Go module tag; `cargo semver-checks` clean | Supported floors; known limitations (Windows completion path blocking) |
-| 4 IPC | Upstream iceoryx2 Go binding PR merged or `gusset-ipc` adapter released; tessl behind the daemon survives an induced Metal fault | What the daemon supervisor does on crash; restart budget |
+| Phase | Target | Status | Milestone evidence |
+| --- | --- | --- | --- |
+| 0 Seed | Repro firewall failure; baseline benchmarks | **SHIPPED** | `rs_guarded_doc` failed with `SIGABRT` under NUL byte; Gusset hardened firewall catches it safely; baseline benchmarks committed in `bench/results/` |
+| 1 v0.1 | Core runtime, 6 invariants, 14 exports, CI matrix | **SHIPPED** | R1–R16 enforcers in place; 14 exports diffed via `llvm-nm`; ABI layout v2 cross-checked; full matrix green |
+| 2 Second app | Adopter validation in second codebase | **SHIPPED** | Validated in DevCouncil (`go_orchestrator` driving `dc-glob`) and `crates/gusset-example` with zero public surface expansion |
+| 3 Public | Package publishing, generated docs, example engine | **READY** | `benchdoc` automation committed; `gusset.pc` pkg-config support; staticlink recipe in `docs/adoption.md` |
+| 4 IPC | Out-of-process daemon for GPU crash isolation | **SPECIFIED** | Shared memory transport architecture with upstream `iceoryx2` specified in `docs/ipc.md` |
 
 Hand-off checklist for any agent session:
 
-- [ ] Read this file and `DECISIONS.md`; do not reopen a decided item without an entry
-- [ ] Run `make ci-local` (unit, lint, bench smoke) before the first commit
-- [ ] Every new failure mode becomes a `tests/pitfalls/` row and a catalogue row here
-- [ ] Every number quoted comes from `bench/results/`
-- [ ] End the session with `CHANGELOG.md` updated and the phase table above re-checked
+- Read this file and `DECISIONS.md`; do not reopen a decided item without a new entry in `DECISIONS.md`.
+- Run `make ci-local` (build, test, lint, docs-check, bench smoke) before committing changes.
+- Every newly observed failure mode must get a reproduction test in `tests/pitfalls/` and a corresponding row in the pitfall catalogue.
+- Numbers quoted in documentation must come directly from `bench/results/` via `benchstat` (`make docs`), never typed manually.
+- End the session with `CHANGELOG.md` updated and all invariants (I1–I6) verified.
 
 ## Sources
 

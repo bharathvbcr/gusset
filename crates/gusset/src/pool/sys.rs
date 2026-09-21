@@ -5,6 +5,28 @@ use crate::alloc::{record_alloc, record_dealloc};
 use std::alloc::Layout;
 use std::io::{Error, ErrorKind, Result};
 
+/// Hard ceiling on a single Rust-owned buffer.
+///
+/// `NewBuffer` and take-side promotion feed a caller-controlled length into the
+/// allocator. An unbounded length is an unbounded address-space request. 1 GiB
+/// is well above the 200 MiB memlimit assertion and the 64 KiB egress benches;
+/// anything larger belongs in Phase 4 isolation, not in-process.
+pub const MAX_BUFFER_BYTES: usize = 1 << 30;
+
+/// Refuses a zero or oversized buffer length without touching the allocator.
+pub fn check_buffer_len(len: usize) -> std::result::Result<(), String> {
+    if len == 0 {
+        return Err("buffer length must be greater than zero".to_string());
+    }
+    if len > MAX_BUFFER_BYTES {
+        return Err(format!(
+            "buffer length {} exceeds maximum {} bytes",
+            len, MAX_BUFFER_BYTES
+        ));
+    }
+    Ok(())
+}
+
 /// Raw buffer allocated in Rust memory with 64-byte alignment (R16).
 #[derive(Debug)]
 pub struct RawBuffer {
@@ -19,9 +41,7 @@ unsafe impl Sync for RawBuffer {}
 impl RawBuffer {
     /// Allocates 64-byte aligned memory.
     pub fn allocate(len: usize) -> std::result::Result<Self, String> {
-        if len == 0 {
-            return Err("buffer length must be greater than zero".to_string());
-        }
+        check_buffer_len(len)?;
         let layout =
             Layout::from_size_align(len, 64).map_err(|e| format!("invalid layout: {}", e))?;
         let ptr = unsafe { std::alloc::alloc(layout) };
@@ -30,6 +50,19 @@ impl RawBuffer {
         }
         record_alloc(len);
         Ok(Self { ptr, len, layout })
+    }
+
+    /// Copies `src` into a newly allocated buffer.
+    ///
+    /// Used to promote a large `JobResult::Ok` onto a `Buffer` on the worker
+    /// thread so `gusset_take` is a pointer return rather than a memcpy on the
+    /// cgo thread (R16 egress).
+    pub fn from_bytes(src: &[u8]) -> std::result::Result<Self, String> {
+        let buf = Self::allocate(src.len())?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), buf.ptr, src.len());
+        }
+        Ok(buf)
     }
 
     /// Returns the raw pointer.
@@ -263,6 +296,35 @@ pub fn close_fd(fd: i32) {
                 }
                 break;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_buffer_len_refuses_zero_and_the_ceiling_without_allocating() {
+        match check_buffer_len(0) {
+            Ok(()) => panic!("zero length must be refused"),
+            Err(e) => assert!(e.contains("greater than zero"), "got: {}", e),
+        }
+        match check_buffer_len(MAX_BUFFER_BYTES) {
+            Ok(()) => {}
+            Err(e) => panic!("exactly MAX_BUFFER_BYTES must be accepted, got: {}", e),
+        }
+        match check_buffer_len(MAX_BUFFER_BYTES.saturating_add(1)) {
+            Ok(()) => panic!("MAX_BUFFER_BYTES + 1 must be refused without allocating"),
+            Err(e) => assert!(e.contains("maximum"), "got: {}", e),
+        }
+    }
+
+    #[test]
+    fn allocate_refuses_above_maximum_without_touching_the_allocator() {
+        match RawBuffer::allocate(MAX_BUFFER_BYTES.saturating_add(1)) {
+            Ok(_) => panic!("allocate must refuse before posix_memalign"),
+            Err(e) => assert!(e.contains("maximum"), "got: {}", e),
         }
     }
 }

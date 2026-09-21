@@ -8,6 +8,28 @@ fix below ships with a test that fails against the pre-fix code.
 
 ### Security and correctness (protecting I2, I3, I4, I6)
 
+- **A caller's deadline did not bound the caller (I3).** `waitInternal`'s `ctx.Done` branch issued a best-effort `gusset_cancel` and then did an unconditional `<-ticketCh`. Cancellation is cooperative, so against an engine that never calls `JobContext::check` that receive parked until the job finished on its own: measured, an **80 ms deadline on a 1.5 s job returned after 1.503 s**. Every real adopter engine is non-cooperative — a tokenizer, a regex scan, a proof verifier and a SIMD transform all run tight loops that never ask whether they should stop — so the context deadline was decorative for exactly the workloads Gusset exists to host. The waiter now detaches: it returns `ctx.Err()` at its deadline and `drainPipe` disposes of the result when it lands. The permit deliberately stays behind, because the worker is still executing and handing it back would let a further submission run alongside — in-flight work above the pool size, which is the OS-thread bound I4 sells. `TestDeadline_NonCooperativeEngineStillReleasesTheCaller`, `TestDeadline_ExplicitCancelReleasesTheCallerFromANonCooperativeEngine` and `TestDeadline_AbandonedJobKeepsHoldingItsPoolPermit` all fail against the pre-fix code.
+  - The existing deadline coverage could not have caught this: `TestPitfall_DeadlineEnforcement` and `TestAdversarial_DeadlineStormDoesNotLeakPermits` both drive diagnostic **mode 5**, which checks between every iteration. A cooperative engine cancels itself, Rust posts a `Cancelled` completion, and *that* is what wakes the Go caller — so those tests pass identically against a Gusset that ignores the deadline entirely. Diagnostic **mode 9** is mode 5 with the `ctx.check()` removed and nothing else changed, which isolates the single variable.
+- **`gusset_shutdown` was unreachable from Go.** Rust implements a budgeted drain, `tests/rust_shutdown.rs` covers it, `internal/ffi.Shutdown` binds it, the README advertises it — and no exported Go function called it. The only shutdown a Go adopter had was `Handle.Close`, which joins its worker threads and so takes however long the engine still needs: measured at 653 ms for a 700 ms non-cooperative job. Now exported as `gusset.Shutdown(drain time.Duration)`, with the budget clamped rather than wrapped through `uint32` milliseconds. `tests/shutdown` is its own binary because the refusal latch is process-global and one-way.
+- **`Call` could not carry a `*Buffer`.** `Submit` accepts `[]byte` or `*Buffer`; `Call` took `[]byte` only, and a `[]byte` over 4 KiB is refused — so the payload sizes zero-copy exists for were exactly the ones the one-line API rejected. Every adopter on the documented zero-copy path hand-rolled `Submit` plus `WaitBuffer`, including the `runtime.KeepAlive` that stops the input `Buffer`'s `AddCleanup` backstop from freeing Rust memory while Rust is still resolving its id. Added `(*Handle).CallBuffer(ctx, *Buffer) (*Buffer, error)` — typed rather than widening `Call` to `any`.
+- **An engine could free the caller's input buffer (R4/R16).** An engine returning `JobOutput::Buffer(id)` was trusted with any id, including its own *input* id — the obvious way to write an echo. Go frees a take buffer once it has copied the result out, so that id being the input meant the caller's live `*Buffer` was released underneath it and the slice `Bytes()` had already handed out pointed at freed pages. `large_ok_result_is_promoted_off_the_cgo_thread` asserted that Gusset's *own* echo does not alias, so the hazard was understood — but nothing refused it, and the assertion covered one engine rather than the contract. The worker now refuses an output id equal to the input id, and an id of 0 (ids start at 1, so a zero is a default rather than an allocation). `crates/gusset-example/tests/alias.rs` fails against the pre-fix code.
+- **A retired mechanism was still being read.** `callResult.buffer` was assigned at HEAD; the `takeIDs` rewrite replaced it and left the field plus every read site behind, so `discardResult`, `wait` and `waitBuffer` each carried a branch on a field that was by then always nil — including the comment explaining the `GOGC=1` race that branch used to guard, now guarding nothing. Field and dead branches removed; the race is still guarded, by the live `takeID` path that does the same `cgoMu`-held copy. `drainPipe`'s two duplicated delivery blocks were unified into one `deliver`.
+- **`ErrTicketBusy` released the owner's semaphore permit (I4).** `waitInternal` deferred `releaseSem` on every return, so a second `Wait` on a live ticket consumed the slot while the job was still running and a third `Submit` could enter the pool. The permit now stays with the owner; `TestPitfall_DoubleWaitDoesNotReleaseSemaphore` fails against the pre-fix code.
+- **A failed `submit` leaked `in_flight`.** The cancel flag was inserted before the sender was looked up. If the sender was already gone, shutdown waited on a flag no worker would ever clear. The sender is locked first; `submit_does_not_leave_a_cancel_flag_when_the_sender_is_gone` fails against the pre-fix code.
+- **`WaitBuffer` copied `JobResult::Ok` onto the Go heap.** `drainPipe` copied take()'s Rust buffer into a Go slice and freed it, then `WaitBuffer` allocated a second buffer and copied again (~66 KiB/op for a 64 KiB result). Results larger than 4 KiB now keep the take buffer until a waiter consumes it: `WaitBuffer` wraps with no Go copy, `Wait` copies out and frees. Wrapping in `drainPipe` itself taxed `Wait` with a `*Buffer` it immediately destroyed (6 allocs/op vs 3). `TestPitfall_WaitBufferDoesNotCopyTakeAllocation` and `TestPitfall_WaitOfLargeTakeBufferDoesNotPayWrapperAllocs` fail against the pre-fix code.
+- **FFI cancel did not satisfy `errors.Is(..., context.DeadlineExceeded)`.** A worker that finished with `cancelled: DeadlineExceeded` before Go's `ctx.Done` won the select returned `*Error` only; `GOGC=1` `TestStress_AdversarialContextCancelStorm` treated that as unexpected. `Error.Is` now maps the two Rust cancel reasons; `TestPitfall_FFICancelMapsToContextErrors` fails against the pre-fix code.
+- **`Wait` copied a `take()` view while `Close` freed it.** Large results stay in Rust memory until a waiter copies them. Without `cgoMu`, `HandleClose` raced the copy and `GOGC=1` `TestStress_ConcurrentCallAndCloseRace` saw a torn first cache line. The copy now holds `cgoMu.RLock` so close waits; a closed handle returns an error instead of a partial slice.
+- **The panic hook ate Rust test failures.** `install_panic_hook` replaced libtest's hook and recorded the location without printing, so `cargo test` reported FAIL with no message. It now chains the previous hook after recording.
+- **A nil `context.Context` panicked the caller.** `Call`/`Submit`/`Wait` selected on `ctx.Done()` and aborted the goroutine. They now return `gusset: nil context`; `TestPitfall_NilContextIsRejected` fails against the pre-fix code.
+- **`WithPoolSize` truncated through `uint32` (I4).** `WithPoolSize(1<<40)` became pool size 0 (a 0-capacity semaphore that hung every `Call`); `WithPoolSize(1<<32+4)` silently became 4 workers. Values outside `1..=1024` are refused before conversion; `TestPitfall_PoolSizeOverflowIsRefusedNotTruncated` fails against the pre-fix code.
+- **R16 was documented, not enforced.** `Handle::submit` memcpy'd every `[]byte` on the cgo thread, including a 1 MiB payload. Inline input above 4 KiB is now refused on both sides; larger payloads use `NewBuffer`. `TestPitfall_InlineSliceOver4KiBIsRefused` fails against the pre-fix code.
+- **`NewBuffer` ignored the poison latch (R10).** After a caught panic, allocations still entered Rust. They now return `ErrPoisoned`; `TestPitfall_NewBufferRefusesPoisonedHandle` fails against the pre-fix code.
+- **`WaitBuffer` of a large take result raced `Close` (R16).** `Wait` already copied take views under `cgoMu`. `WaitBuffer` wrapped the same view after `waitInternal` returned, so `HandleClose` could free the pages between the view being published and `newBufferFromRaw`. The existing close-race used 3-byte payloads, which `drainPipe` copies onto the Go heap — it never took the take-buffer path. Wrap now holds `cgoMu.RLock`; a closed handle returns an error rather than a `*Buffer` over freed memory. `TestPitfall_WaitBufferOfLargeResultDoesNotDangleAcrossClose` fails against the pre-fix code.
+- **Large `JobResult::Ok` was memcpy'd on the cgo thread.** `gusset_take` allocated and copied every `Ok` payload while an M was pinned. Workers now promote results above 4 KiB to `JobResult::Buffer` before the ticket is written, so take is a pointer return (R16 egress). `large_ok_result_is_promoted_off_the_cgo_thread` fails against the pre-fix code.
+- **`NewBuffer` / `buf_alloc` had no size ceiling.** A caller-controlled length went straight into `posix_memalign`. 1 GiB is now refused, not clamped, matching `WithPoolSize`; `TestPitfall_BufferSizeIsBounded` and `allocate_refuses_above_maximum_without_touching_the_allocator` fail against the pre-fix code.
+- **`timeout_ns = u64::MAX` meant "run forever".** `Instant::checked_add` returns `None` when the duration cannot be represented, and that `None` was treated as "no deadline". Overflow now expires immediately (`submit_instant`). `nonzero_timeout_always_installs_a_deadline` fails against the pre-fix code.
+- **`Error.Is` prefix-matched cancel reasons.** A message that merely contained `DeadlineExceeded` satisfied `errors.Is(..., context.DeadlineExceeded)`. Matching is now exact (`cancelled: DeadlineExceeded` / `cancelled: Explicit`).
+- **`ensure_workers` could spawn onto a closing handle.** The closed check ran before the workers lock, and `close` released that lock before `join`. The check is now under the lock, and `close` holds it across join.
 - **Untrusted input could select a Rust panic.** The built-in diagnostic engine
   chooses behaviour from `input[0]` — bytes 1, 2 and 3 are panics — and ran by
   default whenever no adopter engine was registered. Since no C export registers
@@ -65,6 +87,26 @@ fix below ships with a test that fails against the pre-fix code.
 - Added the `cgocheck2` job (R6 and R16 named it as their enforcer; it did not
   exist) and a `memlimit` job. `AGENTS.md`'s testing table now carries a status
   column.
+- **`make bench-scaling` did not exist.** `tools/benchplot` requires
+  `scaling-rawcgo-*.txt` and `scaling-gusset-*.txt` and names that target in
+  three separate error messages telling the reader to run it. There was no such
+  rule in the `Makefile`, so the committed chart data had no documented way to be
+  regenerated, and the one-transport-per-process isolation its validity depends
+  on was enforced by nothing. Added, mirroring `bench-crossover`'s isolation.
+- **`tools/benchplot` was never run by anything.** It ships a `-check` staleness
+  flag, and no target and no CI job invoked either the tool or the flag — every
+  reference to it in the tree was a comment. `docs/img/*.svg` were likewise
+  referenced by no document, so three generated charts sat in the repository
+  with nothing regenerating them and nothing checking them. `make docs` now runs
+  it and `make docs-check` runs it with `-check`, alongside `benchdoc`; `ci-local`
+  depends on `docs-check`, so the charts are now gated the way the numbers are.
+  `README.md` embeds all three.
+- **The committed `crossover.svg` plotted data its own file no longer
+  supported.** It was drawn from transport samples taken before the per-arm
+  process isolation landed — samples in which serial Gusset degraded 94 µs →
+  340 µs → 591 µs → 663 µs down its last four repetitions as the process
+  accumulated Ms it never destroys. A generated artifact nothing regenerates and
+  nothing checks is a claim, not a measurement.
 
 ### Every remaining MISSING gate, implemented
 
@@ -174,11 +216,234 @@ a new dependency, the implementation differs and the table says why.
 ### Tests
 
 - New: `tests/rust_runtime.rs` (7), `tests/rust_shutdown.rs` (1),
-  `crates/gusset-example/tests/adopter.rs` (1), six lib unit tests,
+  `crates/gusset-example/tests/adopter.rs` (1), lib unit tests now 14,
   `tests/pitfalls/hardening_test.go` (5), `tests/pitfalls/adversarial_test.go` (13).
-  Rust tests went from 1 to 15.
-- Green under `-race`, `GOEXPERIMENT=cgocheck2`, `GOGC=1 -count=3`, and
-  `GOMEMLIMIT=256MiB`.
+  Rust workspace tests: 27.
+- Green under `-race` and `GOGC=1 -count=3` this pass, including the 8 KiB
+  `WaitBuffer`/`Close` race. `GOEXPERIMENT=cgocheck2` and `GOMEMLIMIT=256MiB`
+  were recorded in the prior audit on this tree, not re-run here. Rust workspace
+  is 27 tests. A 3-sample bench smoke on darwin/arm64 kept the committed alloc
+  counts (noop 2–3 allocs/op, large `Wait` 65696 B/op, `WaitBuffer` 256 B/op).
+- New for the deadline-detach work: `tests/pitfalls/deadline_detach_test.go` (8),
+  `tests/pitfalls/detach_stress_test.go` (3), `tests/shutdown/` (2, own binary).
+  Diagnostic modes 9 (non-cooperative sleep, a delay prefix in front of any other
+  mode) and 11 (fixed-cost CPU work) exist to make those assertions reachable at
+  all: an instant result is collected by its caller before it can be abandoned,
+  so the abandoned large-result and abandoned-panic paths had no way to be
+  entered. Both are capped like mode 6's recursion depth, since the count is
+  input-derived and the fuzz targets reach them.
+- The three regression guards most at risk from the detach were mutation-tested
+  rather than assumed. Removing `deliver`'s permit return fails
+  `TestDeadline_AbandonedJobKeepsHoldingItsPoolPermit`; removing the poison latch
+  in `deliver` failed *nothing*, which is how that latch was found to be a
+  fourth redundant copy — Rust's worker sets `Handle.poisoned` inside its
+  `catch_unwind` and is the authority — and removed.
+
+### Benchmarks
+
+- **`make bench-crossover`**: raw blocking cgo versus Gusset on byte-identical
+  work (`rs_spin` and diagnostic mode 11 run the same loop), so the difference is
+  transport alone. Every other benchmark here measures a noop, which is where any
+  coordination layer looks worst and which is not why anyone embeds Rust in Go.
+  On darwin/arm64 (Apple M5 Pro, n=10, medians over the committed raw data):
+  Gusset's fixed overhead is **13.0 µs** serial and **4.1 µs** parallel. Serially
+  it costs **+16 %** at 74 µs of work and **+1.0 %** at 711 µs; under full
+  parallelism it costs **+4.9 %** at 711 µs.
+  - An earlier revision of this line claimed Gusset was **24 % faster** than
+    blocking cgo at ~1 ms under parallelism. It does not reproduce, and it was
+    never true: it came from a recording whose blocking-cgo arm was measured on a
+    busier machine than its Gusset arm — the two arms' own calibration of the
+    identical loop disagreed by 20 % (823 µs against 684 µs), and the arm that
+    wraps the call came out 2.5x faster than the call. Gusset does not beat the
+    cgo call it wraps; the case for it is the thread bound and the firewall, and
+    a coordination cost that falls to about 1 % once a call does real work.
+    `checkTransportOrdering` now refuses to chart that shape.
+- **Thread pressure** is the measurement the design rests on, and it needs
+  512 concurrent callers — `RunParallel` uses exactly `GOMAXPROCS` goroutines
+  against Ms the runtime already has, so it reports `Δthreads = 0` for blocking
+  cgo and proves nothing. It also needs one transport per process at `-count=1`:
+  Go never destroys an M, so sharing a process makes the second measurement
+  inherit the first's threads. Isolated, at 512 callers × 7 ms of work:
+  blocking cgo peaked at **185–298 OS threads**, Gusset at **20**, at
+  indistinguishable throughput.
+  - The memory cost of those threads was first written up as "~1.5–2.4 GiB of
+    reserved address space against ~160 MiB", which was **derived rather than
+    measured** — thread count multiplied by an assumed 8 MiB stack.
+    `BenchmarkThreadScaling` now samples RSS and VSZ directly. Four recordings
+    of the same 32 → 2048 sweep put blocking cgo's VSZ delta at **2.3, 14.4,
+    19.8 and 21.0 GiB**, which read as an unmeasurable quantity until the
+    recordings were certified idle and exclusive: the three that disagreed were
+    taken while other benchmark processes shared the machine. On the certified
+    recording the two arms **independently agree on the per-thread division** —
+    blocking cgo grew 21.0 GiB over 335 extra threads, Gusset 578 MiB over 9,
+    both ~64 MiB per thread. Two arms landing on the same figure is what makes
+    it a measurement rather than a number.
+  - That figure is **not 8 MiB**, so "threads × the platform's default stack" is
+    the wrong estimate on darwin/arm64 — it predicts about an eighth of what is
+    actually reserved. `docs/choosing.md` now generates the per-thread division
+    from the committed data instead of asserting the arithmetic.
+  - The disputed part is **resident** memory, and that measures stably: over the
+    same sweep it grows by roughly **28 MiB** for blocking cgo and **13 MiB**
+    for Gusset, a gap of **10–15 MiB** across recordings. Address space is not RAM.
+    The thread bound is worth having for scheduler pressure and the
+    10,000-thread ceiling; it is not worth having for the memory, and every
+    informal retelling of the gigabyte figure dropped the word "virtual" and so
+    implied otherwise.
+  - Recorded here because it took three tries to get right: the first correction
+    claimed the derived estimate was two orders of magnitude too high, which was
+    itself an artifact of a contended run, and the second claimed the direct
+    measurement confirmed the estimate, which was one clean run landing near the
+    physically expected value by luck. A quantity that varies tenfold between
+    honest recordings does not confirm or refute anything.
+- **An unattributable thread count is now withheld rather than printed.**
+  `BenchmarkThreadScaling` reported only an absolute `peakThreads`, and Go never
+  destroys an M, so a second transport in the same process inherited every thread
+  the first created. Run in one process the two transports reported an identical
+  figure at every concurrency level — 232, 232, 232, 232, 232, 232, 308, 308 —
+  and a chart drawn from that shows two flat, equal lines, which reads as "cgo is
+  fine" from data that measured nothing. `reportPeakThreads` now publishes
+  `peakDthreads` always and the absolute figure only for the first transport to
+  sample threads in that process, logging the reason when it withholds. A missing
+  metric fails `benchplot` loudly; a wrong one becomes a chart.
+- **`benchplot` refuses to draw a contaminated run.** The transport arms run as
+  separate processes, which is what makes the thread numbers honest and also what
+  lets an unrelated load spike land on one arm and not the other. That failure is
+  invisible in the raw file: every sample in the affected arm is uniformly wrong,
+  so the spread stays tight and the median looks authoritative — a spread check
+  cannot catch it. `checkTransportOrdering` compares the arms against an ordering
+  the transport guarantees instead: serial Gusset runs the identical Rust loop
+  *plus* the boundary, so it cannot be meaningfully faster than the blocking cgo
+  call it wraps. Observed during this audit, which is why it exists: a
+  regeneration overlapping an unrelated fuzzer reported blocking cgo at 2.98 ms
+  against Gusset's 764 µs for the same loop.
+- **The seed table had never been re-measured across its toolchain bump.**
+  `bench/seed/README.md` carries an explicit "re-run on every toolchain bump
+  (R15)" and its figures were from Go 1.24.7 / Rust 1.95 on x86-64 Linux, while
+  the project had moved to Go 1.27.1 / Rust 1.98.0 on darwin/arm64. Both columns
+  are now kept side by side. The raw cgo no-op is **18.43 ns** here against
+  **64 ns** there, so the commonly quoted "~40 ns cgo call" brackets the range
+  rather than describing it. `#cgo noescape` still removes the same allocation
+  and about a third of the call on both machines, and batching still falls ~27x
+  per item from 16 to 4096 — but "C is cheaper than Rust across cgo" does not
+  survive the move: the inline-C no-op was slower on x86-64 Linux (76 vs 64 ns)
+  and is faster here (14.93 vs 18.43 ns).
+- **Two recording runs could tee into one results file, and nothing noticed.**
+  `bench-crossover` appends four arms into a single file through `tee -a`, so a
+  second `make bench-crossover` beside the first interleaves into it *and*
+  competes for the same cores. Observed: one file held 561 ns, 653 ns and
+  5289 ns for the same sub-benchmark as a parallel cgo arm ran beside it, its
+  `Serial/Gusset/1000it` iteration count collapsing from 2.4M to 222K mid-arm;
+  one line carried a `Serial/Gusset` name with `Parallel/RawCgo`'s metric shape,
+  two `write(2)` calls having torn it in half. Nothing about those rows looks
+  malformed and the medians would have gone straight into a committed chart.
+  Every recording now goes through `bench/record.sh`, which holds a lock across
+  the whole run, refuses to start beside another benchmark process or on a
+  machine below 60% CPU idle, writes per-arm temporaries and assembles the
+  published file only once every arm has passed — so interleaving is structurally
+  impossible rather than merely detected. `tools/internal/benchfile` rejects what
+  is already on disk: `go test` emits its lines sequentially, so an arm re-entered
+  after another intervened cannot come from one producer. Both were exercised for
+  real during this work — the preflight refused a regeneration run while an
+  unrelated session held the machine at 98% CPU, and the structural check
+  refused the contaminated file rather than charting it.
+- **An honest recording could not pass its own calibration check**, for three
+  compounding reasons. The arms name themselves with a measured duration for the
+  shared deterministic loop, and `benchfile` compares those across arms to detect
+  a contaminated recording — so anything that makes one arm measure the loop
+  differently fails a run taken on an idle machine. All three are recorded here
+  because the first diagnosis was wrong and the fix for it exposed the next one:
+  - **Timing a single ~700 ns call.** `calibrate` timed one `Spin(1000)` and
+    took the minimum of five, which is five fragile samples rather than one
+    good one. Each attempt now times a batch against a fixed budget and divides,
+    putting the timer and a stray preemption orders of magnitude below the
+    signal.
+  - **Calibrating inside the `b.Run` loop.** `b.Run` is synchronous, so each
+    size was measured on a process the previous sub-benchmark had already run
+    in — and `RunParallel` over a blocking cgo call leaves a few hundred idle Ms
+    behind it. Calibration is now hoisted above the loop.
+  - **A cold core** — which hoisting *caused*, and which is why it is listed
+    last. With calibration moved to the top of the process, the first arm
+    measures the machine before the CPU has ramped and possibly on an efficiency
+    core. Recorded that way, `CrossoverSerial/RawCgo` calibrated
+    **1 µs / 11 µs / 113 µs / 1048 µs** where the later arms reported
+    **709 ns / 6 µs / 69 µs / 696 µs** for the identical loop: uniformly ~50%
+    high across every size at once, which is a clock artifact rather than the
+    sub-microsecond sampling noise it was first mistaken for. What settled it
+    was the *order*: one recording calibrated 1000, 917, 833 and 709 ns for the
+    identical loop in exactly the order `record.sh` runs the arms, and a
+    monotonic decay in arm order is a machine warming up, not noise.
+    `bench/record.sh` now discards a warm-up arm before the first real one, and
+    `burnIn` probes inside each arm's own process until two consecutive probes
+    agree within 2% — adaptive rather than a fixed duration, because fixed ones
+    were tried and were not enough: 100 ms left the first arm 24% out.
+  - Together these take the 1000-iteration spread across arms from **35% to
+    ~3%**, and the 1,000,000-iteration spread from **51% to ~5%**, so a
+    recording taken on an idle machine now passes its own comparison instead of
+    failing it.
+
+### Documentation and landscape (verified 2026-09-20)
+
+- **The landscape table had no Wasm row**, despite Wasm sandboxes being the most
+  common answer to the question Gusset exists to answer. Added, with 2026
+  figures: **Wasmtime at 2.41x native, wazero at 4.72x** on compute-bound work,
+  plus a linear-memory copy per payload. It is the honest alternative to Gusset's
+  fault-domain trade-off and the reason that is a trade-off rather than a win —
+  Wasm buys an in-process fault domain and pays native speed for it; Gusset takes
+  the inverse trade. An engine that can genuinely fault wants one of those or
+  Phase 4.
+- **iceoryx2's Go binding is unstarted work, not integration work.** `DECISIONS.md`
+  commits Phase 4 to contributing it upstream, and an adopter reading "thin
+  adapter over iceoryx2" could reasonably assume there is a binding to adapt.
+  Checked against iceoryx2 v0.10.0: the upstream bindings are C, C++, Rust,
+  Python and C#, with Go still listed as planned. Recorded as its own decision
+  row so the commitment's actual size is visible where decisions are read.
+- **Go 1.27 changes nothing Gusset depends on** — no scheduler, sysmon,
+  `runtime/metrics` or `GOMAXPROCS` change — so the design's assumptions hold. Its
+  goroutine-leak profiling is already the basis of
+  `TestSoak_GoroutineLeakProfileIsEmptyAfterDrain`.
+- `AGENTS.md` pointed at `bench/channel_hop`, which does not exist; the
+  measurement lives in `BenchmarkChannelHop` in `bench/seed/go/ffi_test.go`. Its
+  conclusion survived the re-measurement and got stronger: a channel send and a
+  cgo call stayed within 5% of each other across both an architecture and a
+  toolchain change (56 vs 64 ns on x86-64 Linux, 17.62 vs 18.43 ns here).
+- **`docs/why.md` named a test that does not exist** as the verifier of I4, the
+  library's central claim — `TestSoak_ThreadCapUnderTenThousandCalls`, asserting a
+  bound of `pool_size + GOMAXPROCS + 8` "under ten thousand calls". The real test
+  is `TestPitfall_ThreadCapBoundedSoak`: 500 concurrent callers, a 4-worker pool,
+  and a bound of `poolSize + GOMAXPROCS + 16` above the count it started from. All
+  three numbers and the name were wrong, which is the failure mode a citation
+  exists to prevent. A sweep of every test name cited anywhere in the docs — 31 Go
+  names and 13 Rust ones — found no other false citation.
+- **Nothing told a prospective adopter when *not* to use Gusset.** The README
+  explains what it does and `docs/adoption.md` how to wire it, but neither
+  answers the first question a team actually asks. `docs/choosing.md` does: the
+  two measurements that settle it (per-call Rust work, and in-flight concurrency
+  against `GOMAXPROCS`), what an average, commercial or enterprise adopter each
+  has to do differently, and the six situations where the answer is raw cgo, a
+  separate process or Wasm. It states plainly that Gusset cannot beat a raw cgo
+  call on one call — it caps the aggregate cost rather than reducing the
+  per-call one — because "saves overhead" is the thing adopters most often
+  expect and it is not what Gusset sells.
+- **The memory case for bounded threads was overstated wherever it was made
+  informally** — in the quantity it named and, it turns out, in its arithmetic
+  too. A per-thread stack figure estimates *reserved address space*, which is
+  not RAM, and every informal retelling dropped the word "virtual" and so turned
+  it into a saving that does not exist. Resident memory over 32 → 2048 in-flight
+  calls grows by roughly **28 MiB** for blocking cgo and **13 MiB** for Gusset,
+  a **10–15 MiB** gap across recordings. `docs/choosing.md` now *generates* both
+  the resident column and the per-thread address-space division from the
+  committed data rather than asserting either, and says the real cost of a few
+  hundred threads is scheduler pressure, thread-creation latency on the request
+  path and the 10,000-thread cliff.
+- **`docs/why.md` claimed a burst of 1,000 goroutines spawns 1,000 OS threads.**
+  It does not: the count grows sub-linearly, at roughly **0.17 threads per
+  in-flight call** for ~7 ms calls (33/90/224/368 threads at 32/128/512/2048),
+  because Go reuses idle Ms and `sysmon` only retakes a P from a call that has
+  already blocked ~20 µs. The ratio approaches 1:1 only as calls get long. Both
+  Mermaid diagrams in that section carried the same overstatement — one showing
+  1,000 goroutines reaching the 10,000-thread ceiling, and the Gusset side
+  claiming "OS threads stay <= 10" against a measured 21 — and now carry the
+  measured figures instead.
 
 ## [0.0.1] - 2026-09-20
 

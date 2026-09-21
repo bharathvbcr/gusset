@@ -92,12 +92,36 @@ func TestPitfall_DeadlineEnforcement(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected deadline/cancellation error, got nil")
 	}
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("deadline must surface as a context error, got %v", err)
+	}
 
 	// Must return promptly around the deadline, not hanging for the full 500ms
 	if elapsed > 250*time.Millisecond {
 		t.Fatalf("call took %v, deadline was not enforced promptly", elapsed)
 	}
 	t.Logf("deadline correctly interrupted execution after %v: %v", elapsed, err)
+}
+
+// A Rust-side cancel is still a context cancellation. Error.Is used to match only
+// other *Error values by code, so "cancelled: DeadlineExceeded" failed
+// errors.Is(..., context.DeadlineExceeded) and GOGC=1's cancel-storm treated a
+// correctly cancelled job as an unexpected failure.
+func TestPitfall_FFICancelMapsToContextErrors(t *testing.T) {
+	deadline := &gusset.Error{Code: gusset.ErrGeneric.Code, Msg: "cancelled: DeadlineExceeded"}
+	if !errors.Is(deadline, context.DeadlineExceeded) {
+		t.Fatalf("Rust deadline cancel must satisfy errors.Is(..., context.DeadlineExceeded); got Is=false for %v", deadline)
+	}
+	if !errors.Is(deadline, gusset.ErrGeneric) {
+		t.Fatalf("deadline cancel must still match ErrGeneric; got %v", deadline)
+	}
+	explicit := &gusset.Error{Code: gusset.ErrGeneric.Code, Msg: "cancelled: Explicit"}
+	if !errors.Is(explicit, context.Canceled) {
+		t.Fatalf("Rust explicit cancel must satisfy errors.Is(..., context.Canceled); got Is=false for %v", explicit)
+	}
+	if errors.Is(explicit, context.DeadlineExceeded) {
+		t.Fatal("explicit cancel must not also match DeadlineExceeded")
+	}
 }
 
 // Pitfall 4: Goroutine Migration Safety (Rule R7)

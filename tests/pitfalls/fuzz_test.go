@@ -78,6 +78,10 @@ func FuzzCallRefusesWithoutEngine(f *testing.F) {
 		if errors.Is(err, gusset.ErrPoisoned) {
 			t.Fatalf("refusals poisoned the handle after %d bytes", len(payload))
 		}
+		// R16 refuses []byte above 4 KiB before the engine question is asked.
+		if len(payload) > 4096 && strings.Contains(err.Error(), "copy limit") {
+			return
+		}
 		if !strings.Contains(err.Error(), "no engine handler registered") {
 			t.Fatalf("payload of %d bytes: expected a refusal, got %v", len(payload), err)
 		}
@@ -139,9 +143,16 @@ func FuzzDiagnosticEngineNeverAborts(f *testing.F) {
 			return
 		}
 		// Engine errors and cancellations are legitimate outcomes for arbitrary
-		// input. ErrBadArg is not: it would mean the Go side built a malformed
-		// call out of a well-formed payload.
+		// input. A copy-limit refusal is R16, not a malformed FFI call.
+		// ErrBadArg is not: it would mean the Go side built a malformed call
+		// out of a well-formed payload that was otherwise legal to submit.
 		if err != nil {
+			if strings.Contains(err.Error(), "copy limit") {
+				if len(payload) <= 4096 {
+					t.Fatalf("copy-limit refusal for %d-byte payload (ceiling is 4096)", len(payload))
+				}
+				return
+			}
 			if errors.Is(err, gusset.ErrBadArg) {
 				t.Fatalf("payload of %d bytes produced ErrBadArg: %v", len(payload), err)
 			}

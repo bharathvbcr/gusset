@@ -112,6 +112,39 @@ func BenchmarkGussetBufferLarge(b *testing.B) {
 	}
 }
 
+func BenchmarkGussetBufferLargeZeroCopy(b *testing.B) {
+	h, err := gusset.Open(gusset.WithPoolSize(4), gusset.WithDiagnosticEngine())
+	if err != nil {
+		b.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	const bufSize = 64 * 1024
+	buf, err := h.NewBuffer(bufSize)
+	if err != nil {
+		b.Fatalf("NewBuffer failed: %v", err)
+	}
+	defer buf.Free()
+
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		ticket, err := h.Submit(ctx, buf)
+		if err != nil {
+			b.Fatalf("Submit failed: %v", err)
+		}
+		outBuf, err := h.WaitBuffer(ctx, ticket)
+		if err != nil {
+			b.Fatalf("WaitBuffer failed: %v", err)
+		}
+		_ = outBuf.Bytes()
+		_ = outBuf.Free()
+	}
+}
+
 func BenchmarkChannelHop(b *testing.B) {
 	ch := make(chan uint64, 256)
 	done := make(chan struct{})

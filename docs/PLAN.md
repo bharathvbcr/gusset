@@ -42,7 +42,7 @@ The Go package never parks an OS thread on Rust work: a call submits to the Rust
 | Component | Language | Responsibilities | Public surface (v0.1) |
 | --- | --- | --- | --- |
 | Runtime crate | Rust | `ffi_guard`, `FfiStatus` (ptr+len, never NUL-terminated), `gusset_status_free`, panic hook with location, ABI layout export, worker pool with explicit 8 MiB stack size, allocator stats, timeout and cancel checks | 14 exported functions, 4 `#[repr(C)]` types (`CallHeader`, `FfiStatus`, `AbiLayout`, `AllocStats`) |
-| Runtime package | Go | `Handle` with semaphore, timeout, poison state; `init()` ABI check; completion channel over an `os.Pipe` whose write end Rust owns; `noescape` and `nocallback` on every export; allocator stats bridged to `debug.SetMemoryLimit` | `Open`, `Close`, `Call`, `Submit`, `Wait`, `NewBuffer`, `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs` |
+| Runtime package | Go | `Handle` with semaphore, timeout, poison state; `init()` ABI check; completion channel over an `os.Pipe` whose write end Rust owns; `noescape` and `nocallback` on every export; allocator stats bridged to `debug.SetMemoryLimit` | `Open`, `Close`, `Call`, `Submit`, `Wait`, `WaitBuffer`, `NewBuffer`, `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs` (11; `WaitBuffer` logged in `DECISIONS.md`) |
 | Header | C | Hand-maintained `internal/ffi/gusset.h`; verified by `tests/header_match.rs` parameter and return types against Rust exports | one `.h` file |
 | Example engine | Rust + Go | Reference engine that exercises every failure mode: panic, NUL in message, deadline miss, large allocation, deep recursion | reference for adopters (`crates/gusset-example`) |
 
@@ -71,7 +71,7 @@ sequenceDiagram
     GoCtx->>GoCaller: context.WithTimeout(parent, 100ms)
     GoCaller->>RustHeader: Compute relative timeout_ns = deadline - time.Now()
     GoCaller->>RustWorker: gusset_submit(header)
-    RustWorker->>RustWorker: Build Instant = Instant::now() + Duration(timeout_ns)
+    RustWorker->>RustWorker: Instant = submit + timeout_ns (overflow → already expired)
     
     loop Work Units
         RustWorker->>Engine: Run work unit

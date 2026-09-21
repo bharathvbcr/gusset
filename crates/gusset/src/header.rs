@@ -19,7 +19,8 @@ pub struct CallHeader {
     pub timeout_ns: u64,
     /// Bit flags for call options.
     pub flags: u32,
-    /// Reserved for 64-bit alignment and future extensions.
+    /// Engine dispatch opcode (`WithOpcode` / `ContextWithOpcode`). Zero means
+    /// the global handler. The field still pads the header to 40 bytes.
     pub reserved: u32,
 }
 
@@ -67,11 +68,7 @@ impl JobContext {
     /// Creates a new job context with submit instant and cancel flag.
     pub fn new(header: CallHeader, cancel_flag: Arc<AtomicBool>) -> Self {
         let submit_instant = Instant::now();
-        let deadline = if header.timeout_ns > 0 {
-            submit_instant.checked_add(Duration::from_nanos(header.timeout_ns))
-        } else {
-            None
-        };
+        let deadline = resolve_deadline(submit_instant, header.timeout_ns);
         Self {
             header,
             submit_instant,
@@ -126,7 +123,7 @@ impl JobContext {
 
     /// Checks whether the job has been cancelled or exceeded its deadline (R9).
     pub fn check(&self) -> Result<(), CancelReason> {
-        if self.cancel_flag.load(Ordering::Relaxed) {
+        if self.cancel_flag.load(Ordering::Acquire) {
             return Err(CancelReason::Explicit);
         }
         if let Some(dl) = self.deadline {
@@ -140,6 +137,24 @@ impl JobContext {
     /// Returns the submission instant.
     pub fn submit_instant(&self) -> Instant {
         self.submit_instant
+    }
+}
+
+/// Turns a relative `timeout_ns` into a Rust `Instant` deadline.
+///
+/// A non-zero timeout must never become "no deadline": `Instant::checked_add`
+/// returns `None` when the duration cannot be represented, and treating that as
+/// `None` made `u64::MAX` nanoseconds mean "run forever" instead of "already
+/// expired". Overflow expires immediately by using the submit instant.
+fn resolve_deadline(submit_instant: Instant, timeout_ns: u64) -> Option<Instant> {
+    if timeout_ns == 0 {
+        None
+    } else {
+        Some(
+            submit_instant
+                .checked_add(Duration::from_nanos(timeout_ns))
+                .unwrap_or(submit_instant),
+        )
     }
 }
 
@@ -210,6 +225,34 @@ mod tests {
             ctx.check(),
             Err(CancelReason::Explicit),
             "an explicit cancel must be reported as Explicit, not as a timeout"
+        );
+    }
+
+    #[test]
+    fn nonzero_timeout_always_installs_a_deadline() {
+        // `Instant::checked_add` returning None used to be stored as "no
+        // deadline", so a timeout the clock cannot represent ran forever.
+        assert!(
+            resolve_deadline(Instant::now(), 0).is_none(),
+            "timeout_ns == 0 is the documented no-deadline encoding"
+        );
+        assert!(
+            resolve_deadline(Instant::now(), 1).is_some(),
+            "a one-nanosecond timeout must still be a deadline"
+        );
+        assert!(
+            resolve_deadline(Instant::now(), u64::MAX).is_some(),
+            "an unrepresentable timeout must expire, not disable the deadline"
+        );
+
+        let header = CallHeader {
+            timeout_ns: u64::MAX,
+            ..Default::default()
+        };
+        let ctx = JobContext::new(header, Arc::new(AtomicBool::new(false)));
+        assert!(
+            ctx.deadline.is_some(),
+            "JobContext must not drop a non-zero timeout_ns on Instant overflow"
         );
     }
 }

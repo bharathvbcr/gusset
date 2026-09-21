@@ -866,5 +866,3 @@ func TestStress_NonblockingPipeWatchdog(t *testing.T) {
 		}
 	}
 }
-
-
