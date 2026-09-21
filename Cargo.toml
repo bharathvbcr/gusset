@@ -21,3 +21,8 @@ panic = "unwind"
 codegen-units = 1
 lto = "fat"
 opt-level = 3
+
+[profile.test]
+overflow-checks = true
+
+[profile.bench]

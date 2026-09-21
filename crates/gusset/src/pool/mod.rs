@@ -9,7 +9,7 @@ use crate::header::{
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::thread;
 use sys::RawBuffer;
@@ -519,6 +519,60 @@ pub const MAX_BUFFER_BYTES: usize = sys::MAX_BUFFER_BYTES;
 /// a full pipe under the documented bounded-concurrency contract (I4, R11).
 pub const MAX_POOL_SIZE: usize = 1024;
 
+/// Tickets and buffer ids occupy the low 63 bits and start at 1.
+///
+/// Zero means "no buffer" on the submit header. A counter that wraps, or that
+/// advances while refusing, later reissues an id that is still live.
+const ID_CEILING: u64 = 1 << 63;
+
+/// Reserves the next id, or refuses without advancing once the space is exhausted.
+fn reserve_id(counter: &AtomicU64) -> Result<u64, String> {
+    loop {
+        let cur = counter.load(Ordering::Relaxed);
+        if cur == 0 || cur >= ID_CEILING {
+            return Err(
+                "id space exhausted; refusing to wrap onto a live ticket or buffer".to_string(),
+            );
+        }
+        match counter.compare_exchange_weak(cur, cur + 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Ok(cur),
+            Err(_) => continue,
+        }
+    }
+}
+
+/// Writes a completion ticket, sleeping on a full pipe outside the exclusivity lock.
+///
+/// `write_ticket` backs off for up to 10s. Holding `pipe_write_lock` across that
+/// sleep stalls every other worker and `Handle::close` behind one full pipe.
+fn write_completion(lock: &Mutex<()>, fd: i32, ticket: u64) -> std::io::Result<()> {
+    let started = std::time::Instant::now();
+    let mut backoff = std::time::Duration::from_micros(50);
+    loop {
+        let attempt = {
+            let _guard = lock_recover(lock);
+            sys::write_ticket_attempt(fd, ticket)
+        };
+        match attempt {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if started.elapsed() >= sys::WRITE_TICKET_TIMEOUT {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "completion pipe full for {:?}; reader is not draining",
+                            sys::WRITE_TICKET_TIMEOUT
+                        ),
+                    ));
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(sys::WRITE_TICKET_MAX_BACKOFF);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// Explicit worker stack size (R8).
 ///
 /// cgo-created threads inherit the pthread default, which is 128 KiB on musl. Heavy
@@ -769,8 +823,11 @@ impl Handle {
                             lock_recover(&h.cancel_flags).remove(&unit.ticket);
 
                             let fd = h.pipe_write_fd.load(Ordering::Acquire);
-                            let _write_guard = lock_recover(&h.pipe_write_lock);
-                            if let Err(e) = sys::write_ticket(fd, unit.ticket) {
+                            // The lock covers one syscall attempt. write_ticket's
+                            // backoff sleeps for up to 10s; holding the lock across
+                            // that stalls every other worker's completion and
+                            // Handle::close behind them.
+                            if let Err(e) = write_completion(&h.pipe_write_lock, fd, unit.ticket) {
                                 // The waiting Go caller will never be woken for this
                                 // ticket, so say so rather than dropping it in silence.
                                 crate::ffi::log_event(&format!(
@@ -851,7 +908,7 @@ impl Handle {
             TaskPayload::Inline(input.to_vec())
         };
 
-        let ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);
+        let ticket = reserve_id(&self.next_ticket)?;
         let cancel_flag = Arc::new(AtomicBool::new(false));
 
         let ctx = JobContext::new(header, Arc::clone(&cancel_flag));
@@ -862,24 +919,26 @@ impl Handle {
             input_buffer_id: buffer_id,
         };
 
-        // The sender is cloned under its lock, and the cancel flag is inserted
-        // before the lock drops, so close cannot take the sender between flag
-        // insertion and the send. However the lock is *released* before the send
-        // itself: SyncSender::send on a bounded channel can block when the channel
-        // is full (the Go semaphore prevents this in correct operation, but a
-        // blocked send with the lock held would prevent close() from ever taking
-        // the sender, making the handle unrecoverable).
-        let sender = {
-            let guard = lock_recover(&self.sender);
-            match guard.as_ref() {
-                Some(s) => s.clone(),
+        // try_send under the sender lock. `send` blocks when the queue is full,
+        // and holding the lock across that block stops `close` from disconnecting
+        // the workers. Cloning the sender and sending after the lock drops keeps
+        // the channel alive across `close`, so `join` waits on a recv that will
+        // not see a disconnect. A full queue is a contract break (the Go
+        // semaphore is the bound); refuse it instead of blocking.
+        {
+            let sender_guard = lock_recover(&self.sender);
+            let sender = match sender_guard.as_ref() {
+                Some(s) => s,
                 None => return Err("handle is closed".to_string()),
+            };
+            lock_recover(&self.cancel_flags).insert(ticket, Arc::clone(&cancel_flag));
+            if let Err(err) = sender.try_send(unit) {
+                lock_recover(&self.cancel_flags).remove(&ticket);
+                return Err(match err {
+                    TrySendError::Full(_) => "submission queue is full".to_string(),
+                    TrySendError::Disconnected(_) => "handle is closed".to_string(),
+                });
             }
-        };
-        lock_recover(&self.cancel_flags).insert(ticket, Arc::clone(&cancel_flag));
-        if let Err(e) = sender.send(unit) {
-            lock_recover(&self.cancel_flags).remove(&ticket);
-            return Err(e.to_string());
         }
 
         Ok(ticket)
@@ -929,13 +988,10 @@ impl Handle {
         if self.closed.load(Ordering::Acquire) {
             return Err("handle is closed".to_string());
         }
+        let id = reserve_id(&self.next_buffer_id)?;
         let buf = RawBuffer::allocate(len)?;
         let ptr = buf.as_mut_ptr();
 
-        let id = self.next_buffer_id.fetch_add(1, Ordering::Relaxed);
-        if id == 0 || id >= (1 << 63) {
-            return Err("buffer id overflowed reserved 63-bit range".to_string());
-        }
         let mut map = lock_recover(&self.buffers);
         map.insert(id, Arc::new(buf));
 
@@ -950,11 +1006,8 @@ impl Handle {
         if self.closed.load(Ordering::Acquire) {
             return Err("handle is closed".to_string());
         }
+        let id = reserve_id(&self.next_buffer_id)?;
         let buf = RawBuffer::from_bytes(data)?;
-        let id = self.next_buffer_id.fetch_add(1, Ordering::Relaxed);
-        if id == 0 || id >= (1 << 63) {
-            return Err("buffer id overflowed reserved 63-bit range".to_string());
-        }
         lock_recover(&self.buffers).insert(id, Arc::new(buf));
         Ok(id)
     }
@@ -1261,6 +1314,148 @@ mod tests {
 
         handle.close();
         // SAFETY: the read end is still owned by this test; close() took the write end.
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// Advancing the id counter past the 63-bit ceiling wraps it onto ids that
+    /// are still live. `fetch_add` does that even when the call then returns an
+    /// error, so the next successful allocation reuses buffer 1.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn buffer_ids_stop_at_the_ceiling_instead_of_wrapping() {
+        let _serialise = lock_recover(&INJECT_LOCK);
+        let (r, w) = make_pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        let (live_id, _) = match handle.buf_alloc(32) {
+            Ok(v) => v,
+            Err(e) => panic!("first buffer must allocate: {}", e),
+        };
+        assert_eq!(live_id, 1, "ids start at 1; 0 means no buffer");
+
+        handle.next_buffer_id.store(1 << 63, Ordering::Relaxed);
+        if let Ok((id, _)) = handle.buf_alloc(32) {
+            panic!("id {id} is past the ceiling and must be refused");
+        }
+        assert_eq!(
+            handle.next_buffer_id.load(Ordering::Relaxed),
+            1 << 63,
+            "a refused id must not advance the counter; the next success would wrap onto buffer 1"
+        );
+        assert!(
+            handle.buf_get(live_id).is_ok(),
+            "the live buffer must still be the one issued before the ceiling"
+        );
+
+        handle.close();
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// Same ceiling for tickets. A wrapped ticket id aliases an in-flight job,
+    /// so the completion pipe wakes the wrong waiter.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ticket_ids_stop_at_the_ceiling_instead_of_wrapping() {
+        let _serialise = lock_recover(&INJECT_LOCK);
+        let (r, w) = make_pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        handle.next_ticket.store(1 << 63, Ordering::Relaxed);
+        let header = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..Default::default()
+        };
+        if let Ok(ticket) = handle.submit(header, &[0u8], 0) {
+            panic!("ticket {ticket} is past the ceiling and must be refused");
+        }
+        assert_eq!(
+            handle.next_ticket.load(Ordering::Relaxed),
+            1 << 63,
+            "a refused ticket must not advance the counter"
+        );
+        assert_eq!(
+            handle.in_flight(),
+            0,
+            "a refused submit must not leak a flag"
+        );
+
+        handle.close();
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// `SyncSender::send` blocks when the queue is full. Held across the sender
+    /// lock, that blocks `close` forever; released before the send, it reopens
+    /// the cancel-flag leak. `try_send` fails in microseconds and leaves
+    /// `in_flight` unchanged.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn submit_on_a_full_queue_fails_without_blocking_or_leaking() {
+        let _serialise = lock_recover(&INJECT_LOCK);
+        let (r, w) = make_pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+
+        let header = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..Default::default()
+        };
+        // Every accepted job sleeps. One worker cannot drain them before the
+        // bounded queue fills, so a correct submit refuses instead of blocking
+        // inside `send` until a worker finishes.
+        let mut accepted = 0usize;
+        let overall = std::time::Instant::now();
+        loop {
+            if overall.elapsed() > std::time::Duration::from_millis(500) {
+                panic!("submit never refused a full queue; accepted {accepted}");
+            }
+            let started = std::time::Instant::now();
+            match handle.submit(header, &[9, 30], 0) {
+                Ok(_) => {
+                    let elapsed = started.elapsed();
+                    assert!(
+                        elapsed < std::time::Duration::from_millis(200),
+                        "submit blocked for {:?} instead of queueing or refusing",
+                        elapsed
+                    );
+                    accepted += 1;
+                }
+                Err(e) => {
+                    let elapsed = started.elapsed();
+                    assert!(
+                        elapsed < std::time::Duration::from_millis(200),
+                        "a full queue must fail without blocking; took {:?}",
+                        elapsed
+                    );
+                    assert!(
+                        e.contains("full"),
+                        "expected a full-queue refusal, got: {e}"
+                    );
+                    assert_eq!(
+                        handle.in_flight(),
+                        accepted,
+                        "the refused submit must not leave a cancel flag"
+                    );
+                    break;
+                }
+            }
+        }
+        assert!(accepted > 0, "the queue should accept at least one job");
+
+        handle.close();
         unsafe {
             libc::close(r);
         }

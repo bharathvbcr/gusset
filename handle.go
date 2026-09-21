@@ -199,8 +199,9 @@ func drainPipe(s *handleState) {
 			for _, ch := range s.pending {
 				ch <- callResult{err: errors.New("gusset: handle closed")}
 			}
+			toFree := make([]uint64, 0, len(s.takeIDs))
 			for _, id := range s.takeIDs {
-				_ = s.bufFree(id)
+				toFree = append(toFree, id)
 			}
 			s.pending = make(map[uint64]chan callResult)
 			s.completed = make(map[uint64]callResult)
@@ -211,6 +212,10 @@ func drainPipe(s *handleState) {
 			// reader has already given up on the pipe.
 			s.abandoned = make(map[uint64]struct{})
 			s.mu.Unlock()
+
+			for _, id := range toFree {
+				_ = s.bufFree(id)
+			}
 			return
 		}
 
@@ -340,8 +345,9 @@ func (s *handleState) close() error {
 	// semTickets covers abandoned tickets too: their permits were deliberately
 	// left with the work, and the work is over now that the pool has joined.
 	s.mu.Lock()
+	toFree := make([]uint64, 0, len(s.takeIDs))
 	for _, id := range s.takeIDs {
-		_ = s.bufFree(id)
+		toFree = append(toFree, id)
 	}
 	s.completed = make(map[uint64]callResult)
 	s.takeIDs = make(map[uint64]uint64)
@@ -351,6 +357,10 @@ func (s *handleState) close() error {
 		<-s.sem
 	}
 	s.mu.Unlock()
+
+	for _, id := range toFree {
+		_ = s.bufFree(id)
+	}
 
 	return err
 }
@@ -425,11 +435,8 @@ func (h *Handle) CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error) {
 	if in.state == nil {
 		return nil, errors.New("gusset: buffer is not initialized")
 	}
+	defer runtime.KeepAlive(in)
 	ticket, err := h.state.submit(ctx, in)
-	// Same window Submit documents: submit reads the id and nothing references
-	// the Buffer afterwards, so its cleanup becomes eligible to run while Rust
-	// is still resolving that id.
-	runtime.KeepAlive(in)
 	if err != nil {
 		runtime.KeepAlive(h)
 		return nil, err
@@ -516,7 +523,11 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 		return 0, ErrPoisoned
 	}
 
-	header := extractCallHeader(ctx, s.callFlags, s.defaultOpcode)
+	header, err := extractCallHeader(ctx, s.callFlags, s.defaultOpcode)
+	if err != nil {
+		<-s.sem
+		return 0, err
+	}
 	s.cgoMu.RLock()
 	if s.closed.Load() || s.ptr == nil {
 		s.cgoMu.RUnlock()

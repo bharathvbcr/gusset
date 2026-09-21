@@ -131,24 +131,26 @@ pub fn log_event(line: &str) {
 #[no_mangle]
 pub unsafe extern "C" fn gusset_abi_layout(out: *mut AbiLayout) {
     if !out.is_null() {
-        let layout = AbiLayout {
-            version: GUSSET_ABI_VERSION,
-            sizes: [
-                size_of::<CallHeader>() as u32,
-                size_of::<FfiStatus>() as u32,
-                size_of::<AbiLayout>() as u32,
-                size_of::<AllocStats>() as u32,
-            ],
-            aligns: [
-                align_of::<CallHeader>() as u32,
-                align_of::<FfiStatus>() as u32,
-                align_of::<AbiLayout>() as u32,
-                align_of::<AllocStats>() as u32,
-            ],
-        };
-        unsafe {
-            ptr::write(out, layout);
-        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let layout = AbiLayout {
+                version: GUSSET_ABI_VERSION,
+                sizes: [
+                    size_of::<CallHeader>() as u32,
+                    size_of::<FfiStatus>() as u32,
+                    size_of::<AbiLayout>() as u32,
+                    size_of::<AllocStats>() as u32,
+                ],
+                aligns: [
+                    align_of::<CallHeader>() as u32,
+                    align_of::<FfiStatus>() as u32,
+                    align_of::<AbiLayout>() as u32,
+                    align_of::<AllocStats>() as u32,
+                ],
+            };
+            unsafe {
+                ptr::write(out, layout);
+            }
+        }));
     }
 }
 
@@ -501,10 +503,8 @@ pub unsafe extern "C" fn gusset_cancel_all(handle: *mut Handle, status: *mut Ffi
 #[no_mangle]
 pub unsafe extern "C" fn gusset_status_free(status: *mut FfiStatus) {
     if !status.is_null() {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            unsafe {
-                (*status).free_msg();
-            }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            (*status).free_msg();
         }));
     }
 }

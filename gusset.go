@@ -2,7 +2,9 @@ package gusset
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"runtime/metrics"
 	"time"
 
@@ -191,14 +193,17 @@ func ContextWithOpcode(ctx context.Context, opcode uint32) context.Context {
 }
 
 // extractCallHeader extracts timeout, trace/span context, and opcode if present.
-func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) ffi.CallHeader {
+//
+// An opcode that does not fit in the header's u32 is an error. Narrowing it
+// used to store the low 32 bits, and `1<<32` became 0 — the diagnostic engine.
+func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) (ffi.CallHeader, error) {
 	header := ffi.CallHeader{
 		Flags:    flags,
 		Reserved: defaultOpcode,
 	}
 
 	if ctx == nil {
-		return header
+		return header, nil
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -218,17 +223,47 @@ func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) 
 	}
 
 	if opVal := ctx.Value(OpcodeContextKey); opVal != nil {
-		switch v := opVal.(type) {
-		case uint32:
-			header.Reserved = v
-		case int:
-			if v >= 0 {
-				header.Reserved = uint32(v)
-			}
-		case uint:
-			header.Reserved = uint32(v)
+		op, err := opcodeFromContext(opVal)
+		if err != nil {
+			return header, err
 		}
+		header.Reserved = op
 	}
 
-	return header
+	return header, nil
+}
+
+func opcodeFromContext(opVal any) (uint32, error) {
+	const reject = "gusset: opcode does not fit in uint32"
+	switch v := opVal.(type) {
+	case uint32:
+		return v, nil
+	case int32:
+		if v < 0 {
+			return 0, errors.New(reject)
+		}
+		return uint32(v), nil
+	case int:
+		if v < 0 || uint64(v) > math.MaxUint32 {
+			return 0, errors.New(reject)
+		}
+		return uint32(v), nil
+	case int64:
+		if v < 0 || v > math.MaxUint32 {
+			return 0, errors.New(reject)
+		}
+		return uint32(v), nil
+	case uint:
+		if uint64(v) > math.MaxUint32 {
+			return 0, errors.New(reject)
+		}
+		return uint32(v), nil
+	case uint64:
+		if v > math.MaxUint32 {
+			return 0, errors.New(reject)
+		}
+		return uint32(v), nil
+	default:
+		return 0, errors.New("gusset: opcode context value must be a 32-bit unsigned integer")
+	}
 }

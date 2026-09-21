@@ -197,21 +197,20 @@ pub fn install_sigaltstack() -> Option<SigAltStackGuard> {
 /// bytes), which every supported platform's pipe buffer holds, so a full pipe means
 /// the reader has stalled. Waiting forever there would hang `Handle::close` in
 /// `join`; this bound turns that deadlock into a reported error.
-const WRITE_TICKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const WRITE_TICKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Upper bound on the backoff sleep between retries on a full pipe.
-const WRITE_TICKET_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(8);
+pub(crate) const WRITE_TICKET_MAX_BACKOFF: std::time::Duration =
+    std::time::Duration::from_millis(8);
 
-/// Writes an 8-byte ticket to the pipe file descriptor with EINTR/EAGAIN retries.
+/// One non-blocking attempt to write an 8-byte ticket.
 ///
-/// POSIX guarantees atomic writes for payloads up to PIPE_BUF (>= 512 bytes).
-///
-/// `EINTR` is retried without limit: Go's async preemption (`SIGURG`) interrupts
-/// syscalls on this thread constantly and makes no progress claim either way.
-/// `EAGAIN` means the pipe is genuinely full, so it backs off exponentially instead
-/// of spinning `yield_now` at 100% CPU, and gives up once [`WRITE_TICKET_TIMEOUT`]
-/// has elapsed.
-pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
+/// Returns [`ErrorKind::WouldBlock`] when the pipe is full and no byte of this
+/// ticket has been committed, so the caller can sleep without holding the
+/// exclusivity lock. A short write is finished inside this call: releasing the
+/// lock between the two halves would let another ticket interleave and break
+/// framing for every later completion.
+pub fn write_ticket_attempt(fd: i32, ticket: u64) -> Result<()> {
     if fd < 0 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
@@ -221,8 +220,8 @@ pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
 
     let bytes = ticket.to_ne_bytes();
     let mut remaining = &bytes[..];
-    let mut backoff = std::time::Duration::from_micros(50);
-    let mut blocked_since: Option<std::time::Instant> = None;
+    let mut committed = false;
+    let mut partial_spins = 0u32;
 
     while !remaining.is_empty() {
         let n = unsafe {
@@ -237,19 +236,18 @@ pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
             let err = Error::last_os_error();
             match err.raw_os_error() {
                 Some(libc::EINTR) => continue,
-                Some(libc::EAGAIN) => {
-                    let since = *blocked_since.get_or_insert_with(std::time::Instant::now);
-                    if since.elapsed() >= WRITE_TICKET_TIMEOUT {
+                Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK => {
+                    if !committed {
+                        return Err(Error::new(ErrorKind::WouldBlock, "completion pipe full"));
+                    }
+                    partial_spins = partial_spins.saturating_add(1);
+                    if partial_spins > 10_000 {
                         return Err(Error::new(
                             ErrorKind::TimedOut,
-                            format!(
-                                "completion pipe full for {:?}; reader is not draining",
-                                WRITE_TICKET_TIMEOUT
-                            ),
+                            "torn completion write; pipe stayed full after a short write",
                         ));
                     }
-                    std::thread::sleep(backoff);
-                    backoff = (backoff * 2).min(WRITE_TICKET_MAX_BACKOFF);
+                    std::thread::yield_now();
                     continue;
                 }
                 _ => return Err(err),
@@ -257,15 +255,48 @@ pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
         } else if n == 0 {
             return Err(Error::new(ErrorKind::WriteZero, "pipe write zero bytes"));
         } else {
-            // Progress: reset the stall window so a slow-but-live reader is not
-            // timed out by the cumulative wait of earlier partial writes.
-            blocked_since = None;
-            backoff = std::time::Duration::from_micros(50);
+            committed = true;
+            partial_spins = 0;
             remaining = &remaining[n as usize..];
         }
     }
 
     Ok(())
+}
+
+/// Writes an 8-byte ticket to the pipe file descriptor with EINTR/EAGAIN retries.
+///
+/// POSIX guarantees atomic writes for payloads up to PIPE_BUF (>= 512 bytes).
+///
+/// `EINTR` is retried without limit: Go's async preemption (`SIGURG`) interrupts
+/// syscalls on this thread constantly and makes no progress claim either way.
+/// `EAGAIN` means the pipe is genuinely full, so it backs off exponentially instead
+/// of spinning `yield_now` at 100% CPU, and gives up once [`WRITE_TICKET_TIMEOUT`]
+/// has elapsed.
+pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
+    let mut backoff = std::time::Duration::from_micros(50);
+    let mut blocked_since: Option<std::time::Instant> = None;
+
+    loop {
+        match write_ticket_attempt(fd, ticket) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                let since = *blocked_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= WRITE_TICKET_TIMEOUT {
+                    return Err(Error::new(
+                        ErrorKind::TimedOut,
+                        format!(
+                            "completion pipe full for {:?}; reader is not draining",
+                            WRITE_TICKET_TIMEOUT
+                        ),
+                    ));
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(WRITE_TICKET_MAX_BACKOFF);
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 /// Sets the given file descriptor to non-blocking mode (O_NONBLOCK).
