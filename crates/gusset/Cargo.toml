@@ -35,6 +35,17 @@ path = "../../tests/header_match.rs"
 name = "rust_runtime"
 path = "../../tests/rust_runtime.rs"
 
+# Separate binary: registers a process-global engine handler whose panic
+# payloads panic again on drop.
+[[test]]
+name = "rust_worker_containment"
+path = "../../tests/rust_worker_containment.rs"
+
+# Separate binary: installs the counting global allocator.
+[[test]]
+name = "rust_status_overwrite"
+path = "../../tests/rust_status_overwrite.rs"
+
 # Separate binary: shutdown latches a process-global flag that refuses every
 # submission, which a parallel test in the same binary would observe.
 [[test]]

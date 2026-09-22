@@ -150,3 +150,52 @@ func TestPanicZoo_SuccessEcho(t *testing.T) {
 		}
 	}
 }
+
+// Case 6: a panic payload whose destructor panics again (mode 15).
+//
+// The firewall catches the engine's panic, but the caught payload is dropped
+// afterwards; a payload whose Drop panics used to unwind the Rust worker thread
+// itself. The ticket then never completed, so Call returned only when its own
+// deadline fired — and a caller with no deadline parked forever holding a pool
+// permit. It must come back as ErrPanic, promptly, at every re-throw depth.
+func TestPanicZoo_PanickingPayloadDestructor(t *testing.T) {
+	for _, depth := range []byte{0, 1, 8, 255} {
+		h, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
+		if err != nil {
+			t.Fatalf("Open failed: %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		start := time.Now()
+		_, err = h.Call(ctx, []byte{15, depth})
+		elapsed := time.Since(start)
+		cancel()
+
+		if !errors.Is(err, gusset.ErrPanic) {
+			t.Fatalf("depth %d: expected ErrPanic, got %v after %v (a deadline error means the worker died and the ticket was stranded)", depth, err, elapsed)
+		}
+		if elapsed > time.Second {
+			t.Fatalf("depth %d: panic took %v to surface", depth, elapsed)
+		}
+
+		closed := make(chan error, 1)
+		go func() { closed <- h.Close() }()
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("depth %d: Close hung after a contained destructor panic", depth)
+		}
+	}
+
+	// The process-wide runtime still serves a fresh handle.
+	h, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if out, err := h.Call(ctx, []byte{0, 42}); err != nil || len(out) != 2 || out[1] != 42 {
+		t.Fatalf("echo after containment: out=%v err=%v", out, err)
+	}
+}

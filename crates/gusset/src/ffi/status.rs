@@ -98,6 +98,24 @@ impl FfiStatus {
         )
     }
 
+    /// Replaces an initialised status, releasing the message it still owns.
+    ///
+    /// `ffi_guard` has always initialised the status by the time an export
+    /// decides to report something else instead (poison discovered after the
+    /// guarded call failed). A plain `ptr::write` over it leaked the boxed
+    /// message the guard had just allocated.
+    ///
+    /// # Safety
+    ///
+    /// `status` must be non-null and point to a valid, initialised `FfiStatus`
+    /// whose message, if any, was allocated by [`FfiStatus::new_err`].
+    pub unsafe fn overwrite(status: *mut FfiStatus, new: FfiStatus) {
+        unsafe {
+            (*status).free_msg();
+            ptr::write(status, new);
+        }
+    }
+
     /// Cleans up any message allocation owned by this status (R4).
     pub fn free_msg(&mut self) {
         if !self.msg.is_null() && self.msg_len > 0 {

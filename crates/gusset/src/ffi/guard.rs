@@ -121,8 +121,34 @@ fn truncate_payload(mut s: String) -> String {
     s
 }
 
+/// Drops a caught panic payload without letting its destructor unwind.
+///
+/// The payload is engine-chosen: `panic_any(T)` where `T::drop` panics is a
+/// legal Rust program. Dropping it after `catch_unwind` has returned is outside
+/// every firewall, so the second panic unwound the worker thread and its ticket
+/// never completed. A payload thrown by that destructor is leaked, not dropped:
+/// it may be another bomb, and recursing into it has no bound.
+pub fn drop_panic_payload(payload: Box<dyn std::any::Any + Send>) {
+    if let Err(second) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+        std::mem::forget(second);
+        // The destructor's panic recorded its own location for this thread.
+        // Callers take the engine's location before disposing of the payload,
+        // so this one is stale and must not be reported for the next panic.
+        let _ = take_panic_location();
+    }
+}
+
 /// Extracts a string representation from an arbitrary panic payload without unwrapping (R3).
+///
+/// Consumes the payload and disposes of it through [`drop_panic_payload`]. Take
+/// the panic location first: disposal discards any location its own panic records.
 pub fn extract_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
+    let msg = describe_panic_payload(&*payload);
+    drop_panic_payload(payload);
+    msg
+}
+
+fn describe_panic_payload(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         truncate_payload((*s).to_string())
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -220,8 +246,10 @@ where
             None
         }
         Err(panic_payload) => {
-            let msg = extract_panic_payload(panic_payload);
+            // Location first: disposing of the payload can panic again and record
+            // the destructor's location over the one that caused this failure.
             let loc = take_panic_location();
+            let msg = extract_panic_payload(panic_payload);
             if !status.is_null() {
                 let (file_ptr, file_len, line) = if let Some(l) = loc {
                     (l.file.as_ptr(), l.file.len(), l.line)

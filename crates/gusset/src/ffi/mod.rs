@@ -331,7 +331,7 @@ pub unsafe extern "C" fn gusset_submit(
         // maps to FFI_ERR. R10 is FFI_POISONED without a second reading.
         if !status.is_null() {
             unsafe {
-                ptr::write(status, FfiStatus::poisoned("handle is poisoned"));
+                FfiStatus::overwrite(status, FfiStatus::poisoned("handle is poisoned"));
             }
         }
         FFI_POISONED
@@ -378,8 +378,10 @@ pub unsafe extern "C" fn gusset_take(
                         ptr::write(out_len, 0);
                     } else {
                         let len = data.len();
-                        let (buf_id, buf_ptr) = h.buf_alloc(len).map_err(FfiError::from)?;
-                        ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr, len);
+                        // Not buf_alloc: that refuses a poisoned handle, and this
+                        // result already exists — a sibling's panic must not
+                        // turn it into an error (I2 refuses new work only).
+                        let (buf_id, buf_ptr) = h.buf_from_bytes(&data).map_err(FfiError::from)?;
                         ptr::write(out_buf_id, buf_id);
                         ptr::write(out_ptr, buf_ptr);
                         ptr::write(out_len, len);
@@ -608,7 +610,7 @@ pub unsafe extern "C" fn gusset_buf_alloc(
     } else if h.is_poisoned() {
         if !status.is_null() {
             unsafe {
-                ptr::write(status, FfiStatus::poisoned("handle is poisoned"));
+                FfiStatus::overwrite(status, FfiStatus::poisoned("handle is poisoned"));
             }
         }
         FFI_POISONED

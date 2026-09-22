@@ -139,8 +139,18 @@ func Open(opts ...Option) (*Handle, error) {
 		return nil, err
 	}
 
-	// Duplicate write descriptor so Rust owns an independent OS descriptor
+	// Duplicate write descriptor so Rust owns an independent OS descriptor.
+	//
+	// Dup does not carry close-on-exec over, and a child process that inherits
+	// the write end keeps the pipe open after Rust closes its copy: drainPipe
+	// never sees EOF and Close blocks until that child exits. ForkLock stops a
+	// concurrent exec from forking between the dup and the flag.
+	syscall.ForkLock.RLock()
 	writeFD, err := syscall.Dup(int(w.Fd()))
+	if err == nil {
+		syscall.CloseOnExec(writeFD)
+	}
+	syscall.ForkLock.RUnlock()
 	if err != nil {
 		_ = r.Close()
 		_ = w.Close()

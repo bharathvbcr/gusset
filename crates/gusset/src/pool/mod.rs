@@ -2,7 +2,9 @@
 
 pub mod sys;
 
-use crate::ffi::guard::{extract_panic_payload, install_panic_hook, take_panic_location};
+use crate::ffi::guard::{
+    drop_panic_payload, extract_panic_payload, install_panic_hook, take_panic_location,
+};
 use crate::header::{
     CallHeader, CancelReason, JobContext, GUSSET_FLAGS_KNOWN, GUSSET_FLAG_DIAGNOSTIC_ENGINE,
 };
@@ -468,8 +470,117 @@ pub fn diagnostic_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, St
             }
             Ok(vec![14, count as u8])
         }
+        // Mode 15: panic with a payload whose destructor panics again, input[1]
+        // times over (capped). Disposing of a caught payload runs its `Drop`
+        // outside the engine's `catch_unwind`; this mode is how the Go suite
+        // proves that disposal cannot kill the worker and strand the ticket.
+        15 => {
+            struct DropBomb(u8);
+            impl Drop for DropBomb {
+                fn drop(&mut self) {
+                    if self.0 == 0 {
+                        panic!("diagnostic payload destructor panicked");
+                    }
+                    std::panic::panic_any(DropBomb(self.0 - 1));
+                }
+            }
+            std::panic::panic_any(DropBomb(input.get(1).copied().unwrap_or(0).min(8)))
+        }
         // Default: echo
         _ => Ok(input.to_vec()),
+    }
+}
+
+/// Runs one dequeued work unit to a result: early cancellation, the engine call
+/// behind its panic firewall, and the refusal of aliased output buffers.
+///
+/// The worker calls this under a second `catch_unwind`, so the unit — and the
+/// input payload it owns — is consumed and dropped in here, inside that firewall.
+fn execute_unit(weak: &Weak<Handle>, mut unit: WorkUnit) -> JobResult {
+    unit.ctx.mark_dequeued();
+
+    // Check cancellation before starting
+    if let Err(reason) = unit.ctx.check() {
+        return JobResult::Cancelled(reason);
+    }
+
+    let slice: &[u8] = match &unit.payload {
+        TaskPayload::Inline(vec) => vec.as_slice(),
+        TaskPayload::Shared(buf) => buf.as_slice(),
+    };
+
+    let dispatch_res = catch_unwind(AssertUnwindSafe(|| default_dispatch(&unit.ctx, slice)));
+    unit.ctx.mark_finished();
+
+    match dispatch_res {
+        Ok(Ok(JobOutput::Bytes(out))) => JobResult::Ok(out),
+        // An engine that returns its *input* buffer as its output aliases memory
+        // the caller still owns. Go frees a take buffer once it has copied the
+        // result out, so the caller's live `*Buffer` would be released underneath
+        // it and its `Bytes()` slice left pointing at freed pages — a
+        // use-after-free an adopter engine can open by writing the obvious echo.
+        // Refusing it turns that into a returned error.
+        //
+        // Id 0 is refused for the same reason it can never be valid: ids start at
+        // 1, so a zero here is an engine returning a default rather than a buffer
+        // it allocated.
+        Ok(Ok(JobOutput::Buffer(buf_id))) if buf_id == 0 || buf_id == unit.input_buffer_id => {
+            JobResult::Err(format!(
+                "engine returned buffer id {} as its output: {}; \
+                 allocate a new buffer for the result",
+                buf_id,
+                if buf_id == 0 {
+                    "id 0 is never a live buffer"
+                } else {
+                    "that is the input buffer, which the caller still owns"
+                }
+            ))
+        }
+        Ok(Ok(JobOutput::Buffer(buf_id))) => match weak.upgrade() {
+            Some(h) => match h.claim_output(buf_id) {
+                Ok(()) => JobResult::Buffer(buf_id),
+                Err(e) => JobResult::Err(e),
+            },
+            None => JobResult::Err("handle is closed".to_string()),
+        },
+        Ok(Err(err)) => JobResult::Err(err),
+        Err(payload) => {
+            // Caught panic: poison handle (I2)
+            if let Some(h) = weak.upgrade() {
+                h.poisoned.store(true, Ordering::Release);
+            }
+            // Location first: disposing of the payload can panic again and
+            // record the destructor's location over the engine's.
+            let loc = take_panic_location();
+            let msg = extract_panic_payload(payload);
+            JobResult::Panic {
+                msg,
+                file: loc.map(|l| l.file),
+                line: loc.map(|l| l.line).unwrap_or(0),
+            }
+        }
+    }
+}
+
+/// Registry entry for one Rust-owned buffer.
+struct BufferSlot {
+    buf: Arc<RawBuffer>,
+    /// Set once the buffer has become a job's output.
+    ///
+    /// Go frees an output buffer when its waiter is done with it. Two results
+    /// naming one buffer therefore free it under each other: the drain loop
+    /// takes both completions back to back and both resolve the same pointer.
+    /// An engine returning a captured, pre-allocated id does exactly that on
+    /// its second call, so a buffer may become an output once per lifetime.
+    output_claimed: bool,
+}
+
+impl BufferSlot {
+    fn new(buf: RawBuffer, output_claimed: bool) -> Self {
+        Self {
+            buf: Arc::new(buf),
+            output_claimed,
+        }
     }
 }
 
@@ -490,7 +601,7 @@ pub struct Handle {
     sender: Mutex<Option<SyncSender<WorkUnit>>>,
     results: Mutex<HashMap<u64, JobResult>>,
     cancel_flags: Mutex<HashMap<u64, Arc<AtomicBool>>>,
-    buffers: Mutex<HashMap<u64, Arc<RawBuffer>>>,
+    buffers: Mutex<HashMap<u64, BufferSlot>>,
     next_ticket: AtomicU64,
     next_buffer_id: AtomicU64,
     next_worker_id: AtomicU64,
@@ -740,7 +851,7 @@ impl Handle {
                     }
 
                     loop {
-                        let mut unit = {
+                        let unit = {
                             // Poison-recovering: the guard protects only the receiver,
                             // and treating "poisoned" as "shut down" would retire the
                             // whole pool on an unrelated panic.
@@ -750,68 +861,28 @@ impl Handle {
                                 Err(_) => break, // Disconnected on handle close
                             }
                         };
-                        unit.ctx.mark_dequeued();
+                        let ticket = unit.ticket;
 
-                        // Check cancellation before starting
-                        let early_cancel = unit.ctx.check();
-                        let result = match early_cancel {
-                            Err(reason) => JobResult::Cancelled(reason),
-                            Ok(()) => {
-                                let slice: &[u8] = match &unit.payload {
-                                    TaskPayload::Inline(vec) => vec.as_slice(),
-                                    TaskPayload::Shared(buf) => buf.as_slice(),
-                                };
-
-                                let dispatch_res = catch_unwind(AssertUnwindSafe(|| {
-                                    default_dispatch(&unit.ctx, slice)
-                                }));
-                                unit.ctx.mark_finished();
-
-                                match dispatch_res {
-                                    Ok(Ok(JobOutput::Bytes(out))) => JobResult::Ok(out),
-                                    // An engine that returns its *input* buffer as
-                                    // its output aliases memory the caller still
-                                    // owns. Go frees a take buffer once it has
-                                    // copied the result out, so the caller's live
-                                    // `*Buffer` would be released underneath it and
-                                    // its `Bytes()` slice left pointing at freed
-                                    // pages — a use-after-free an adopter engine can
-                                    // open by writing the obvious echo. Refusing it
-                                    // turns that into a returned error.
-                                    //
-                                    // Id 0 is refused for the same reason it can
-                                    // never be valid: ids start at 1, so a zero here
-                                    // is an engine returning a default rather than a
-                                    // buffer it allocated.
-                                    Ok(Ok(JobOutput::Buffer(buf_id)))
-                                        if buf_id == 0 || buf_id == unit.input_buffer_id =>
-                                    {
-                                        JobResult::Err(format!(
-                                            "engine returned buffer id {} as its output: {}; \
-                                             allocate a new buffer for the result",
-                                            buf_id,
-                                            if buf_id == 0 {
-                                                "id 0 is never a live buffer"
-                                            } else {
-                                                "that is the input buffer, which the caller still owns"
-                                            }
-                                        ))
-                                    }
-                                    Ok(Ok(JobOutput::Buffer(buf_id))) => JobResult::Buffer(buf_id),
-                                    Ok(Err(err)) => JobResult::Err(err),
-                                    Err(payload) => {
-                                        // Caught panic: poison handle (I2)
-                                        if let Some(h) = weak_clone.upgrade() {
-                                            h.poisoned.store(true, Ordering::Release);
-                                        }
-                                        let msg = extract_panic_payload(payload);
-                                        let loc = take_panic_location();
-                                        JobResult::Panic {
-                                            msg,
-                                            file: loc.map(|l| l.file),
-                                            line: loc.map(|l| l.line).unwrap_or(0),
-                                        }
-                                    }
+                        // The engine call has its own firewall inside execute_unit;
+                        // this one covers everything around it, including dropping
+                        // the unit. Whatever unwinds here, the ticket still gets a
+                        // completion: a worker that died between dequeue and write
+                        // left its Go waiter parked forever on a permit that never
+                        // came back (I2, I4).
+                        let result = match catch_unwind(AssertUnwindSafe(|| {
+                            execute_unit(&weak_clone, unit)
+                        })) {
+                            Ok(r) => r,
+                            Err(payload) => {
+                                if let Some(h) = weak_clone.upgrade() {
+                                    h.poisoned.store(true, Ordering::Release);
+                                }
+                                let loc = take_panic_location();
+                                let msg = extract_panic_payload(payload);
+                                JobResult::Panic {
+                                    msg: format!("worker fault outside the engine call: {}", msg),
+                                    file: loc.map(|l| l.file),
+                                    line: loc.map(|l| l.line).unwrap_or(0),
                                 }
                             }
                         };
@@ -819,20 +890,20 @@ impl Handle {
                         // Store result and wake netpoller if handle still alive
                         if let Some(h) = weak_clone.upgrade() {
                             let result = h.materialize_result(result);
-                            lock_recover(&h.results).insert(unit.ticket, result);
-                            lock_recover(&h.cancel_flags).remove(&unit.ticket);
+                            lock_recover(&h.results).insert(ticket, result);
+                            lock_recover(&h.cancel_flags).remove(&ticket);
 
                             let fd = h.pipe_write_fd.load(Ordering::Acquire);
                             // The lock covers one syscall attempt. write_ticket's
                             // backoff sleeps for up to 10s; holding the lock across
                             // that stalls every other worker's completion and
                             // Handle::close behind them.
-                            if let Err(e) = write_completion(&h.pipe_write_lock, fd, unit.ticket) {
+                            if let Err(e) = write_completion(&h.pipe_write_lock, fd, ticket) {
                                 // The waiting Go caller will never be woken for this
                                 // ticket, so say so rather than dropping it in silence.
                                 crate::ffi::log_event(&format!(
                                     "gusset: completion write failed for ticket {}: {}",
-                                    unit.ticket, e
+                                    ticket, e
                                 ));
                             }
                         }
@@ -897,7 +968,7 @@ impl Handle {
             let rec = buffers
                 .get(&buffer_id)
                 .ok_or_else(|| format!("buffer id {} not found", buffer_id))?;
-            TaskPayload::Shared(Arc::clone(rec))
+            TaskPayload::Shared(Arc::clone(&rec.buf))
         } else if input.len() > MAX_INLINE_INPUT {
             return Err(format!(
                 "inline input {} bytes exceeds {}-byte copy limit; use a Buffer",
@@ -993,23 +1064,31 @@ impl Handle {
         let ptr = buf.as_mut_ptr();
 
         let mut map = lock_recover(&self.buffers);
-        map.insert(id, Arc::new(buf));
+        map.insert(id, BufferSlot::new(buf, false));
 
         Ok((id, ptr))
     }
 
-    /// Copies `data` into a new buffer and returns its id.
+    /// Copies `data` into a new buffer and returns its id and pointer.
     ///
     /// The memcpy runs on the calling thread. Workers use this to promote a
-    /// large `JobResult::Ok` off the cgo take path (R16 egress).
-    fn buf_from_bytes(&self, data: &[u8]) -> Result<u64, String> {
+    /// large `JobResult::Ok` off the cgo take path, and `gusset_take` uses it for
+    /// the small results it still copies (R16 egress).
+    ///
+    /// Deliberately not poison-checked, unlike [`Handle::buf_alloc`]. Poison
+    /// refuses new work (I2); this carries out a result that already exists. A
+    /// check here lost a sibling's finished result the moment another job
+    /// panicked, and only for results small enough not to have been promoted.
+    pub(crate) fn buf_from_bytes(&self, data: &[u8]) -> Result<(u64, *mut u8), String> {
         if self.closed.load(Ordering::Acquire) {
             return Err("handle is closed".to_string());
         }
         let id = reserve_id(&self.next_buffer_id)?;
         let buf = RawBuffer::from_bytes(data)?;
-        lock_recover(&self.buffers).insert(id, Arc::new(buf));
-        Ok(id)
+        let ptr = buf.as_mut_ptr();
+        // Born as an output: nothing else may return it as one.
+        lock_recover(&self.buffers).insert(id, BufferSlot::new(buf, true));
+        Ok((id, ptr))
     }
 
     /// Moves a large `JobResult::Ok` onto a Buffer so `gusset_take` does not
@@ -1023,7 +1102,7 @@ impl Handle {
             )),
             JobResult::Ok(data) if data.len() > MAX_INLINE_INPUT => {
                 match self.buf_from_bytes(&data) {
-                    Ok(id) => JobResult::Buffer(id),
+                    Ok((id, _)) => JobResult::Buffer(id),
                     Err(e) => JobResult::Err(e),
                 }
             }
@@ -1031,11 +1110,44 @@ impl Handle {
         }
     }
 
+    /// Transfers a live buffer to a job's result, refusing any second owner.
+    ///
+    /// Refused when the buffer is already some result's output, or when another
+    /// work unit still holds it as its input: in both cases the caller freeing
+    /// this result would release memory someone else is reading. Checked under
+    /// the registry lock, which is also where `submit` clones an input's `Arc`,
+    /// so the strong count cannot grow between the check and the claim.
+    fn claim_output(&self, id: u64) -> Result<(), String> {
+        let mut map = lock_recover(&self.buffers);
+        let slot = map.get_mut(&id).ok_or_else(|| {
+            format!(
+                "engine returned buffer id {} as its output: no such live buffer",
+                id
+            )
+        })?;
+        if slot.output_claimed {
+            return Err(format!(
+                "engine returned buffer id {} as its output: it is already another call's \
+                 output; allocate a new buffer for each result",
+                id
+            ));
+        }
+        if Arc::strong_count(&slot.buf) > 1 {
+            return Err(format!(
+                "engine returned buffer id {} as its output: another work unit is still \
+                 reading it as its input",
+                id
+            ));
+        }
+        slot.output_claimed = true;
+        Ok(())
+    }
+
     /// Looks up a live buffer by id, returning its mutable pointer and byte length.
     pub fn buf_get(&self, id: u64) -> Result<(*mut u8, usize), String> {
         let map = lock_recover(&self.buffers);
-        if let Some(buf) = map.get(&id) {
-            Ok((buf.as_mut_ptr(), buf.len()))
+        if let Some(slot) = map.get(&id) {
+            Ok((slot.buf.as_mut_ptr(), slot.buf.len()))
         } else {
             Err(format!("buffer id {} not found", id))
         }
@@ -1068,7 +1180,12 @@ impl Handle {
             let mut workers = lock_recover(&self.workers);
             let handles: Vec<_> = workers.drain(..).collect();
             for handle in handles {
-                let _ = handle.join();
+                // A worker that died hands back its panic payload here, and
+                // `close` runs under ffi_guard inside an extern "C" export:
+                // a payload whose destructor panics must not unwind from it.
+                if let Err(payload) = handle.join() {
+                    drop_panic_payload(payload);
+                }
             }
             drop(workers);
 
