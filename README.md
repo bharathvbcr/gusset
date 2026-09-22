@@ -1,5 +1,7 @@
 # Gusset
 
+[![Website](https://img.shields.io/badge/website-gusset.vbcr.dev-B91C1C?style=flat&logo=safari&logoColor=white)](https://gusset.vbcr.dev/)
+
 The runtime contract for running a Rust engine inside a Go service: panic firewall, bounded concurrency, deadlines, poisoned handles, ABI verification, allocator accounting, and the CI matrix that proves them.
 
 Gusset is **not** a binding generator, **not** a cgo-free calling path, and **not** an IPC transport. It is the hardening plate between Go and Rust in production.
