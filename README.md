@@ -30,7 +30,7 @@ flowchart TD
     subgraph Boundary ["Hardened C ABI Boundary (internal/ffi/gusset.h)"]
         ABI["ABI Layout Verification v2 (4 #[repr(C)] structs checked at init)"]
         Directives["#cgo noescape / #cgo nocallback (0 Go heap escape allocations)"]
-        Exports["Strictly 14 C ABI Exports (nm verified in CI)"]
+        Exports["Strictly 15 C ABI Exports (nm verified in CI)"]
     end
 
     subgraph RustCrate ["Gusset Rust Runtime (crates/gusset)"]
@@ -186,9 +186,10 @@ By default, this installs into `~/.local` (or `/usr/local` if run with write per
 
 ## The Public Surface
 
-### 14 Exported Rust Functions
-Gusset exports strictly 14 C ABI functions from `libgusset.a` (enforced by `tests/exports_match.rs`):
+### 15 Exported Rust Functions
+Gusset exports strictly 15 C ABI functions from `libgusset.a` (enforced by `tests/exports_match.rs`):
 - `gusset_abi_layout(out)`: Layout and struct size/alignment verification.
+- `gusset_abi_fields(offsets, sizes, cap)`: Named-field offsets and sizes of all `#[repr(C)]` types.
 - `gusset_init()`: Global runtime initialization and panic hook installation.
 - `gusset_shutdown(drain_ms)`: Graceful shutdown and worker drain.
 - `gusset_handle_open(pool_size, pipe_write_fd, out_handle, status)`: Opens bounded worker pool.
@@ -327,7 +328,7 @@ Gusset is a boundary, not a service: it runs **your** Rust engine. Two things ar
 required before the snippet below returns a result, and both are easy to miss —
 [`docs/adoption.md`](docs/adoption.md) is the complete worked recipe.
 
-1. **Register an engine.** Gusset's 14 C exports do not include one, so your
+1. **Register an engine.** Gusset's 15 C exports do not include one, so your
    umbrella crate calls `gusset::set_engine_handler` and exports an entry point
    your Go code invokes at startup. Without it every submission is refused with
    `no engine handler registered` — deliberately, rather than falling back to a

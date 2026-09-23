@@ -121,7 +121,7 @@ pub fn log_event(line: &str) {
 }
 
 // ----------------------------------------------------------------------------
-// The 14 Exported C Functions (R1)
+// The 15 Exported C Functions (R1)
 // ----------------------------------------------------------------------------
 
 /// 1. Exports the ABI layout and sizes of all repr(C) types (R12).

@@ -191,7 +191,7 @@ Six invariants, one for each way the process died.
 5. **One memory budget.** A counting allocator wrapper reports live and peak Rust bytes, and `AdviseMemoryLimit` feeds that back into Go's `SetMemoryLimit`, so the GC collects against the *real* total before the cgroup does something less polite.
 6. **Bulkhead.** A panic latches the handle permanently poisoned. Every subsequent call fails fast with `ErrPoisoned` without re-entering native code. The corpse stops taking traffic.
 
-Fourteen C exports, four `#[repr(C)]` types, and an ABI check at `init()` that verifies version, sizes and alignments before the process serves a single request — because a silently drifted header is heap corruption you find out about much later.
+Fifteen C exports, four `#[repr(C)]` types, and an ABI check at `init()` that verifies version, sizes, alignments and named field offsets before the process serves a single request — because a silently drifted header is heap corruption you find out about much later.
 
 ## What it is actually for
 

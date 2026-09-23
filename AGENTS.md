@@ -13,7 +13,7 @@ How an agent works in this repo:
 1. Every change is a merge with green CI on the full matrix; no "will fix in a follow-up" on a red gate.
 2. A new failure mode gets a test in the panic zoo or pitfall suite before the fix lands; the test must fail on `main` first.
 3. Numbers in the README come from `benchstat` output checked into `bench/results/<platform>-<go>-<rust>.txt`, never typed by hand (`make docs` generates via `tools/benchdoc`, `make docs-check` verifies).
-4. Public surface stays at 15 exported Rust functions (the list in the specifications is the whole ABI; `gusset_abi_fields` is the fifteenth, `DECISIONS.md` 2026-09-22) and 11 Go entry points (`WaitBuffer` is the eleventh; `DECISIONS.md` 2026-09-20). Adding another needs a line in `DECISIONS.md` saying why.
+4. Public surface stays at 15 exported Rust functions (the list in the specifications is the whole ABI; `gusset_abi_fields` is the fifteenth, `DECISIONS.md` 2026-09-22) and 12 Go entry points (`CallBuffer`, `Shutdown`, `WaitBuffer` logged in `DECISIONS.md` 2026-09-20). Adding another needs a line in `DECISIONS.md` saying why.
 5. Anything that touches Go runtime internals (`//go:linkname`, `asmcgocall`, private symbols) is refused, whoever asks.
 6. When a Go or Rust release changes boundary behaviour, the fix is a version-gated code path plus a test, not a raised floor.
 7. Prefer deleting a feature over adding a knob; every config option must have a test that exercises both settings.
@@ -169,7 +169,7 @@ The core architecture guarantees and technical contracts enforced across the Rus
 ### Go package (`gusset`)
 
 - **cgo boundary encapsulation**: All cgo confined to `internal/ffi`; public API in root package; `_test.go` files never import `C`. Every `#cgo` import carries `#cgo noescape` and `#cgo nocallback` (enforced by `tools/gussetvet`).
-- **11 public entry points**: `Open`, `Close`, `Call`, `Submit`, `Wait`, `WaitBuffer`, `NewBuffer` (with `Buffer.Free`), `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs`.
+- **12 public entry points**: `Open`, `Close`, `Call`, `CallBuffer`, `Submit`, `Wait` (and `WaitBuffer`), `NewBuffer` (with `Buffer.Free`), `Shutdown`, `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs`.
 - **Handle lifecycle & concurrency**: Bounded semaphore channel matching pool size; `poisoned` atomic bool; non-blocking completion pipe read by a dedicated dispatch goroutine; `AddCleanup` finalizers backstop forgotten handle and buffer closures.
 - **Zero-copy egress & multi-engine routing**: `WaitBuffer` transfers take buffer directly into Go `*Buffer` without intermediate heap copies. Engine opcodes dispatched via `CallHeader.reserved` field (`WithOpcode`/`ContextWithOpcode`).
 - **Input validation & memory limits**: Submissions copy inputs up to 4 KiB; inputs above 4 KiB require `Buffer`. A single buffer is refused above 1 GiB (`MaxBufferBytes`). `AdviseMemoryLimit(total)` feeds Rust live memory usage back into Go runtime `debug.SetMemoryLimit`.
@@ -189,7 +189,7 @@ gusset/
   crates/gusset/          # runtime crate: ffi/, pool/, alloc/, header/
   crates/gusset-example/  # reference adopter engine exercising all failure modes
   go.mod                  # module github.com/bharathvbcr/gusset
-  gusset.go handle.go stats.go buffer.go  # public API (11 entry points)
+  gusset.go handle.go stats.go buffer.go  # public API (12 entry points)
   internal/ffi/           # cgo bridge, hand-maintained gusset.h, exports.txt
   tools/gussetvet/        # custom go vet analyzer enforcing R4 & R5
   tools/benchdoc/         # benchstat-driven README generator
