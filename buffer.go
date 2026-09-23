@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"sync"
 	"sync/atomic"
 
 	"github.com/bharathvbcr/gusset/internal/ffi"
@@ -17,6 +18,10 @@ const MaxBufferBytes = 1 << 30
 
 // Buffer wraps a 64-byte aligned Rust-owned buffer (R16).
 type Buffer struct {
+	// mu covers freed and data together. Free writes both; Bytes reads both.
+	// An atomic on freed alone still races the slice header: Bytes can load
+	// freed==false and then read data while Free nils it.
+	mu      sync.Mutex
 	id      uint64
 	state   *handleState
 	data    []byte
@@ -124,7 +129,17 @@ func (s *handleState) bufFree(id uint64) error {
 // must not use a previously obtained slice after Free or Handle.Close, and should
 // keep the *Buffer reachable (runtime.KeepAlive) for as long as they use its bytes.
 func (b *Buffer) Bytes() []byte {
-	if b == nil || b.freed.Load() || b.state == nil || b.state.closed.Load() {
+	if b == nil || b.state == nil {
+		return nil
+	}
+	// Close frees every buffer of this handle while it holds cgoMu. Observing
+	// the slice under the same lock means Bytes either returns before that
+	// free begins, or it sees the handle closed and returns nil.
+	b.state.cgoMu.RLock()
+	defer b.state.cgoMu.RUnlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.freed.Load() || b.state.closed.Load() {
 		return nil
 	}
 	return b.data
@@ -144,17 +159,26 @@ func (b *Buffer) Free() error {
 	if b == nil {
 		return nil
 	}
+	b.mu.Lock()
 	if b.freed.Swap(true) {
+		b.mu.Unlock()
 		return nil
 	}
 	if b.id > 0 {
 		b.cleanup.Stop()
 	}
-	var err error
-	if b.state != nil {
-		err = b.state.bufFree(b.id)
-	}
-	// Drop our own view of the released memory so nothing here can resurrect it.
+	id := b.id
+	state := b.state
+	// Drop our own view before releasing the lock, so a Bytes that acquires it
+	// next sees freed and never copies this header out.
 	b.data = nil
+	b.mu.Unlock()
+
+	// bufFree takes cgoMu. Do not hold b.mu across that: Bytes acquires cgoMu
+	// and then b.mu, and the opposite order deadlocks.
+	var err error
+	if state != nil {
+		err = state.bufFree(id)
+	}
 	return err
 }

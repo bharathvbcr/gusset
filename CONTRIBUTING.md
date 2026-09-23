@@ -65,7 +65,7 @@ make docs         # Regenerates the README benchmark table using tools/benchdoc
 
 ## Hard Rules for PRs
 
-1. **No Breaking Public Surface:** The C ABI boundary is strictly 14 exported functions (verified by `tests/exports_match.rs`), and the Go API is capped at 10 public entry points. Adding a function requires an entry in `DECISIONS.md`.
+1. **No Breaking Public Surface:** The C ABI boundary is strictly 15 exported functions (verified by `tests/exports_match.rs`), and the Go API is capped at 11 public entry points. Adding a function requires an entry in `DECISIONS.md`.
 2. **Break It Before You Fix It:** Every bug fix must include a test in `tests/panic_zoo/` or `tests/pitfalls/` that reproduces the failure on unmodified code before the fix lands.
 3. **No Go Runtime Internals:** `//go:linkname`, `asmcgocall`, `purego`, and private runtime symbol tampering are prohibited.
 4. **No New Dependencies Without Discussion:** External dependencies add maintenance burden and potential security attack surface. Propose additions in an issue first.

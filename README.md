@@ -72,7 +72,7 @@ flowchart TD
 3. **(I3) Deadline & Cancellation:** Deadlines and cancellations are enforced inside Rust between work units using relative `timeout_ns` and per-job `AtomicBool` flags.
 4. **(I4) Bounded Concurrency:** In-flight calls per handle never exceed the configured pool size. Callers park on the Go semaphore, never on an OS thread in cgo. Pool size is capped at `gusset.MaxPoolSize` (1024); a larger request is refused, not clamped.
 5. **(I5) Rust-Owned Stacks:** Heavy Rust work runs on Rust-spawned threads with an explicit 8 MiB stack, never on the caller's g0 stack (musl's default is 128 KiB). Each worker installs its own 64 KiB `sigaltstack`, and a failure to do so is logged rather than silently accepted.
-6. **(I6) ABI Verification:** Go `init()` verifies ABI version, struct sizes, and alignments against Rust before the process starts serving — for all four `#[repr(C)]` types that cross the boundary, `AllocStats` included.
+6. **(I6) ABI Verification:** Go `init()` verifies ABI version, struct sizes, alignments, and the offset and size of every named field against Rust before the process starts serving — for all four `#[repr(C)]` types that cross the boundary, `AllocStats` included.
 
 ---
 
@@ -225,7 +225,7 @@ that never calls `JobContext::check` keeps running until it is done, and the onl
 thing that changes is that nobody is blocked on it.
 
 ### 4 Boundary `#[repr(C)]` Types (ABI Version 2)
-At startup, `gusset_abi_layout` exports the memory layout of all four types crossing the FFI boundary. Go's `init()` checks them against both compiled-in constants and cgo's compiled struct layouts to prevent silent memory corruption:
+At startup, `gusset_abi_layout` exports the memory layout of all four types crossing the FFI boundary. Go's `init()` checks them against both compiled-in constants and cgo's compiled struct layouts. `gusset_abi_fields` exports the offset and size of every named field of those structs; Go checks that against cgo `unsafe.Offsetof` and `unsafe.Sizeof`. Size and alignment stay the same when two equal-width fields trade places, so the field table is the check that catches it. The table is its own export: `AbiLayout` stays 36 bytes, which is what an ABI version 2 caller allocates.
 - `CallHeader` (40 bytes, align 8): Relative `timeout_ns` (uint64), OpenTelemetry `trace_id` (16 bytes), `span_id` (8 bytes), `flags` (uint32), `reserved` (uint32).
 - `FfiStatus` (48 bytes, align 8): Status code (i32), message pointer (`*mut u8`) and length (`usize`), file pointer (`*const u8`) and length (`usize`), line (u32).
 - `AbiLayout` (36 bytes, align 4): ABI version (`2`), array of 4 sizes (`[u32; 4]`), array of 4 alignments (`[u32; 4]`).

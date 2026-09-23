@@ -2,6 +2,7 @@
 #![allow(unsafe_code)]
 
 pub mod alloc;
+mod fields;
 pub mod guard;
 pub mod status;
 
@@ -152,6 +153,44 @@ pub unsafe extern "C" fn gusset_abi_layout(out: *mut AbiLayout) {
             }
         }));
     }
+}
+
+/// Reports the offset and size of every named field of the four `#[repr(C)]` types.
+///
+/// Returns the field count. Writes `min(cap, count)` entries into each non-null
+/// out pointer and never writes past `cap`, so a caller that passes a short
+/// buffer learns the real count without a smash. A null pointer is not written.
+/// A count of zero means this call panicked; Go treats that as a mismatch.
+///
+/// This is a separate export from [`gusset_abi_layout`] so ABI version 2's
+/// 36-byte `AbiLayout` stays the size those callers allocate.
+///
+/// # Safety
+///
+/// Each non-null pointer must address `cap` writable `u32`s for the duration
+/// of the call. Rust does not retain either pointer.
+#[no_mangle]
+pub unsafe extern "C" fn gusset_abi_fields(offsets: *mut u32, sizes: *mut u32, cap: u32) -> u32 {
+    // A zero count cannot be a successful report: the table is non-empty, and
+    // Go's init refuses anything other than ABI_FIELD_COUNT. Default is that zero.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (off, sz) = fields::layout();
+        let take = (cap as usize).min(fields::ABI_FIELD_COUNT);
+        unsafe {
+            if !offsets.is_null() {
+                for (i, value) in off.iter().enumerate().take(take) {
+                    ptr::write(offsets.add(i), *value);
+                }
+            }
+            if !sizes.is_null() {
+                for (i, value) in sz.iter().enumerate().take(take) {
+                    ptr::write(sizes.add(i), *value);
+                }
+            }
+        }
+        fields::ABI_FIELD_COUNT as u32
+    }))
+    .unwrap_or_default()
 }
 
 /// 2. Initializes the Gusset runtime and installs panic hook.
@@ -598,7 +637,7 @@ pub unsafe extern "C" fn gusset_buf_alloc(
 
     let res = unsafe {
         ffi_guard(status, || {
-            let (id, p) = h.buf_alloc(len)?;
+            let (id, p) = h.buf_alloc_published(len)?;
             ptr::write(out_id, id);
             ptr::write(out_ptr, p);
             Ok(())
@@ -650,5 +689,67 @@ pub unsafe extern "C" fn gusset_buf_free(
         unsafe { (*status).code }
     } else {
         FFI_BAD_ARG
+    }
+}
+
+#[cfg(test)]
+mod abi_field_export_tests {
+    use super::*;
+
+    #[test]
+    fn null_query_returns_the_count_and_writes_nothing() {
+        let n = unsafe { gusset_abi_fields(std::ptr::null_mut(), std::ptr::null_mut(), 0) };
+        if n != fields::ABI_FIELD_COUNT as u32 {
+            panic!("expected {}, got {n}", fields::ABI_FIELD_COUNT);
+        }
+        let n = unsafe { gusset_abi_fields(std::ptr::null_mut(), std::ptr::null_mut(), u32::MAX) };
+        if n != fields::ABI_FIELD_COUNT as u32 {
+            panic!("a huge cap with null pointers wrote or returned {n}");
+        }
+    }
+
+    #[test]
+    fn a_short_cap_does_not_write_past_the_caller_buffer() {
+        let mut offsets = [0xFFFF_FFFFu32; 4];
+        let mut sizes = [0xFFFF_FFFFu32; 4];
+        let n = unsafe { gusset_abi_fields(offsets.as_mut_ptr(), sizes.as_mut_ptr(), 1) };
+        if n != fields::ABI_FIELD_COUNT as u32 {
+            panic!("expected full count, got {n}");
+        }
+        // trace_id is the first field: offset 0, size 16. The other three
+        // slots of this buffer were not part of the caller's cap.
+        if offsets[0] != 0 || sizes[0] != 16 {
+            panic!("first field: offset {} size {}", offsets[0], sizes[0]);
+        }
+        for i in 1..4 {
+            if offsets[i] != 0xFFFF_FFFF || sizes[i] != 0xFFFF_FFFF {
+                panic!("wrote past cap at index {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_cap_does_not_write_past_the_field_count() {
+        let extra = 3usize;
+        let mut offsets = vec![0xFFFF_FFFFu32; fields::ABI_FIELD_COUNT + extra];
+        let mut sizes = vec![0xFFFF_FFFFu32; fields::ABI_FIELD_COUNT + extra];
+        let cap = (fields::ABI_FIELD_COUNT + extra) as u32;
+        let n = unsafe { gusset_abi_fields(offsets.as_mut_ptr(), sizes.as_mut_ptr(), cap) };
+        if n != fields::ABI_FIELD_COUNT as u32 {
+            panic!("expected {}, got {n}", fields::ABI_FIELD_COUNT);
+        }
+        let (want_off, want_sz) = fields::layout();
+        if offsets[..fields::ABI_FIELD_COUNT] != want_off {
+            panic!("offsets diverged from layout()");
+        }
+        if sizes[..fields::ABI_FIELD_COUNT] != want_sz {
+            panic!("sizes diverged from layout()");
+        }
+        for i in 0..extra {
+            let at = fields::ABI_FIELD_COUNT + i;
+            if offsets[at] != 0xFFFF_FFFF || sizes[at] != 0xFFFF_FFFF {
+                panic!("wrote past the field count at {at}");
+            }
+        }
     }
 }

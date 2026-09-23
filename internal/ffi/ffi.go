@@ -29,6 +29,8 @@ package ffi
 #cgo gusset_pkgconfig pkg-config: gusset
 #cgo noescape gusset_abi_layout
 #cgo nocallback gusset_abi_layout
+#cgo noescape gusset_abi_fields
+#cgo nocallback gusset_abi_fields
 #cgo noescape gusset_init
 #cgo nocallback gusset_init
 #cgo noescape gusset_shutdown
@@ -167,6 +169,32 @@ type CallHeader struct {
 // Order: CallHeader, FfiStatus, AbiLayout, AllocStats.
 const AbiTypeCount = 4
 
+// AbiFieldCount is the number of named fields across those structs, in the
+// same struct order and in each struct's declaration order. It has to match
+// the count Rust returns from gusset_abi_fields; a mismatch is a refused start.
+const AbiFieldCount = 17
+
+// AbiFieldNames labels AbiFieldCount for panic text. The index is the contract.
+var AbiFieldNames = [AbiFieldCount]string{
+	"CallHeader.trace_id",
+	"CallHeader.span_id",
+	"CallHeader.timeout_ns",
+	"CallHeader.flags",
+	"CallHeader.reserved",
+	"FfiStatus.code",
+	"FfiStatus.msg",
+	"FfiStatus.msg_len",
+	"FfiStatus.file",
+	"FfiStatus.file_len",
+	"FfiStatus.line",
+	"AbiLayout.version",
+	"AbiLayout.sizes",
+	"AbiLayout.aligns",
+	"AllocStats.live_bytes",
+	"AllocStats.peak_bytes",
+	"AllocStats.alloc_count",
+}
+
 // FlagDiagnosticEngine opts a submission into the built-in diagnostic engine.
 // See GUSSET_FLAG_DIAGNOSTIC_ENGINE in gusset.h.
 const FlagDiagnosticEngine uint32 = C.GUSSET_FLAG_DIAGNOSTIC_ENGINE
@@ -213,6 +241,77 @@ func LocalLayout() ([AbiTypeCount]uint32, [AbiTypeCount]uint32) {
 		uint32(unsafe.Alignof(stats)),
 	}
 	return sizes, aligns
+}
+
+// LocalFieldLayout is the offset and size of every named field, measured on the
+// structs cgo compiled from gusset.h. Declaration order matches Rust's
+// gusset_abi_fields table. These are compiler facts, not the Go mirror structs:
+// Submit copies CallHeader field by field, so a reorder of the Go struct would
+// not be the layout Rust writes.
+func LocalFieldLayout() (offsets, sizes [AbiFieldCount]uint32) {
+	var (
+		header C.CallHeader
+		status C.FfiStatus
+		layout C.AbiLayout
+		stats  C.AllocStats
+	)
+	offsets = [AbiFieldCount]uint32{
+		uint32(unsafe.Offsetof(header.trace_id)),
+		uint32(unsafe.Offsetof(header.span_id)),
+		uint32(unsafe.Offsetof(header.timeout_ns)),
+		uint32(unsafe.Offsetof(header.flags)),
+		uint32(unsafe.Offsetof(header.reserved)),
+		uint32(unsafe.Offsetof(status.code)),
+		uint32(unsafe.Offsetof(status.msg)),
+		uint32(unsafe.Offsetof(status.msg_len)),
+		uint32(unsafe.Offsetof(status.file)),
+		uint32(unsafe.Offsetof(status.file_len)),
+		uint32(unsafe.Offsetof(status.line)),
+		uint32(unsafe.Offsetof(layout.version)),
+		uint32(unsafe.Offsetof(layout.sizes)),
+		uint32(unsafe.Offsetof(layout.aligns)),
+		uint32(unsafe.Offsetof(stats.live_bytes)),
+		uint32(unsafe.Offsetof(stats.peak_bytes)),
+		uint32(unsafe.Offsetof(stats.alloc_count)),
+	}
+	sizes = [AbiFieldCount]uint32{
+		uint32(unsafe.Sizeof(header.trace_id)),
+		uint32(unsafe.Sizeof(header.span_id)),
+		uint32(unsafe.Sizeof(header.timeout_ns)),
+		uint32(unsafe.Sizeof(header.flags)),
+		uint32(unsafe.Sizeof(header.reserved)),
+		uint32(unsafe.Sizeof(status.code)),
+		uint32(unsafe.Sizeof(status.msg)),
+		uint32(unsafe.Sizeof(status.msg_len)),
+		uint32(unsafe.Sizeof(status.file)),
+		uint32(unsafe.Sizeof(status.file_len)),
+		uint32(unsafe.Sizeof(status.line)),
+		uint32(unsafe.Sizeof(layout.version)),
+		uint32(unsafe.Sizeof(layout.sizes)),
+		uint32(unsafe.Sizeof(layout.aligns)),
+		uint32(unsafe.Sizeof(stats.live_bytes)),
+		uint32(unsafe.Sizeof(stats.peak_bytes)),
+		uint32(unsafe.Sizeof(stats.alloc_count)),
+	}
+	return offsets, sizes
+}
+
+// RustFieldLayout asks the linked staticlib for the same table. n is the count
+// Rust reports; it is AbiFieldCount only when this package and the archive
+// agree on how many fields cross. A short cap is not used here: the caller
+// buffer is exactly AbiFieldCount, and a larger report is returned without
+// writing past it.
+func RustFieldLayout() (offsets, sizes [AbiFieldCount]uint32, n uint32) {
+	reported := uint32(C.gusset_abi_fields(nil, nil, 0))
+	if reported != AbiFieldCount {
+		return offsets, sizes, reported
+	}
+	C.gusset_abi_fields(
+		(*C.uint32_t)(unsafe.Pointer(&offsets[0])),
+		(*C.uint32_t)(unsafe.Pointer(&sizes[0])),
+		C.uint32_t(AbiFieldCount),
+	)
+	return offsets, sizes, reported
 }
 
 // AbiTypeNames labels the entries of AbiLayout for error messages.

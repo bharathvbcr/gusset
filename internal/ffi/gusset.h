@@ -54,6 +54,10 @@ typedef struct {
 typedef struct GussetHandle GussetHandle;
 
 void gusset_abi_layout(AbiLayout* out);
+/* Named-field offsets and sizes of the four structs above, in declaration
+ * order: CallHeader, FfiStatus, AbiLayout, AllocStats. Writes min(cap, count)
+ * entries into each non-null pointer and returns the full field count. */
+uint32_t gusset_abi_fields(uint32_t* offsets, uint32_t* sizes, uint32_t cap);
 int32_t gusset_init(void);
 int32_t gusset_shutdown(uint32_t drain_ms);
 int32_t gusset_handle_open(uint32_t pool_size, int32_t pipe_write_fd, GussetHandle** out_handle, FfiStatus* status);

@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased] - 2026-09-22 · Named field layout
+
+- **Equal-width fields could trade places without failing ABI init (I6).** `gusset_abi_layout` reports size and alignment. Swapping `CallHeader.flags` with `reserved` (both `u32`), `span_id` with `timeout_ns` (both 8 bytes), or any two `AllocStats` fields leaves both numbers unchanged, so version 2's check accepted a header that reads those fields from the wrong slots. `gusset_abi_fields` reports the offset and size of every named field and writes no more entries than the caller's `cap`, so the table is not appended to the 36-byte `AbiLayout` a version-2 caller already allocates. Go compares that report with cgo `Offsetof`/`Sizeof`. A planted swap of `flags` and `reserved` panics in `init` with `ABI field CallHeader.flags drifted: Rust offset 32 size 4, cgo offset 36 size 4`. `TestPitfall_EqualWidthFieldSwapKeepsSizeAndBreaksNamedOffsets` walks every equal-width pair and shows the offset multiset is unchanged, which is why a size check or a sorted-offset check cannot see the swap.
+
+## [Unreleased] - 2026-09-22 · Caller-held buffers
+
+- **An engine could return a buffer Go still holds (R16).** The alias check refused the unit's own input, id 0, a second claim, and a buffer another unit was reading. A buffer published through `gusset_buf_alloc` (`NewBuffer`) and then returned as `JobOutput::Buffer` was accepted. The waiter frees an output when it is done, which releases that memory under the caller's view. Published allocations are now marked `caller_held`, and `claim_output` refuses them. Engine-private `buf_alloc` may still be returned once. `engine_returning_a_caller_held_buffer_is_refused` fails against the pre-fix code (published buffer 1 was accepted as an output).
+- **`Bytes` raced `Free` on the slice header.** `freed` is atomic, so the flag was synchronized and `b.data` was not: `-race` reported `Free` writing the header while `Bytes` read it. Both now take `Buffer.mu`, and `Bytes` holds `cgoMu` across that read so it cannot hand out a view `Close` is already freeing. `TestPitfall_BytesAndFreeDoNotRace` fails against the pre-fix code with a data race at `buffer.go`.
+- **Engine dispatch held the registry read lock across execution.** `default_dispatch` called `engine(ctx, input)` while holding `ENGINE_REGISTRY.read()` or `GLOBAL_ENGINE.read()`. A concurrent call to `register_engine` or `clear_engine_handlers` took a write lock and queued behind a slow engine, starving all subsequent worker dispatches on POSIX `RwLock`. `EngineFn` is now `Arc<dyn ...>`, and `default_dispatch` clones the handler and releases the lock before invocation.
+
 ## [Unreleased] - 2026-09-22 · Containment audit
 
 Every fix below ships with a test that fails against the pre-fix code, run from a

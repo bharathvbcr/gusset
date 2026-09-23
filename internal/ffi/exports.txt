@@ -1,3 +1,4 @@
+gusset_abi_fields
 gusset_abi_layout
 gusset_alloc_stats
 gusset_buf_alloc

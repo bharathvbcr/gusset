@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -46,6 +48,72 @@ func TestPitfall_ABILayoutMatch(t *testing.T) {
 				localSizes[i], localAligns[i])
 		}
 	}
+}
+
+// Pitfall: equal-width fields can trade places without changing a struct's size
+// or alignment, which is all ABI version 2 checked. The named-offset table is
+// what makes that swap visible. A check that sorted the offsets, or compared
+// them as a multiset, would still accept it.
+func TestPitfall_EqualWidthFieldSwapKeepsSizeAndBreaksNamedOffsets(t *testing.T) {
+	rustOff, rustSz, n := ffi.RustFieldLayout()
+	if int(n) != ffi.AbiFieldCount {
+		t.Fatalf("Rust reported %d fields, Go compiled %d", n, ffi.AbiFieldCount)
+	}
+	localOff, localSz := ffi.LocalFieldLayout()
+	if rustOff != localOff || rustSz != localSz {
+		t.Fatalf("live field layouts disagree\n rust off %v sz %v\n cgo  off %v sz %v",
+			rustOff, rustSz, localOff, localSz)
+	}
+
+	structSize := map[string]uint32{}
+	sizes, _ := ffi.LocalLayout()
+	for i, name := range ffi.AbiTypeNames {
+		structSize[name] = sizes[i]
+	}
+	for i, name := range ffi.AbiFieldNames {
+		ty, _, ok := strings.Cut(name, ".")
+		if !ok {
+			t.Fatalf("field name %q has no struct", name)
+		}
+		limit, known := structSize[ty]
+		if !known {
+			t.Fatalf("field %s is not on a checked struct", name)
+		}
+		if rustSz[i] == 0 {
+			t.Fatalf("field %s has size 0; the check would pass vacuously", name)
+		}
+		if rustOff[i]+rustSz[i] > limit {
+			t.Fatalf("field %s ends at %d, %s is %d bytes", name, rustOff[i]+rustSz[i], ty, limit)
+		}
+	}
+
+	pairs := 0
+	for i := 0; i < len(rustOff); i++ {
+		for j := i + 1; j < len(rustOff); j++ {
+			if rustSz[i] != rustSz[j] || rustOff[i] == rustOff[j] {
+				continue
+			}
+			pairs++
+			swapped := rustOff
+			swapped[i], swapped[j] = swapped[j], swapped[i]
+			if swapped == rustOff {
+				t.Fatalf("swap of %s and %s did not move named offsets",
+					ffi.AbiFieldNames[i], ffi.AbiFieldNames[j])
+			}
+			sortedA := append([]uint32(nil), rustOff[:]...)
+			sortedB := append([]uint32(nil), swapped[:]...)
+			slices.Sort(sortedA)
+			slices.Sort(sortedB)
+			if !slices.Equal(sortedA, sortedB) {
+				t.Fatalf("equal-width swap of %s and %s changed the offset multiset",
+					ffi.AbiFieldNames[i], ffi.AbiFieldNames[j])
+			}
+		}
+	}
+	if pairs == 0 {
+		t.Fatal("no equal-width field pair; a size-only ABI check's blind spot is untested")
+	}
+	t.Logf("rejected %d equal-width field swaps that a size check would accept", pairs)
 }
 
 // Pitfall 2: Handle Poisoning (Invariant I2, R10)

@@ -1,4 +1,4 @@
-//! R1: the C ABI surface is exactly the 14 names in `internal/ffi/exports.txt`.
+//! R1: the C ABI surface is exactly the names in `internal/ffi/exports.txt`.
 //!
 //! Two defects this test used to have, both of which made it report success without
 //! checking the artifact that ships:
@@ -110,8 +110,8 @@ fn test_exports_match_list() {
 
     assert_eq!(
         expected_exports.len(),
-        14,
-        "expected exactly 14 ABI functions"
+        15,
+        "expected exactly 15 ABI functions"
     );
 
     let candidates: Vec<PathBuf> = ["target/debug/libgusset.a", "target/release/libgusset.a"]

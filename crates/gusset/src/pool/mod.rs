@@ -175,7 +175,7 @@ fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// Engine handler function type.
 pub type EngineFn =
-    Box<dyn Fn(&JobContext, &[u8]) -> Result<JobOutput, String> + Send + Sync + 'static>;
+    Arc<dyn Fn(&JobContext, &[u8]) -> Result<JobOutput, String> + Send + Sync + 'static>;
 
 static GLOBAL_ENGINE: RwLock<Option<EngineFn>> = RwLock::new(None);
 static ENGINE_REGISTRY: RwLock<Option<HashMap<u32, EngineFn>>> = RwLock::new(None);
@@ -191,7 +191,7 @@ where
     R: Into<JobOutput> + 'static,
 {
     let mut w = GLOBAL_ENGINE.write().unwrap_or_else(|e| e.into_inner());
-    *w = Some(Box::new(move |ctx, input| f(ctx, input).map(Into::into)));
+    *w = Some(Arc::new(move |ctx, input| f(ctx, input).map(Into::into)));
 }
 
 /// Registers an engine execution handler for a specific opcode (R9).
@@ -206,7 +206,7 @@ where
     let map = w.get_or_insert_with(HashMap::new);
     map.insert(
         opcode,
-        Box::new(move |ctx, input| f(ctx, input).map(Into::into)),
+        Arc::new(move |ctx, input| f(ctx, input).map(Into::into)),
     );
 }
 
@@ -250,11 +250,12 @@ pub fn has_engine_handler() -> bool {
 pub fn default_dispatch(ctx: &JobContext, input: &[u8]) -> Result<JobOutput, String> {
     let opcode = ctx.opcode();
     if opcode != 0 {
-        let reg = ENGINE_REGISTRY.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref map) = *reg {
-            if let Some(ref engine) = map.get(&opcode) {
-                return engine(ctx, input);
-            }
+        let engine = {
+            let reg = ENGINE_REGISTRY.read().unwrap_or_else(|e| e.into_inner());
+            reg.as_ref().and_then(|map| map.get(&opcode).cloned())
+        };
+        if let Some(engine) = engine {
+            return engine(ctx, input);
         }
         return Err(format!(
             "gusset: no engine handler registered for opcode {} (submission refused)",
@@ -263,11 +264,12 @@ pub fn default_dispatch(ctx: &JobContext, input: &[u8]) -> Result<JobOutput, Str
     }
 
     // 2. Opcode 0: Check global registration
-    {
+    let global_engine = {
         let r = GLOBAL_ENGINE.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref engine) = *r {
-            return engine(ctx, input);
-        }
+        r.clone()
+    };
+    if let Some(engine) = global_engine {
+        return engine(ctx, input);
     }
 
     // 3. Diagnostic engine fallback (only for opcode 0)
@@ -573,13 +575,19 @@ struct BufferSlot {
     /// An engine returning a captured, pre-allocated id does exactly that on
     /// its second call, so a buffer may become an output once per lifetime.
     output_claimed: bool,
+    /// Set when the pointer was handed to Go (`NewBuffer` / `gusset_buf_alloc`).
+    ///
+    /// Go still holds a view. The result path frees an output buffer when the
+    /// waiter is done, which would release this memory under that view.
+    caller_held: bool,
 }
 
 impl BufferSlot {
-    fn new(buf: RawBuffer, output_claimed: bool) -> Self {
+    fn new(buf: RawBuffer, output_claimed: bool, caller_held: bool) -> Self {
         Self {
             buf: Arc::new(buf),
             output_claimed,
+            caller_held,
         }
     }
 }
@@ -1052,7 +1060,23 @@ impl Handle {
     }
 
     /// Allocates 64-byte aligned Rust-owned buffer memory (R16).
+    ///
+    /// The pointer is not published to Go. An engine may return this id as its
+    /// output once. Buffers Go can already see are [`Handle::buf_alloc_published`].
     pub fn buf_alloc(&self, len: usize) -> Result<(u64, *mut u8), String> {
+        self.allocate_buffer(len, false)
+    }
+
+    /// Allocates a buffer and records that Go holds the pointer (`NewBuffer`).
+    ///
+    /// `gusset_buf_alloc` is this path. An engine that returns the id as
+    /// `JobOutput::Buffer` is handing back memory the caller still views; the
+    /// result path would free it when the waiter finishes.
+    pub fn buf_alloc_published(&self, len: usize) -> Result<(u64, *mut u8), String> {
+        self.allocate_buffer(len, true)
+    }
+
+    fn allocate_buffer(&self, len: usize, caller_held: bool) -> Result<(u64, *mut u8), String> {
         if self.poisoned.load(Ordering::Acquire) {
             return Err("handle is poisoned".to_string());
         }
@@ -1064,7 +1088,7 @@ impl Handle {
         let ptr = buf.as_mut_ptr();
 
         let mut map = lock_recover(&self.buffers);
-        map.insert(id, BufferSlot::new(buf, false));
+        map.insert(id, BufferSlot::new(buf, false, caller_held));
 
         Ok((id, ptr))
     }
@@ -1087,7 +1111,7 @@ impl Handle {
         let buf = RawBuffer::from_bytes(data)?;
         let ptr = buf.as_mut_ptr();
         // Born as an output: nothing else may return it as one.
-        lock_recover(&self.buffers).insert(id, BufferSlot::new(buf, true));
+        lock_recover(&self.buffers).insert(id, BufferSlot::new(buf, true, false));
         Ok((id, ptr))
     }
 
@@ -1112,11 +1136,12 @@ impl Handle {
 
     /// Transfers a live buffer to a job's result, refusing any second owner.
     ///
-    /// Refused when the buffer is already some result's output, or when another
-    /// work unit still holds it as its input: in both cases the caller freeing
-    /// this result would release memory someone else is reading. Checked under
-    /// the registry lock, which is also where `submit` clones an input's `Arc`,
-    /// so the strong count cannot grow between the check and the claim.
+    /// Refused when the buffer is already some result's output, when Go still
+    /// holds the pointer (`caller_held`), or when another work unit still holds
+    /// it as its input. In each case the waiter freeing this result would
+    /// release memory someone else is reading. Checked under the registry lock,
+    /// which is also where `submit` clones an input's `Arc`, so the strong
+    /// count cannot grow between the check and the claim.
     fn claim_output(&self, id: u64) -> Result<(), String> {
         let mut map = lock_recover(&self.buffers);
         let slot = map.get_mut(&id).ok_or_else(|| {
@@ -1129,6 +1154,19 @@ impl Handle {
             return Err(format!(
                 "engine returned buffer id {} as its output: it is already another call's \
                  output; allocate a new buffer for each result",
+                id
+            ));
+        }
+        // A published buffer still has a Go view. Moving it to a result would
+        // let the waiter free it under that view — the same use-after-free as
+        // returning the input, for every buffer `NewBuffer` handed out rather
+        // than only the one this unit was given. Vale refuses the move while
+        // another owner is live; this is that check, stored at alloc time
+        // because Rust cannot see the Go pointer.
+        if slot.caller_held {
+            return Err(format!(
+                "engine returned buffer id {} as its output: the caller still holds it; \
+                 allocate a new buffer for the result",
                 id
             ));
         }
@@ -1661,6 +1699,87 @@ mod tests {
         }
 
         let _ = handle.buf_free(buf_id);
+        handle.close();
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// `NewBuffer` reaches Rust through `gusset_buf_alloc`. That export, not
+    /// `Handle::buf_alloc`, is what must mark the slot caller-held: an engine
+    /// returning the id is otherwise accepted, and the waiter's free releases
+    /// memory Go still views.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn gusset_buf_alloc_marks_the_buffer_caller_held() {
+        use crate::ffi::gusset_buf_alloc;
+        use crate::ffi::status::{FfiStatus, FFI_OK};
+
+        const OPCODE_RETURN_EXPORTED: u32 = 9201;
+        register_engine(OPCODE_RETURN_EXPORTED, |_ctx, input: &[u8]| {
+            let mut raw = [0u8; 8];
+            let n = input.len().min(8);
+            raw[..n].copy_from_slice(&input[..n]);
+            Ok::<_, String>(JobOutput::Buffer(u64::from_le_bytes(raw)))
+        });
+
+        let (r, w) = make_pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+        // SAFETY: the Arc stays alive for the call. The export only reads the handle.
+        let raw = std::sync::Arc::as_ptr(&handle) as *mut Handle;
+        let mut id = 0u64;
+        let mut ptr = std::ptr::null_mut();
+        let mut status = FfiStatus::ok();
+        // SAFETY: `raw` is a live handle; the out-params are local and writable.
+        let rc = unsafe { gusset_buf_alloc(raw, 32, &mut id, &mut ptr, &mut status) };
+        assert_eq!(
+            rc, FFI_OK,
+            "gusset_buf_alloc failed with code {}",
+            status.code
+        );
+        assert!(!ptr.is_null());
+        // SAFETY: the export just returned a 32-byte buffer.
+        unsafe {
+            std::ptr::write(ptr, 0x5A);
+        }
+
+        let header = CallHeader {
+            reserved: OPCODE_RETURN_EXPORTED,
+            ..Default::default()
+        };
+        let ticket = match handle.submit(header, &id.to_le_bytes(), 0) {
+            Ok(t) => t,
+            Err(e) => panic!("submit failed: {}", e),
+        };
+        assert_eq!(drain_ticket(r), ticket);
+
+        match handle.take(ticket) {
+            Ok(JobResult::Err(msg)) => assert!(
+                msg.contains("caller still holds"),
+                "refusal must name the caller's view, got: {}",
+                msg
+            ),
+            Ok(JobResult::Buffer(got)) => {
+                panic!("gusset_buf_alloc buffer {} was accepted as an output", got)
+            }
+            Ok(other) => panic!("unexpected result {:?}", std::mem::discriminant(&other)),
+            Err(e) => panic!("take failed: {}", e),
+        }
+
+        match handle.buf_get(id) {
+            Ok((p, len)) => {
+                assert_eq!(len, 32);
+                // SAFETY: buf_get just confirmed the allocation is live.
+                let first = unsafe { std::ptr::read(p) };
+                assert_eq!(first, 0x5A, "the exported buffer was disturbed");
+            }
+            Err(e) => panic!("exported buffer was freed despite the refusal: {}", e),
+        }
+
+        let _ = handle.buf_free(id);
         handle.close();
         unsafe {
             libc::close(r);

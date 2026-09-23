@@ -282,4 +282,25 @@ func TestGate_AbiCrossCheckDetectsHeaderDrift(t *testing.T) {
 				i, sizes[i], expected[i])
 		}
 	}
+
+	off, sz, n := ffi.RustFieldLayout()
+	if int(n) != ffi.AbiFieldCount {
+		t.Fatalf("Rust reported %d fields, the field table has %d", n, ffi.AbiFieldCount)
+	}
+	localOff, localSz := ffi.LocalFieldLayout()
+	if off != localOff || sz != localSz {
+		t.Fatalf("field cross-check disagrees\n rust %v %v\n cgo  %v %v", off, sz, localOff, localSz)
+	}
+	nonzero := 0
+	for i, s := range sz {
+		if s == 0 {
+			t.Fatalf("field %s compiled to size 0; the field check would pass vacuously", ffi.AbiFieldNames[i])
+		}
+		if off[i] != 0 {
+			nonzero++
+		}
+	}
+	if nonzero == 0 {
+		t.Fatal("every field offset is 0; the field check would agree with an empty report")
+	}
 }

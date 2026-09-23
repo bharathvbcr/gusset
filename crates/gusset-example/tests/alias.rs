@@ -153,6 +153,7 @@ fn engine_returning_buffer_id_zero_is_refused() {
     }
 }
 
+const OPCODE_RETURN_PUBLISHED: u32 = 9106;
 const OPCODE_RETURN_CAPTURED: u32 = 9103;
 const OPCODE_HOLD_INPUT: u32 = 9104;
 const OPCODE_RETURN_NAMED: u32 = 9105;
@@ -319,6 +320,79 @@ fn a_buffer_in_use_as_another_units_input_is_refused_as_an_output() {
     }
 
     let _ = handle.buf_free(held);
+    handle.close();
+    // SAFETY: the read end is still owned by this test; close() took the write end.
+    unsafe {
+        libc::close(r);
+    }
+}
+
+/// A buffer Go allocated with `NewBuffer` is not an output.
+///
+/// `buf_alloc` (an engine's private buffer) may be returned once. The same id
+/// allocated through the published path — what `gusset_buf_alloc` does for
+/// `NewBuffer` — still has a caller holding the pointer. Accepting it makes the
+/// waiter's free release that memory under the caller. Vale's linear types
+/// invalidate the previous owner at the move; this is that check at the boundary.
+#[test]
+fn engine_returning_a_caller_held_buffer_is_refused() {
+    gusset::pool::register_engine(OPCODE_RETURN_PUBLISHED, |_ctx, input: &[u8]| {
+        let mut id = [0u8; 8];
+        let n = input.len().min(8);
+        id[..n].copy_from_slice(&input[..n]);
+        Ok::<_, String>(JobOutput::Buffer(u64::from_le_bytes(id)))
+    });
+
+    let (r, w) = make_pipe();
+    let handle = match Handle::open(1, w) {
+        Ok(h) => h,
+        Err(e) => panic!("open failed: {}", e),
+    };
+    let (published, ptr) = match handle.buf_alloc_published(32) {
+        Ok(v) => v,
+        Err(e) => panic!("buf_alloc_published failed: {}", e),
+    };
+    // SAFETY: `ptr` is a live 32-byte buffer this handle just allocated.
+    unsafe {
+        std::ptr::write(ptr, 0xA5);
+    }
+
+    let header = CallHeader {
+        reserved: OPCODE_RETURN_PUBLISHED,
+        ..Default::default()
+    };
+    let ticket = match handle.submit(header, &published.to_le_bytes(), 0) {
+        Ok(t) => t,
+        Err(e) => panic!("submit failed: {}", e),
+    };
+    assert_eq!(read_ticket(r), ticket);
+
+    match handle.take(ticket) {
+        Ok(JobResult::Err(msg)) => assert!(
+            msg.contains("caller still holds"),
+            "refusal must name the caller's view, got: {}",
+            msg
+        ),
+        Ok(JobResult::Buffer(id)) => panic!(
+            "published buffer {} was accepted as an output; the waiter's free would \
+             release memory the caller still holds",
+            id
+        ),
+        Ok(other) => panic!("unexpected result {:?}", std::mem::discriminant(&other)),
+        Err(e) => panic!("take failed: {}", e),
+    }
+
+    match handle.buf_get(published) {
+        Ok((p, len)) => {
+            assert_eq!(len, 32);
+            // SAFETY: buf_get just confirmed this buffer is live.
+            let first = unsafe { std::ptr::read(p) };
+            assert_eq!(first, 0xA5, "the caller's buffer was disturbed");
+        }
+        Err(e) => panic!("the published buffer was freed despite the refusal: {}", e),
+    }
+
+    let _ = handle.buf_free(published);
     handle.close();
     // SAFETY: the read end is still owned by this test; close() took the write end.
     unsafe {

@@ -13,8 +13,8 @@ A clear and concise description of what the problem is. Ex. I'm always frustrate
 A clear and concise description of what you want to happen.
 
 **Impact on Core Invariants and Public Surface**
-- Does this require changing the 14 exported C ABI functions? (Yes/No)
-- Does this require changing the 10 public Go entry points? (Yes/No)
+- Does this require changing the 15 exported C ABI functions? (Yes/No)
+- Does this require changing the 11 public Go entry points? (Yes/No)
 - How does this affect Invariants I1–I6?
 
 **Describe alternatives you've considered**

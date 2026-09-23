@@ -41,7 +41,7 @@ The Go package never parks an OS thread on Rust work: a call submits to the Rust
 
 | Component | Language | Responsibilities | Public surface (v0.1) |
 | --- | --- | --- | --- |
-| Runtime crate | Rust | `ffi_guard`, `FfiStatus` (ptr+len, never NUL-terminated), `gusset_status_free`, panic hook with location, ABI layout export, worker pool with explicit 8 MiB stack size, allocator stats, timeout and cancel checks | 14 exported functions, 4 `#[repr(C)]` types (`CallHeader`, `FfiStatus`, `AbiLayout`, `AllocStats`) |
+| Runtime crate | Rust | `ffi_guard`, `FfiStatus` (ptr+len, never NUL-terminated), `gusset_status_free`, panic hook with location, ABI layout export, named field offsets, worker pool with explicit 8 MiB stack size, allocator stats, timeout and cancel checks | 15 exported functions, 4 `#[repr(C)]` types (`CallHeader`, `FfiStatus`, `AbiLayout`, `AllocStats`) |
 | Runtime package | Go | `Handle` with semaphore, timeout, poison state; `init()` ABI check; completion channel over an `os.Pipe` whose write end Rust owns; `noescape` and `nocallback` on every export; allocator stats bridged to `debug.SetMemoryLimit` | `Open`, `Close`, `Call`, `Submit`, `Wait`, `WaitBuffer`, `NewBuffer`, `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs` (11; `WaitBuffer` logged in `DECISIONS.md`) |
 | Header | C | Hand-maintained `internal/ffi/gusset.h`; verified by `tests/header_match.rs` parameter and return types against Rust exports | one `.h` file |
 | Example engine | Rust + Go | Reference engine that exercises every failure mode: panic, NUL in message, deadline miss, large allocation, deep recursion | reference for adopters (`crates/gusset-example`) |
@@ -53,7 +53,7 @@ Invariants the packages enforce:
 3. (I3) A call cannot outlive its deadline by more than one work unit; Rust checks the timeout and the job's cancel flag between units.
 4. (I4) In-flight calls per handle never exceed the pool size; excess callers wait on a Go semaphore, not an OS thread.
 5. (I5) Heavy Rust work runs on Rust-spawned threads with explicit stack size, never on the caller's g0 stack (musl default is 128 KB).
-6. (I6) Go `init()` refuses to start on an ABI version or struct-size mismatch.
+6. (I6) Go `init()` refuses to start on an ABI version, struct-size, or named-field offset mismatch.
 
 ### Cooperative Cancellation & Relative Deadline Flow (I3, R9)
 
@@ -94,7 +94,7 @@ Five phases; each has an exit criterion that is a test, not an opinion. Duration
 
 ```mermaid
 flowchart LR
-    P0["Phase 0: Seed Repro\n(Firewall NUL panic & benchmarks)\n[SHIPPED]"] --> P1["Phase 1: v0.1 Core Runtime\n(6 Invariants, 14 exports, CI matrix)\n[SHIPPED]"]
+    P0["Phase 0: Seed Repro\n(Firewall NUL panic & benchmarks)\n[SHIPPED]"] --> P1["Phase 1: v0.1 Core Runtime\n(6 Invariants, exports, CI matrix)\n[SHIPPED]"]
     P1 --> P2["Phase 2: 2nd-App Validation\n(DevCouncil dc-glob & gusset-example)\n[SHIPPED]"]
     P2 --> P3["Phase 3: Public Release\n(Generated benchdoc, release packages)\n[READY]"]
     P3 --> P4["Phase 4: Out-of-Process IPC\n(iceoryx2 daemon for GPU crash isolation)\n[SPECIFIED]"]
@@ -146,7 +146,7 @@ Naming convention: crate `gusset`, Go module `github.com/bharathvbcr/gusset`, ou
 | Go runtime changes break the completion path or `noescape` semantics | Medium | CI runs against Go tip weekly; blocking fallback under the semaphore stays supported |
 | Rust `panic=abort` in a dependency's profile silently disables the firewall | Medium | Build script asserts `panic=unwind`; the panic zoo test fails otherwise |
 | Two Rust staticlibs in one Go binary (duplicate `std` symbols) | Medium for adopters | Document the umbrella-crate rule; example repo shows it |
-| Solo maintenance stalls after Phase 3 | Medium | Keep the surface at 14 exports; the matrix does the reviewing |
+| Solo maintenance stalls after Phase 3 | Medium | Keep the surface at 15 exports; the matrix does the reviewing |
 | iceoryx2 ships its own Go binding before Phase 4 | Low–medium | Good outcome: adopt it and drop Phase 4 |
 
 Open decisions from the first draft are all resolved in `DECISIONS.md`.

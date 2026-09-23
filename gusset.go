@@ -71,8 +71,8 @@ func init() {
 
 	// Second, independent check: what Rust reports against what cgo actually
 	// compiled from the hand-maintained header. The constants above would agree
-	// with Rust while the header disagreed with both, and nothing else would
-	// notice until a struct write landed at the wrong offset in the Go heap.
+	// with Rust while the header disagreed with both. Size and alignment still
+	// miss an equal-width field swap; the named-field check below is that case.
 	localSizes, localAligns := ffi.LocalLayout()
 	for i := 0; i < ffi.AbiTypeCount; i++ {
 		if localSizes[i] != layout.Sizes[i] || localAligns[i] != layout.Aligns[i] {
@@ -82,6 +82,31 @@ func init() {
 				ffi.AbiTypeNames[i],
 				layout.Sizes[i], layout.Aligns[i],
 				localSizes[i], localAligns[i],
+			))
+		}
+	}
+
+	// Size and alignment stay equal when two fields of equal width trade places.
+	// Rust and cgo each report the offset and size of every named field; a
+	// disagreement means the hand-maintained header and the archive do not
+	// describe the same layout, and a later struct write would land on the
+	// wrong slot.
+	rustOff, rustSz, nfields := ffi.RustFieldLayout()
+	if nfields != ffi.AbiFieldCount {
+		panic(fmt.Sprintf(
+			"gusset: ABI field count mismatch: Go expected %d, Rust reported %d",
+			ffi.AbiFieldCount, nfields,
+		))
+	}
+	localOff, localSz := ffi.LocalFieldLayout()
+	for i := 0; i < ffi.AbiFieldCount; i++ {
+		if rustOff[i] != localOff[i] || rustSz[i] != localSz[i] {
+			panic(fmt.Sprintf(
+				"gusset: ABI field %s drifted: Rust offset %d size %d, "+
+					"cgo offset %d size %d from internal/ffi/gusset.h",
+				ffi.AbiFieldNames[i],
+				rustOff[i], rustSz[i],
+				localOff[i], localSz[i],
 			))
 		}
 	}

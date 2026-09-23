@@ -71,7 +71,7 @@ cannot read; use the toolchain's `llvm-nm` if you inspect symbols.
 
 ## 2. Register your engine, and call the registration
 
-Gusset exports exactly 14 C symbols and **none of them registers an engine**.
+Gusset exports exactly 15 C symbols and **none of them registers an engine**.
 Registration is a Rust API, so the umbrella crate has to export its own entry point
 for Go to call:
 
