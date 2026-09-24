@@ -96,8 +96,10 @@ type handleState struct {
 	drainDone     chan struct{}
 	// closeDone is closed once close has fully released the handle, so a
 	// second concurrent Close waits for the first rather than returning while
-	// workers are still being joined.
+	// workers are still being joined. closeErr is written before closeDone
+	// closes, so every caller reports the same outcome.
 	closeDone chan struct{}
+	closeErr  error
 	// drainExited is set, under mu, when drainPipe stops reading. After that
 	// no completion can ever be delivered, so a new submission or waiter is
 	// refused instead of parking forever.
@@ -195,10 +197,11 @@ func Open(opts ...Option) (*Handle, error) {
 	// Because drainPipe receives state and not h, h can be garbage collected
 	// if the application drops all references to it without calling Close().
 	//
-	// close runs on its own goroutine. The runtime executes cleanups one at a
-	// time on a single goroutine, and close joins worker threads — unbounded for
-	// an engine that never calls JobContext::check — so running it inline stalled
-	// every other cleanup in the process, Gusset's own Buffer backstops included.
+	// close runs on its own goroutine. The runtime runs the cleanups of one
+	// queued block one after another, and close joins worker threads —
+	// unbounded for an engine that never calls JobContext::check — so running it
+	// inline stalled every cleanup queued behind it, Gusset's own Buffer
+	// backstops included.
 	h.cleanup = runtime.AddCleanup(h, func(s *handleState) {
 		slog.Warn("gusset: handle was garbage collected without explicit Close()")
 		go func() { _ = s.close() }()
@@ -264,14 +267,14 @@ func drainPipe(s *handleState) {
 				s.poisoned.Store(true)
 			}
 			res = callResult{err: takeErr}
-		case (bufID&(uint64(1)<<63)) != 0 || (bufID > 0 && len(outBytes) > inlineResultBytes):
+		case (bufID&ffi.TakeOwnedFlag) != 0 || (bufID > 0 && len(outBytes) > inlineResultBytes):
 			// Keep take()'s Rust buffer until a waiter consumes it. WaitBuffer
 			// wraps with no Go copy; Wait copies out and frees. Wrapping here
 			// forced every Wait of a large result to allocate a *Buffer it
 			// immediately destroyed. The id lives in takeIDs, not callResult,
 			// so a one-byte Call does not pay a larger completion object.
 			res = callResult{data: outBytes}
-			takeID = bufID &^ (uint64(1) << 63)
+			takeID = bufID &^ ffi.TakeOwnedFlag
 		default:
 			var out []byte
 			if len(outBytes) > 0 {
@@ -347,9 +350,13 @@ func (h *Handle) Close() error {
 func (s *handleState) close() error {
 	if s.closed.Swap(true) {
 		<-s.closeDone
-		return nil
+		return s.closeErr
 	}
-	defer close(s.closeDone)
+	var err error
+	defer func() {
+		s.closeErr = err
+		close(s.closeDone)
+	}()
 
 	// 1. Cancel in-flight jobs in Rust memory (R9, I3)
 	s.cgoMu.RLock()
@@ -360,7 +367,7 @@ func (s *handleState) close() error {
 
 	// 2. Wait for all active CGO operations to finish before deallocating handle
 	s.cgoMu.Lock()
-	err := ffi.HandleClose(s.ptr)
+	err = ffi.HandleClose(s.ptr)
 	s.ptr = nil
 	s.cgoMu.Unlock()
 
@@ -390,6 +397,24 @@ func (s *handleState) close() error {
 	}
 
 	return err
+}
+
+// enterCgo takes cgoMu for reading without ever blocking, and only while the
+// handle is open. On true the caller holds the read lock and must RUnlock.
+//
+// Only close takes cgoMu exclusively, and it sets closed first. A reader that
+// passed an earlier closed check and then called RLock parked behind close's
+// unbounded worker join, ignoring its own context. TryRLock fails exactly when
+// that writer is holding or waiting, which is exactly "closing".
+func (s *handleState) enterCgo() bool {
+	if s.closed.Load() || !s.cgoMu.TryRLock() {
+		return false
+	}
+	if s.closed.Load() || s.ptr == nil {
+		s.cgoMu.RUnlock()
+		return false
+	}
+	return true
 }
 
 func (s *handleState) popTakeIDLocked(ticket uint64) uint64 {
@@ -528,8 +553,12 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 		if bufferID == 0 {
 			// A Go-heap result buffer (see waitBuffer): no Rust id to pass, so
 			// its bytes travel inline. Id 0 used to mean "no input", which
-			// silently ran the engine on nothing.
-			data := v.Bytes()
+			// silently ran the engine on nothing. Data and liveness are read
+			// together: a Free between two separate reads sent nil as input.
+			data, live := v.snapshot()
+			if !live {
+				return 0, errors.New("gusset: buffer is freed or closed")
+			}
 			if len(data) > inlineResultBytes {
 				return 0, errors.New("gusset: buffer without a Rust id exceeds the 4096-byte copy limit")
 			}
@@ -568,9 +597,7 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 		<-s.sem
 		return 0, err
 	}
-	s.cgoMu.RLock()
-	if s.closed.Load() || s.ptr == nil {
-		s.cgoMu.RUnlock()
+	if !s.enterCgo() {
 		<-s.sem
 		return 0, errors.New("gusset: handle is closed")
 	}
@@ -649,9 +676,7 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 		// Copying without that lock raced Close: the view was still readable and
 		// the destination was filled from freed pages (GOGC=1
 		// TestStress_ConcurrentCallAndCloseRace).
-		s.cgoMu.RLock()
-		if s.closed.Load() || s.ptr == nil {
-			s.cgoMu.RUnlock()
+		if !s.enterCgo() {
 			return nil, errors.New("gusset: handle is closed")
 		}
 		out := make([]byte, len(res.data))
@@ -671,9 +696,7 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 
 	// Wrap under cgoMu so Close cannot HandleClose the take buffer between
 	// waitInternal returning the view and newBufferFromRaw installing it.
-	s.cgoMu.RLock()
-	if s.closed.Load() || s.ptr == nil {
-		s.cgoMu.RUnlock()
+	if !s.enterCgo() {
 		s.discardTake(takeID)
 		return nil, errors.New("gusset: handle is closed")
 	}
@@ -686,16 +709,16 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 
 	if len(res.data) > 0 {
 		buf, err := s.newBuffer(len(res.data))
-		if errors.Is(err, ErrPoisoned) {
-			// This result already exists; poison refuses new work only (I2).
-			// NewBuffer's Rust allocation is poison-checked, so a sibling's
-			// panic used to turn a finished result into ErrPoisoned after it
-			// had already been removed from completed — lost for good. Carry
-			// it on the Go heap instead, 64-byte aligned like a Rust buffer.
-			return newHeapBuffer(s, res.data), nil
-		}
 		if err != nil {
-			return nil, err
+			if s.closed.Load() {
+				return nil, errors.New("gusset: handle is closed")
+			}
+			// This result already exists and has left completed; any error
+			// here would lose it for good. Poison refuses new work only (I2),
+			// and NewBuffer's Rust allocation is poison-checked, so a sibling's
+			// panic used to turn a finished result into ErrPoisoned. Carry it
+			// on the Go heap instead, 64-byte aligned like a Rust buffer.
+			return newHeapBuffer(s, res.data), nil
 		}
 		b := buf.Bytes()
 		if b == nil {
@@ -787,11 +810,11 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 		// read by an engine that calls JobContext::check, and an engine that
 		// never does — a tokenizer, a regex scan, a proof verifier — runs to
 		// completion regardless.
-		if !s.closed.Load() {
-			s.cgoMu.RLock()
-			if s.ptr != nil {
-				_ = ffi.Cancel(s.ptr, ticket)
-			}
+		// Never blocks: a close in progress cancels every job itself, and
+		// parking behind its worker join would hold this caller past the
+		// deadline it is returning for.
+		if s.enterCgo() {
+			_ = ffi.Cancel(s.ptr, ticket)
 			s.cgoMu.RUnlock()
 		}
 

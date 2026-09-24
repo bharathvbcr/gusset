@@ -319,3 +319,84 @@ func TestInterop_ForgottenHandleCleanupDoesNotStallOtherCleanups(t *testing.T) {
 		}
 	}
 }
+
+// A forgotten Buffer's cleanup used to take cgoMu for reading while a Close
+// held it exclusively across an unbounded worker join. Cleanups in one queued
+// block run one after another, so every cleanup queued behind it waited for
+// the engine to finish. Buffers keep their Handle alive now, so a handle and
+// its forgotten buffers become unreachable together: this is the common case.
+func TestInterop_ForgottenBufferCleanupDoesNotStallDuringClose(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 150 units: 1.5 s, never checks ctx, so Close joins it for that long.
+	if _, err := h.Submit(context.Background(), []byte{9, 150}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond) // running, so Close has a join to wait on
+	func() {
+		for i := 0; i < 20; i++ {
+			if _, err := h.NewBuffer(4096); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}()
+	closed := make(chan struct{})
+	go func() { _ = h.Close(); close(closed) }()
+	time.Sleep(100 * time.Millisecond) // Close now holds cgoMu for the join
+
+	fired := make(chan struct{}, 100)
+	func() {
+		for i := 0; i < 100; i++ {
+			obj := new([64]byte)
+			runtime.AddCleanup(obj, func(ch chan struct{}) { ch <- struct{}{} }, fired)
+		}
+	}()
+	start := time.Now()
+	got := 0
+	deadline := time.After(700 * time.Millisecond)
+	for got < 100 {
+		runtime.GC()
+		select {
+		case <-fired:
+			got++
+		case <-deadline:
+			t.Fatalf("only %d/100 unrelated cleanups ran in %v: stalled behind a buffer cleanup waiting on Close", got, time.Since(start))
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	<-closed
+}
+
+// Bytes on a buffer whose handle is mid-Close must return nil at once, not park
+// behind Close's exclusive lock for the whole worker join.
+func TestInterop_BytesDuringCloseDoesNotBlock(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf, err := h.NewBuffer(64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Submit(context.Background(), []byte{9, 100}); err != nil { // 1 s
+		t.Fatal(err)
+	}
+	// Let the worker dequeue it: a job cancelled before it starts never runs,
+	// and Close would have nothing to join.
+	time.Sleep(50 * time.Millisecond)
+	closed := make(chan struct{})
+	go func() { _ = h.Close(); close(closed) }()
+	time.Sleep(100 * time.Millisecond)
+
+	start := time.Now()
+	b := buf.Bytes()
+	if took := time.Since(start); took > 200*time.Millisecond {
+		t.Fatalf("Bytes blocked %v behind Close", took)
+	}
+	if b != nil {
+		t.Fatal("Bytes returned a view of a buffer whose handle is closing")
+	}
+	<-closed
+}

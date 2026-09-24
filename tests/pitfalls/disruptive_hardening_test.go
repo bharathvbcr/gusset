@@ -273,5 +273,3 @@ func TestDisrupt_NonCooperativeEngineAbandonmentUnderHighConcurrency(t *testing.
 		}
 	}
 }
-
-

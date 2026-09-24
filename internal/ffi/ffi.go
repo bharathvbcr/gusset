@@ -199,6 +199,11 @@ var AbiFieldNames = [AbiFieldCount]string{
 // See GUSSET_FLAG_DIAGNOSTIC_ENGINE in gusset.h.
 const FlagDiagnosticEngine uint32 = C.GUSSET_FLAG_DIAGNOSTIC_ENGINE
 
+// TakeOwnedFlag marks a Take buffer id as the result's own buffer, which the
+// caller frees once consumed. Taken from the header so Go and Rust share one
+// definition (tests/constants_match.rs checks the Rust side).
+const TakeOwnedFlag uint64 = C.GUSSET_TAKE_OWNED_FLAG
+
 // AbiLayout is the Go representation of AbiLayout.
 type AbiLayout struct {
 	Version uint32

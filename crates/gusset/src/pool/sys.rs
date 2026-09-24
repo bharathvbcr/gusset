@@ -85,7 +85,10 @@ impl RawBuffer {
     /// alignment guarantee and keeps a mismatched layout away from `dealloc`.
     #[cfg(gusset_allocator_api)]
     pub fn adopt(v: Vec<u8, BufferAlloc>) -> std::result::Result<Self, Vec<u8, BufferAlloc>> {
-        if v.is_empty() || v.len() > MAX_BUFFER_BYTES || v.capacity() > isize::MAX as usize {
+        // Capacity is capped as well as length: a 1-byte result in a 4 GiB
+        // allocation would otherwise pin 4 GiB for as long as Go holds it.
+        // Refused here, the caller copies the bytes out and frees the rest.
+        if v.is_empty() || v.len() > MAX_BUFFER_BYTES || v.capacity() > MAX_BUFFER_BYTES {
             return Err(v);
         }
         if !(v.as_ptr() as usize).is_multiple_of(BUFFER_ALIGN) {
@@ -142,19 +145,36 @@ impl Drop for RawBuffer {
     }
 }
 
+/// Blocks SIGPIPE in the calling thread's signal mask. Returns false on failure.
+///
+/// Thread-scoped on purpose: the process-wide disposition belongs to the host
+/// (Go's runtime owns it), and only writes from Gusset's own workers need the
+/// EPIPE-instead-of-signal behaviour.
+pub fn block_sigpipe_on_this_thread() -> bool {
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGPIPE);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) == 0
+    }
+}
+
 /// RAII guard that disables sigaltstack and frees the allocated stack memory on thread exit (R8).
 pub struct SigAltStackGuard {
-    stack_ptr: *mut libc::c_void,
+    /// Base of the mapping, guard page included.
+    map_base: *mut libc::c_void,
+    /// Length of the mapping, guard page included.
+    map_len: usize,
 }
 
 impl Drop for SigAltStackGuard {
     fn drop(&mut self) {
-        if !self.stack_ptr.is_null() {
+        if !self.map_base.is_null() {
             unsafe {
                 let mut ss: libc::stack_t = std::mem::zeroed();
                 ss.ss_flags = libc::SS_DISABLE;
                 let _ = libc::sigaltstack(&ss, std::ptr::null_mut());
-                libc::free(self.stack_ptr);
+                libc::munmap(self.map_base, self.map_len);
             }
         }
     }
@@ -204,29 +224,79 @@ pub fn current_thread_stack_size() -> Option<usize> {
     }
 }
 
-/// Installs a 64 KiB alternate signal stack on the current OS thread.
+/// Floor for the alternate signal stack: twice Go's own 32 KiB gsignal stack.
+pub const SIGALTSTACK_MIN: usize = 64 * 1024;
+
+/// Size of each worker's alternate signal stack.
 ///
-/// Go requires SA_ONSTACK from foreign threads; a foreign thread without
-/// an alternate signal stack dies on stack overflow before Go's handler runs.
+/// A fixed 64 KiB was chosen when signal frames were a few KiB. On arm64 with
+/// SVE/SME and on x86-64 with AVX-512 plus AMX the kernel's frame can approach
+/// or pass that, and a frame that does not fit is delivered as SIGSEGV — the
+/// exact failure the alternate stack exists to prevent. Linux reports the real
+/// minimum in `AT_MINSIGSTKSZ`; four times it (glibc's `sysconf(_SC_SIGSTKSZ)`
+/// rule) leaves room for the handler itself.
+///
+/// What it buys: a signal delivered to a worker (Go's preemption and profiling
+/// signals included) runs its handler on this stack rather than on a stack that
+/// may be nearly exhausted, so Go's handler can run at all. It does not make a
+/// Rust stack overflow survivable — Go re-raises a foreign thread's SIGSEGV with
+/// the default action, so the process still exits.
+pub fn sigaltstack_size() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        let min = unsafe { libc::getauxval(libc::AT_MINSIGSTKSZ) } as usize;
+        // The frame plus room for Go's handler, which needs ~32 KiB below it
+        // (needm on a thread Go did not create).
+        SIGALTSTACK_MIN
+            .max(min.saturating_mul(4))
+            .max(min.saturating_add(32 * 1024))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        SIGALTSTACK_MIN.max(libc::SIGSTKSZ)
+    }
+}
+
+/// Installs an alternate signal stack (at least 64 KiB) on the current OS thread.
+///
+/// Go requires SA_ONSTACK handlers to have an alternate stack on threads it did
+/// not create; see [`sigaltstack_size`] for what that does and does not buy.
 pub fn install_sigaltstack() -> Option<SigAltStackGuard> {
-    const STACK_SIZE: usize = 65536; // 64 KiB
     unsafe {
-        let stack_ptr = libc::malloc(STACK_SIZE);
-        if stack_ptr.is_null() {
+        let page = match libc::sysconf(libc::_SC_PAGESIZE) {
+            p if p > 0 => p as usize,
+            _ => 4096,
+        };
+        let stack_size = sigaltstack_size().div_ceil(page) * page;
+        // One PROT_NONE page below the stack: a signal frame that overruns it
+        // faults instead of silently corrupting whatever malloc put there.
+        let map_len = stack_size + page;
+        let map_base = libc::mmap(
+            std::ptr::null_mut(),
+            map_len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANON,
+            -1,
+            0,
+        );
+        if map_base == libc::MAP_FAILED {
+            return None;
+        }
+        if libc::mprotect(map_base, page, libc::PROT_NONE) != 0 {
+            libc::munmap(map_base, map_len);
             return None;
         }
 
         let mut ss: libc::stack_t = std::mem::zeroed();
-        ss.ss_sp = stack_ptr;
-        ss.ss_size = STACK_SIZE;
+        ss.ss_sp = (map_base as *mut u8).add(page) as *mut libc::c_void;
+        ss.ss_size = stack_size;
         ss.ss_flags = 0;
 
-        let ret = libc::sigaltstack(&ss, std::ptr::null_mut());
-        if ret != 0 {
-            libc::free(stack_ptr);
+        if libc::sigaltstack(&ss, std::ptr::null_mut()) != 0 {
+            libc::munmap(map_base, map_len);
             None
         } else {
-            Some(SigAltStackGuard { stack_ptr })
+            Some(SigAltStackGuard { map_base, map_len })
         }
     }
 }
@@ -431,6 +501,63 @@ mod tests {
             Ok(()) => panic!("MAX_BUFFER_BYTES + 1 must be refused without allocating"),
             Err(e) => assert!(e.contains("maximum"), "got: {}", e),
         }
+    }
+
+    /// The allocator and adoption paths in the lib, so the nightly Miri job
+    /// (which runs `--lib` only) checks them for UB. No accounting assertions:
+    /// unit tests run in parallel and share the process-global counters;
+    /// exact accounting lives in the `rust_allocator_api` binary.
+    #[cfg(gusset_allocator_api)]
+    #[test]
+    fn buffer_alloc_growth_shrink_and_adoption_are_sound() {
+        use crate::alloc::{BufferAlloc, Counting};
+        use std::alloc::System;
+
+        let mut v: Vec<u8, BufferAlloc> = Vec::new_in(BufferAlloc);
+        for i in 0..300u32 {
+            v.push(i as u8);
+            assert_eq!(v.as_ptr() as usize % BUFFER_ALIGN, 0);
+        }
+        v.truncate(100);
+        v.shrink_to_fit();
+        assert_eq!(v.as_ptr() as usize % BUFFER_ALIGN, 0);
+        let ptr = v.as_ptr();
+
+        let buf = match RawBuffer::adopt(v) {
+            Ok(b) => b,
+            Err(_) => panic!("an aligned, non-empty BufferAlloc vector must be adopted"),
+        };
+        assert_eq!(buf.as_mut_ptr() as *const u8, ptr, "adoption must not copy");
+        assert!(buf
+            .as_slice()
+            .iter()
+            .copied()
+            .eq((0..100u32).map(|i| i as u8)));
+        drop(buf);
+
+        // Spare capacity is adopted too, and freed with the full layout.
+        let mut v: Vec<u8, BufferAlloc> = Vec::with_capacity_in(4096, BufferAlloc);
+        v.extend_from_slice(b"abc");
+        match RawBuffer::adopt(v) {
+            Ok(b) => assert_eq!(b.as_slice(), b"abc"),
+            Err(_) => panic!("a vector with spare capacity must be adopted"),
+        }
+
+        // Empty vectors are handed back, never adopted over a dangling pointer.
+        let empty: Vec<u8, BufferAlloc> = Vec::with_capacity_in(64, BufferAlloc);
+        assert!(RawBuffer::adopt(empty).is_err());
+        assert!(RawBuffer::adopt(Vec::new_in(BufferAlloc)).is_err());
+
+        // Counting over System and over BufferAlloc, through every resize path.
+        let mut c: Vec<u64, Counting<System>> = Vec::new_in(Counting::new(System));
+        c.extend(0..1000u64);
+        c.truncate(3);
+        c.shrink_to_fit();
+        assert_eq!(c.as_slice(), &[0, 1, 2]);
+        let mut d: Vec<u8, Counting<BufferAlloc>> = Vec::new_in(Counting::new(BufferAlloc));
+        d.resize(5000, 7);
+        d.shrink_to_fit();
+        assert_eq!(d.as_ptr() as usize % BUFFER_ALIGN, 0);
     }
 
     #[test]

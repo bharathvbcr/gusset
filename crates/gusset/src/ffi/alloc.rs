@@ -229,6 +229,15 @@ fn is_global<A: 'static>() -> bool {
     std::any::TypeId::of::<A>() == std::any::TypeId::of::<Global>()
 }
 
+/// Whether `A` is [`BufferAlloc`], which counts every byte itself (by hand, or
+/// through an installed `Counting` global allocator). Wrapping it in `Counting`
+/// used to add the same bytes a second time.
+#[cfg(gusset_allocator_api)]
+#[inline]
+fn counts_itself<A: 'static>() -> bool {
+    std::any::TypeId::of::<A>() == std::any::TypeId::of::<BufferAlloc>()
+}
+
 /// `Counting` as a per-collection allocator (`Vec::new_in(Counting::new(System))`).
 ///
 /// Counts into the same process-wide totals `gusset_alloc_stats` exports, so
@@ -237,7 +246,8 @@ fn is_global<A: 'static>() -> bool {
 /// allocator.
 ///
 /// Wrapping `Global` while `Counting` is also the `#[global_allocator]` would count
-/// every byte twice; that one case is detected and forwarded uncounted. Any other
+/// every byte twice, as would wrapping [`BufferAlloc`] (which counts itself); both
+/// cases are detected and forwarded uncounted. Any other
 /// allocator that itself routes to the global allocator has the same problem and
 /// cannot be detected — wrap `System`, an arena, or a pool, not a proxy for
 /// `Global`.
@@ -305,7 +315,7 @@ unsafe impl<A: Allocator + 'static> Allocator for Counting<A> {
 impl<A: 'static> Counting<A> {
     #[inline]
     fn forwards_to_counted_global(&self) -> bool {
-        is_global::<A>() && counting_is_active()
+        counts_itself::<A>() || (is_global::<A>() && counting_is_active())
     }
 
     #[inline]

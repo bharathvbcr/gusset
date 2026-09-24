@@ -9,6 +9,12 @@
 use gusset::BufferAlloc;
 use gusset::{set_engine_handler, CancelReason, JobContext, JobOutput};
 
+/// Whether opcode 13 (output built in `BufferAlloc` memory) is compiled in.
+///
+/// Decided by `build.rs` from `DEP_GUSSET_ALLOCATOR_API`, so it must always equal
+/// [`gusset::ALLOCATOR_API`]; the adopter test asserts that it does.
+pub const ALLOCATOR_OPCODE: bool = cfg!(gusset_allocator_api);
+
 /// Initializes the example engine and registers its execution handler with Gusset.
 pub fn init_example_engine() {
     set_engine_handler(

@@ -1,5 +1,29 @@
 # Changelog
 
+## [Unreleased] - 2026-09-24 · Allocator API and interop audit
+
+Rust 1.100 stabilizes `std::alloc::Allocator`. Every fix below ships with a
+test that fails against the code before it.
+
+- **Zero-copy output with the stable `Allocator` trait.** `BufferAlloc` is a 64-byte aligned allocator counted exactly once. An engine returns `Vec<u8, BufferAlloc>` as `JobOutput::Allocated`, and the worker adopts the allocation as the result buffer. `Counting<A>` is also an `Allocator`. A build probe enables it per compiler, and `rust-version` stays 1.97. Dependents read `DEP_GUSSET_ALLOCATOR_API` (`links = "gusset"`). `JobOutput` is `#[non_exhaustive]`, because its variants depend on the compiler.
+- **A completion write to a closed pipe killed the process.** On a thread Go did not create, SIGPIPE from `write(2)` is re-raised by Go's handler with the default action, which exits the process with status 141. Workers now block SIGPIPE, the write fails with EPIPE, and the handle refuses new work. `rust_sigpipe` dies of signal 13 against the pre-fix code.
+- **A completion whose write timed out was dropped.** Its Go waiter and its pool permit were stranded forever, and after `pool_size` of them every Submit blocked. Such tickets are now kept and retried ahead of the next completion and on every submit. The unit also stays in flight until its ticket is written, so `gusset_shutdown` cannot report a clean drain while a worker sits in the write backoff.
+- **Shutdown could miss a concurrent submission.** A submit that passed the shutdown check before `begin_shutdown` could insert its cancel flag after `cancel_all` ran, and then eat the whole drain budget. The flag is now re-checked under the cancel-flag lock.
+- **The signal stack is guard-paged and sized from the kernel.** It is at least 64 KiB, and more when `AT_MINSIGSTKSZ` needs it (arm64 SME, AVX-512 plus AMX). The docs now say what it buys: Go's handler can run on a Rust thread, but a stack overflow is still fatal.
+- **Go callers no longer park behind `Close`.** `Bytes`, `Free`, `NewBuffer`, `Submit`, `Wait` and the cancel path used to block on `cgoMu` for Close's whole worker join. They now fail fast with "closed". A forgotten Buffer's GC cleanup also parked there and stalled every cleanup queued behind it.
+- **Other fixes:**
+  - A second concurrent `Close` returns the first one's error.
+  - `WaitBuffer` falls back to Go memory on any re-wrap failure, not only on poison, so it never loses a finished result.
+  - Submitting a 0-id Buffer reads its data and liveness together.
+  - `Counting<BufferAlloc>` no longer counts twice.
+  - `FfiStatus::free_msg` is `unsafe`.
+  - Adoption refuses capacity above 1 GiB.
+- **Contracts and CI:**
+  - `tests/constants_match.rs` checks the status codes, flags, limits and take-owned bit across Rust, `gusset.h` and Go. The header now names the limits a C host must honour.
+  - `exports_match` honours `CARGO_TARGET_DIR`.
+  - CI tests the fallback path on the new compiler, and ASan runs the allocator suite.
+  - The lint job's gofmt step passes again: `disruptive_hardening_test.go` had trailing blank lines.
+
 ## [Unreleased] - 2026-09-22 · Named field layout
 
 - **Equal-width fields could trade places without failing ABI init (I6).** `gusset_abi_layout` reports size and alignment. Swapping `CallHeader.flags` with `reserved` (both `u32`), `span_id` with `timeout_ns` (both 8 bytes), or any two `AllocStats` fields leaves both numbers unchanged, so version 2's check accepted a header that reads those fields from the wrong slots. `gusset_abi_fields` reports the offset and size of every named field and writes no more entries than the caller's `cap`, so the table is not appended to the 36-byte `AbiLayout` a version-2 caller already allocates. Go compares that report with cgo `Offsetof`/`Sizeof`. A planted swap of `flags` and `reserved` panics in `init` with `ABI field CallHeader.flags drifted: Rust offset 32 size 4, cgo offset 36 size 4`. `TestPitfall_EqualWidthFieldSwapKeepsSizeAndBreaksNamedOffsets` walks every equal-width pair and shows the offset multiset is unchanged, which is why a size check or a sorted-offset check cannot see the swap.

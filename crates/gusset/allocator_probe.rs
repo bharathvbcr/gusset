@@ -1,4 +1,15 @@
-// Shared by the build scripts of `gusset` and `gusset-example` via `include!`.
+// The runtime crate's build probe (`include!`d by `build.rs`).
+//
+// Adopters do not copy this. `gusset` declares `links = "gusset"` and publishes
+// the answer as build metadata, so a dependent's `build.rs` reads it:
+//
+//     if std::env::var("DEP_GUSSET_ALLOCATOR_API").as_deref() == Ok("1") {
+//         println!("cargo::rustc-cfg=gusset_allocator_api");
+//     }
+//
+// That is exactly what `crates/gusset-example/build.rs` does. A hand-copied probe
+// could disagree with the crate it gates, and then `JobOutput::Allocated` would
+// not exist where the adopter's code expects it.
 //
 // Detects whether the compiler in use accepts `std::alloc::Allocator` without a
 // feature gate (stable from Rust 1.100) and, if so, emits `cfg(gusset_allocator_api)`.
@@ -24,12 +35,16 @@ fn probe_allocator_api() {
 
     let forced = env::var("GUSSET_ALLOCATOR_API").ok();
     if forced.as_deref() == Some("0") {
+        publish(false);
         return;
     }
 
     let out_dir = match env::var_os("OUT_DIR") {
         Some(d) => PathBuf::from(d),
-        None => return,
+        None => {
+            publish(false);
+            return;
+        }
     };
     let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let src = out_dir.join("gusset_allocator_probe.rs");
@@ -64,10 +79,25 @@ fn probe_allocator_api() {
         }
     "#;
     if std::fs::write(&src, code).is_err() {
+        publish(false);
         return;
     }
 
-    let mut cmd = Command::new(rustc);
+    // Compile the probe the way the crate itself is compiled: through the same
+    // wrapper (as autocfg does) and with the same flags, so a sysroot, target
+    // feature or -Z flag that changes what std offers changes the answer too.
+    let wrapper = env::var_os("RUSTC_WRAPPER").filter(|w| !w.is_empty());
+    let mut cmd = match wrapper {
+        Some(w) => {
+            let mut c = Command::new(w);
+            c.arg(&rustc);
+            c
+        }
+        None => Command::new(&rustc),
+    };
+    if let Ok(flags) = env::var("CARGO_ENCODED_RUSTFLAGS") {
+        cmd.args(flags.split('\x1f').filter(|f| !f.is_empty()));
+    }
     cmd.arg("--crate-type=lib")
         .arg("--edition=2021")
         .arg("--emit=metadata")
@@ -80,16 +110,29 @@ fn probe_allocator_api() {
     }
     cmd.arg(&src);
 
-    let ok = cmd
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let (ok, stderr) = match cmd.output() {
+        Ok(o) => (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        ),
+        Err(e) => (false, format!("could not run rustc: {e}")),
+    };
     if ok {
         println!("cargo::rustc-cfg=gusset_allocator_api");
     } else if forced.as_deref() == Some("1") {
         panic!(
-            "GUSSET_ALLOCATOR_API=1 but this rustc does not accept a stable \
-             std::alloc::Allocator (Rust 1.100 or newer is required)"
+            "GUSSET_ALLOCATOR_API=1 but the allocator probe failed to compile. \
+             Rust 1.100+ is required; if this is a cross or -Zbuild-std build, \
+             the probe could not find std for the target. Compiler output:\n{stderr}"
         );
+    }
+    publish(ok);
+}
+
+/// Publishes the probe's answer to dependents as `DEP_GUSSET_ALLOCATOR_API`
+/// (requires `links = "gusset"`, which only the runtime crate declares).
+fn publish(on: bool) {
+    if std::env::var("CARGO_MANIFEST_LINKS").as_deref() == Ok("gusset") {
+        println!("cargo::metadata=allocator_api={}", if on { 1 } else { 0 });
     }
 }

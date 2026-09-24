@@ -82,6 +82,21 @@ jobs:
             --target x86_64-unknown-linux-gnu \
             --test rust_runtime --test rust_shutdown
 
+      # BufferAlloc, Counting as an Allocator, and the adopted buffer's manual
+      # dealloc(capacity, 64). Not under -Zbuild-std: the allocator probe cannot
+      # see a build-std sysroot and would compile this path out, so the step
+      # uses the prebuilt std and GUSSET_ALLOCATOR_API=1 fails the build rather
+      # than silently testing the fallback.
+      - name: Run the allocator suite under ASan
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: detect_leaks=1:detect_stack_use_after_return=1
+          GUSSET_ALLOCATOR_API: '1'
+          GUSSET_EXPECT_ALLOCATOR_API: '1'
+        run: |
+          cargo test -p gusset --target x86_64-unknown-linux-gnu \
+            --test rust_allocator_api --test rust_allocator_counting --test rust_sigpipe
+
       # R4's deliberate cross-free, which this job named and did not have. Without
       # a violation ASan is supposed to catch, a green ASan run only shows the code
       # did not happen to trip the sanitizer — not that it was watching.

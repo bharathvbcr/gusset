@@ -21,6 +21,22 @@ extern "C" {
  * never set it, so untrusted payload data cannot steer a call into a panic. */
 #define GUSSET_FLAG_DIAGNOSTIC_ENGINE 1u
 
+/* Limits and encodings a C host must honour. tests/constants_match.rs checks
+ * each against the Rust constant and the Go constant that mirror it. */
+
+/* Largest pool gusset_handle_open accepts; larger is refused, not clamped. The
+ * completion pipe must be able to hold 8 bytes per worker (grown on Linux). */
+#define GUSSET_MAX_POOL_SIZE 1024u
+/* Largest inline input gusset_submit copies; larger returns FFI_BAD_ARG, as
+ * does a NULL input_ptr with a nonzero input_len. Use a buffer instead. */
+#define GUSSET_MAX_INLINE_INPUT 4096u
+/* Largest single Rust-owned buffer. */
+#define GUSSET_MAX_BUFFER_BYTES 1073741824ull
+/* Set on gusset_take's out_buf_id when the id is the result's own buffer,
+ * which the caller frees (gusset_buf_free) once it has consumed the bytes.
+ * Clear the bit before using the id. Ids are always below this bit. */
+#define GUSSET_TAKE_OWNED_FLAG (1ull << 63)
+
 typedef struct {
     uint8_t trace_id[16];
     uint8_t span_id[8];

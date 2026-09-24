@@ -488,3 +488,149 @@ fn open_grows_a_one_page_completion_pipe_to_fit_the_pool() {
     h.close();
     unsafe { libc::close(r) };
 }
+
+/// Fills the (non-blocking) write end until it refuses; returns bytes written.
+fn fill_pipe(w: i32) -> usize {
+    let junk = [0xEEu8; 4096];
+    let mut filled = 0usize;
+    loop {
+        let n = unsafe { libc::write(w, junk.as_ptr() as *const libc::c_void, junk.len()) };
+        if n <= 0 {
+            return filled;
+        }
+        filled += n as usize;
+    }
+}
+
+/// Reads exactly `n` bytes, polling up to `deadline`.
+fn read_exact_within(fd: i32, n: usize, deadline: Duration) -> Vec<u8> {
+    let start = Instant::now();
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n && start.elapsed() < deadline {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut pfd, 1, 100) } <= 0 {
+            continue;
+        }
+        let mut buf = vec![0u8; n - out.len()];
+        let got = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if got > 0 {
+            out.extend_from_slice(&buf[..got as usize]);
+        }
+    }
+    out
+}
+
+/// Two defects on the completion path, pinned together because both need a
+/// stalled reader:
+///
+/// 1. The unit left `in_flight()` before its completion was written, so
+///    `gusset_shutdown` could report a clean drain while a worker still sat in
+///    the up-to-10 s write backoff.
+/// 2. A completion whose write timed out was logged and dropped. Its Go waiter
+///    and pool permit were stranded forever; after `pool_size` of them every
+///    Submit blocked. It is now kept and delivered once the reader recovers.
+#[test]
+fn a_stalled_completion_counts_as_in_flight_and_is_delivered_after_recovery() {
+    let (r, w) = make_pipe();
+    let h = match Handle::open(1, w) {
+        Ok(h) => h,
+        Err(e) => panic!("open: {e}"),
+    };
+    let filled = fill_pipe(w);
+    let header = CallHeader {
+        flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+        ..Default::default()
+    };
+    let first = match h.submit(header, &[0, 1], 0) {
+        Ok(t) => t,
+        Err(e) => panic!("submit: {e}"),
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        h.in_flight(),
+        1,
+        "a unit whose completion is not yet written is still in flight"
+    );
+
+    // Outlast the write timeout: the completion is now undeliverable for good
+    // under the old code.
+    std::thread::sleep(Duration::from_millis(10_700));
+
+    // The reader recovers.
+    let junk = read_exact_within(r, filled, Duration::from_secs(5));
+    assert_eq!(junk.len(), filled, "could not drain the filler");
+
+    let second = match h.submit(header, &[0, 2], 0) {
+        Ok(t) => t,
+        Err(e) => panic!("submit after recovery: {e}"),
+    };
+    let bytes = read_exact_within(r, 16, Duration::from_secs(5));
+    assert_eq!(
+        bytes.len(),
+        16,
+        "expected both completions, got {} bytes",
+        bytes.len()
+    );
+    let mut got: Vec<u64> = bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_ne_bytes(*c))
+        .collect();
+    got.sort_unstable();
+    assert_eq!(
+        got,
+        vec![first, second],
+        "the stalled completion was dropped"
+    );
+    assert!(
+        h.take(first).is_ok(),
+        "the stalled result must still be collectable"
+    );
+    assert_eq!(h.in_flight(), 0);
+    h.close();
+    unsafe { libc::close(r) };
+}
+
+/// Each worker's alternate signal stack is at least the documented floor and
+/// sits above a guard page.
+#[test]
+fn workers_get_a_guard_paged_sigaltstack_of_at_least_the_floor() {
+    use gusset::pool::sys::{install_sigaltstack, sigaltstack_size, SIGALTSTACK_MIN};
+    assert!(sigaltstack_size() >= SIGALTSTACK_MIN);
+    let res = std::thread::spawn(|| {
+        let guard = install_sigaltstack();
+        assert!(guard.is_some(), "install_sigaltstack failed");
+        let mut cur: libc::stack_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::sigaltstack(std::ptr::null(), &mut cur) };
+        assert_eq!(rc, 0);
+        assert!(cur.ss_size >= SIGALTSTACK_MIN, "ss_size {}", cur.ss_size);
+        // The page just below the stack must be mapped PROT_NONE.
+        #[cfg(target_os = "linux")]
+        {
+            let below = cur.ss_sp as usize - 1;
+            let maps = std::fs::read_to_string("/proc/self/maps").unwrap_or_default();
+            let perms = maps.lines().find_map(|l| {
+                let mut it = l.split_whitespace();
+                let range = it.next()?;
+                let perms = it.next()?;
+                let (lo, hi) = range.split_once('-')?;
+                let lo = usize::from_str_radix(lo, 16).ok()?;
+                let hi = usize::from_str_radix(hi, 16).ok()?;
+                (lo <= below && below < hi).then(|| perms.to_string())
+            });
+            assert_eq!(
+                perms.as_deref(),
+                Some("---p"),
+                "no guard page below the stack"
+            );
+        }
+        drop(guard);
+    })
+    .join();
+    assert!(res.is_ok());
+}

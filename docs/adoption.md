@@ -291,12 +291,37 @@ gusset::register_engine(7, |ctx, input| {
   `Vec::new_in(Counting::new(System))`.
 - **Spare capacity is kept, not reallocated away.** Go sees `len`, and
   `Stats()` counts `capacity`. Call `shrink_to_fit` yourself if the slack
-  matters.
+  matters. Capacity above 1 GiB is not adopted: the bytes are copied out and
+  the oversized allocation freed.
 - **Older compilers are unaffected.** A build-time probe
   (`crates/gusset/allocator_probe.rs`) enables all of this per compiler, and
-  `gusset::ALLOCATOR_API` reports the result. Gate your own code with the same
-  probe, as `crates/gusset-example/build.rs` does. `GUSSET_ALLOCATOR_API=0`
-  forces the fallback, and `=1` turns a failed probe into a build error.
+  `gusset::ALLOCATOR_API` reports the result. `GUSSET_ALLOCATOR_API=0` forces
+  the fallback, and `=1` turns a failed probe into a build error that prints
+  the compiler's output.
+- **Gate your own code on gusset's answer, not your own probe.** `gusset`
+  declares `links = "gusset"` and publishes the result to direct dependents,
+  so your engine crate's `build.rs` is:
+
+  ```rust
+  fn main() {
+      println!("cargo::rustc-check-cfg=cfg(gusset_allocator_api)");
+      if std::env::var("DEP_GUSSET_ALLOCATOR_API").as_deref() == Ok("1") {
+          println!("cargo::rustc-cfg=gusset_allocator_api");
+      }
+  }
+  ```
+
+  A probe of your own could disagree with the one gusset compiled with.
+  `crates/gusset-example` uses exactly this, and its test asserts the two agree.
+- **`JobOutput` is `#[non_exhaustive]`.** Its variants depend on the compiler,
+  so an exhaustive `match` would compile on one toolchain and fail on the next.
+  Add a `_ =>` arm.
+- **Do not write to an input `Buffer` while its job runs.** The engine reads
+  it as a Rust `&[u8]`; a concurrent Go write is a data race. Reading is fine.
+- **Gusset's workers block SIGPIPE.** A completion write to a closed pipe
+  returns EPIPE, and the handle then refuses new work, instead of the signal
+  terminating your process. A C host should still close its read end only
+  after `gusset_handle_close`.
 
 ---
 

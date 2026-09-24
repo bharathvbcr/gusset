@@ -325,8 +325,8 @@ func TestPitfall_WaitBufferOfLargeResultDoesNotDangleAcrossClose(t *testing.T) {
 				if err != nil {
 					return
 				}
+				defer out.Free()
 				got := out.Bytes()
-				_ = out.Free()
 				// nil Bytes after a successful wrap is Close winning the API
 				// contract (handle gone → view withdrawn). The bug is a
 				// non-nil view of the wrong length or torn contents: that is
@@ -340,9 +340,19 @@ func TestPitfall_WaitBufferOfLargeResultDoesNotDangleAcrossClose(t *testing.T) {
 					t.Errorf("WaitBuffer succeeded with a truncated view: len=%d", len(got))
 					return
 				}
-				if got[100] != byte(100) {
+				first := got[100]
+				// This test used to read got after out.Free() and while Close
+				// ran, which the Bytes contract forbids: it measured its own
+				// use-after-free (about 1 run in 30, on main as well). Close
+				// sets closed before it frees anything, so a non-nil Bytes()
+				// after the read proves the read saw live memory; only then
+				// is a wrong byte the wrap-of-freed-pages bug this test hunts.
+				if out.Bytes() == nil {
+					return
+				}
+				if first != byte(100) {
 					badSuccess.Add(1)
-					t.Errorf("WaitBuffer succeeded with corrupted bytes: got[100]=%d", got[100])
+					t.Errorf("WaitBuffer succeeded with corrupted bytes: got[100]=%d", first)
 				}
 			}()
 		}

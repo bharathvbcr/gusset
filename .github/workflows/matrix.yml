@@ -64,7 +64,9 @@ jobs:
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly
-          components: clippy
+          # llvm-tools: exports_match reads the fat-LTO archive with llvm-nm;
+          # Apple's nm cannot read newer-LLVM bitcode.
+          components: clippy, llvm-tools
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -89,6 +91,19 @@ jobs:
 
       - name: Go interop stress under the race detector
         run: go test -race -run 'TestInterop' -count=3 -timeout 15m ./tests/pitfalls/
+
+      # Once stable reaches 1.100 no other job compiles the pre-1.100 path, so
+      # force it here on the same compiler: every cfg(not(gusset_allocator_api))
+      # branch keeps building and passing.
+      - name: Fallback path on the same compiler (GUSSET_ALLOCATOR_API=0)
+        env:
+          GUSSET_ALLOCATOR_API: '0'
+          GUSSET_EXPECT_ALLOCATOR_API: '0'
+          CARGO_TARGET_DIR: target/fallback
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo build
+          cargo test --workspace
 
   lint:
     name: Lint & Boundary Audits

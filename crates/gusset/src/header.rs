@@ -144,8 +144,10 @@ impl JobContext {
 ///
 /// A non-zero timeout must never become "no deadline": `Instant::checked_add`
 /// returns `None` when the duration cannot be represented, and treating that as
-/// `None` made `u64::MAX` nanoseconds mean "run forever" instead of "already
-/// expired". Overflow expires immediately by using the submit instant.
+/// `None` would make the timeout mean "run forever". Overflow expires
+/// immediately by using the submit instant. On Linux and macOS a `u64` of
+/// nanoseconds (about 584 years) does fit, so there `u64::MAX` is a far-future
+/// deadline; the fallback covers clocks where it does not.
 fn resolve_deadline(submit_instant: Instant, timeout_ns: u64) -> Option<Instant> {
     if timeout_ns == 0 {
         None

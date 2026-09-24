@@ -204,6 +204,18 @@ mod on {
         assert_eq!(live(), base.live_bytes + 4096);
         drop(b);
         assert_eq!(live(), base.live_bytes);
+
+        // BufferAlloc counts itself; wrapping it must not count again.
+        let mut v: Vec<u8, Counting<BufferAlloc>> = Vec::new_in(Counting::new(BufferAlloc));
+        v.resize(10_000, 1);
+        v.shrink_to_fit();
+        assert_eq!(
+            live(),
+            base.live_bytes + 10_000,
+            "Counting<BufferAlloc> counted the same bytes twice"
+        );
+        drop(v);
+        assert_eq!(live(), base.live_bytes);
     }
 
     fn zero_copy_adoption(h: &Handle, fd: i32) {

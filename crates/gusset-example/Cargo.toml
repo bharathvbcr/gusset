@@ -1,10 +1,12 @@
 [package]
 name = "gusset-example"
-version = "0.0.1"
-edition = "2021"
-rust-version = "1.97"
-license = "MIT OR Apache-2.0"
-authors = ["Bharath Chandra"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+# A reference engine inside this workspace, depending on gusset by path.
+publish = false
 
 [lib]
 crate-type = ["staticlib", "rlib"]

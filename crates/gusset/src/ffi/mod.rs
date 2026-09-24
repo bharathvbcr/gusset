@@ -461,7 +461,7 @@ pub unsafe extern "C" fn gusset_take(
                     // High bit: "this id is the result's own buffer; Go frees it once
                     // the waiter has consumed it" (R16). Ids stay below 1 << 63, so
                     // the flag loses nothing and Go strips it with &^.
-                    ptr::write(out_buf_id, buf_id | (1 << 63));
+                    ptr::write(out_buf_id, buf_id | crate::pool::TAKE_OWNED_FLAG);
                     ptr::write(out_ptr, buf_ptr);
                     ptr::write(out_len, len);
                     Ok(())

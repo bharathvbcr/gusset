@@ -39,7 +39,7 @@ fn overwriting_an_error_status_releases_its_message() {
         unsafe {
             std::ptr::write(&mut st, FfiStatus::poisoned("handle is poisoned"));
         }
-        st.free_msg();
+        unsafe { st.free_msg() };
     }
     let leaked = live().saturating_sub(before);
     assert!(
@@ -57,7 +57,7 @@ fn overwriting_an_error_status_releases_its_message() {
         unsafe {
             FfiStatus::overwrite(&mut st, FfiStatus::poisoned("handle is poisoned"));
         }
-        st.free_msg();
+        unsafe { st.free_msg() };
     }
     let delta = live().saturating_sub(before);
     assert!(

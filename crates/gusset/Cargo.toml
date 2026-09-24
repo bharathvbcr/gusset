@@ -1,11 +1,15 @@
 [package]
 name = "gusset"
-version = "0.0.1"
-edition = "2021"
-rust-version = "1.97"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "Go-Rust runtime contract: panic firewall, bounded concurrency, deadlines, poisoned handles, ABI verification"
-authors = ["Bharath Chandra"]
+authors.workspace = true
+# Not a native library link: `links` is what lets the build script publish
+# `DEP_GUSSET_ALLOCATOR_API` to dependents, so an adopter gates its own
+# `BufferAlloc` code on exactly the answer this crate compiled with.
+links = "gusset"
 
 [lib]
 crate-type = ["staticlib", "rlib"]
@@ -30,6 +34,11 @@ path = "../../tests/exports_match.rs"
 [[test]]
 name = "header_match"
 path = "../../tests/header_match.rs"
+
+# Numbers duplicated across Rust, gusset.h and Go (status codes, flags, limits).
+[[test]]
+name = "constants_match"
+path = "../../tests/constants_match.rs"
 
 [[test]]
 name = "rust_runtime"
@@ -64,3 +73,9 @@ path = "../../tests/rust_allocator_api.rs"
 [[test]]
 name = "rust_allocator_counting"
 path = "../../tests/rust_allocator_counting.rs"
+
+# Separate binary: restores SIGPIPE's default action process-wide, as a Go host
+# has it for threads Go did not create.
+[[test]]
+name = "rust_sigpipe"
+path = "../../tests/rust_sigpipe.rs"

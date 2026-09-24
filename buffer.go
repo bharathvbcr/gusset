@@ -70,9 +70,7 @@ func (s *handleState) newBuffer(n int) (*Buffer, error) {
 		return nil, errors.New("gusset: handle is closed")
 	}
 
-	s.cgoMu.RLock()
-	if s.closed.Load() || s.ptr == nil {
-		s.cgoMu.RUnlock()
+	if !s.enterCgo() {
 		return nil, errors.New("gusset: handle is closed")
 	}
 	if s.poisoned.Load() {
@@ -83,6 +81,9 @@ func (s *handleState) newBuffer(n int) (*Buffer, error) {
 	s.cgoMu.RUnlock()
 
 	if err != nil {
+		if errors.Is(err, ErrPoisoned) {
+			s.poisoned.Store(true)
+		}
 		return nil, err
 	}
 
@@ -132,11 +133,14 @@ func (s *handleState) bufFreeCleanup(id uint64) error {
 	if id == 0 {
 		return nil
 	}
-	s.cgoMu.RLock()
-	defer s.cgoMu.RUnlock()
-	if s.closed.Load() || s.ptr == nil {
+	// Never blocks. Cleanups in one queued block run one after another, and a
+	// close in progress holds cgoMu exclusively across an unbounded worker
+	// join; parking here stalled every cleanup queued behind this one. Close
+	// frees every buffer of the handle anyway, so there is nothing to do.
+	if !s.enterCgo() {
 		return nil
 	}
+	defer s.cgoMu.RUnlock()
 	slog.Warn("gusset: Buffer was garbage collected without explicit Free()")
 	return ffi.BufFree(s.ptr, id)
 }
@@ -145,11 +149,10 @@ func (s *handleState) bufFree(id uint64) error {
 	if id == 0 {
 		return nil
 	}
-	s.cgoMu.RLock()
-	defer s.cgoMu.RUnlock()
-	if s.closed.Load() || s.ptr == nil {
-		return nil
+	if !s.enterCgo() {
+		return nil // close frees every buffer of the handle
 	}
+	defer s.cgoMu.RUnlock()
 	return ffi.BufFree(s.ptr, id)
 }
 
@@ -161,6 +164,13 @@ func (s *handleState) bufFree(id uint64) error {
 // trace Rust memory, and holding the slice does not keep the Buffer alive. Callers
 // must not use a previously obtained slice after Free or Handle.Close, and should
 // keep the *Buffer reachable (runtime.KeepAlive) for as long as they use its bytes.
+//
+// Do not write to a Buffer while a job submitted with it as input is still
+// running: from Submit until that ticket's Wait/WaitBuffer returns (for an
+// abandoned ticket, until Close). The engine reads the same memory as a Rust
+// &[u8], and a concurrent write is a data race on both sides of the boundary —
+// an engine that validates its input and then re-reads it can act on bytes it
+// never validated. Reading is always fine.
 func (b *Buffer) Bytes() []byte {
 	if b == nil || b.state == nil {
 		return nil
@@ -168,7 +178,18 @@ func (b *Buffer) Bytes() []byte {
 	// Close frees every buffer of this handle while it holds cgoMu. Observing
 	// the slice under the same lock means Bytes either returns before that
 	// free begins, or it sees the handle closed and returns nil.
-	b.state.cgoMu.RLock()
+	if b.id == 0 {
+		// Go memory (an empty or heap-carried result): nothing Close frees.
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.freed.Load() || b.state.closed.Load() {
+			return nil
+		}
+		return b.data
+	}
+	if !b.state.enterCgo() {
+		return nil
+	}
 	defer b.state.cgoMu.RUnlock()
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -178,7 +199,20 @@ func (b *Buffer) Bytes() []byte {
 	return b.data
 }
 
-// ID returns the internal buffer ticket identifier.
+// snapshot returns the view and whether the buffer is still live, read together
+// under b.mu so a concurrent Free cannot slip between the two.
+func (b *Buffer) snapshot() ([]byte, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.freed.Load() {
+		return nil, false
+	}
+	return b.data, true
+}
+
+// ID returns the Rust buffer id, or 0 for a buffer that owns no Rust memory: an
+// empty result, or a small result carried in Go memory (see WaitBuffer). A
+// 0-id Buffer passed to Submit or CallBuffer sends its bytes inline.
 func (b *Buffer) ID() uint64 {
 	if b == nil || b.state == nil {
 		return 0

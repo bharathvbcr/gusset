@@ -114,9 +114,17 @@ fn test_exports_match_list() {
         "expected exactly 15 ABI functions"
     );
 
-    let candidates: Vec<PathBuf> = ["target/debug/libgusset.a", "target/release/libgusset.a"]
+    // Honour CARGO_TARGET_DIR: with a separate target dir, a hard-coded
+    // `<root>/target` silently checked a stale archive from an earlier build.
+    // Cargo sets CARGO_TARGET_TMPDIR to `<target-dir>/tmp` (absolute) for
+    // integration tests, which resolves CARGO_TARGET_DIR however it was given.
+    let target_dir = match PathBuf::from(env!("CARGO_TARGET_TMPDIR")).parent() {
+        Some(p) => p.to_path_buf(),
+        None => root_dir.join("target"),
+    };
+    let candidates: Vec<PathBuf> = ["debug/libgusset.a", "release/libgusset.a"]
         .iter()
-        .map(|p| root_dir.join(p))
+        .map(|p| target_dir.join(p))
         .filter(|p| p.exists())
         .collect();
 

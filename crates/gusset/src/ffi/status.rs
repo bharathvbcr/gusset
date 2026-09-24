@@ -117,7 +117,14 @@ impl FfiStatus {
     }
 
     /// Cleans up any message allocation owned by this status (R4).
-    pub fn free_msg(&mut self) {
+    ///
+    /// # Safety
+    ///
+    /// `msg`/`msg_len` are public fields, so safe code can point them anywhere.
+    /// They must be null/0 or exactly the allocation [`FfiStatus::new_err`] made,
+    /// not yet freed. This used to be a safe fn, which let safe code free a
+    /// stack pointer.
+    pub unsafe fn free_msg(&mut self) {
         if !self.msg.is_null() && self.msg_len > 0 {
             unsafe {
                 let slice_ptr = ptr::slice_from_raw_parts_mut(self.msg, self.msg_len);

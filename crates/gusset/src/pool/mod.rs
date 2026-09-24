@@ -38,7 +38,13 @@ struct WorkUnit {
 }
 
 /// Output produced by an engine execution.
+///
+/// `#[non_exhaustive]` because the set of variants depends on the compiler:
+/// `Allocated` exists only with the stable `Allocator` trait (Rust 1.100+). An
+/// exhaustive `match` in an adopter's crate would otherwise compile on one
+/// toolchain and fail with E0004 on the next, with no change to either crate.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum JobOutput {
     /// Standard vector of output bytes.
     Bytes(Vec<u8>),
@@ -315,6 +321,12 @@ fn diagnostic_allocated(ctx: &JobContext, input: &[u8]) -> Result<JobOutput, Str
         Some(b) => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize,
         None => return Err("mode 16 needs a u32 LE length".to_string()),
     };
+    if len > MAX_BUFFER_BYTES {
+        return Err(format!(
+            "output {} bytes exceeds maximum {} bytes",
+            len, MAX_BUFFER_BYTES
+        ));
+    }
     let seed = input.get(5).copied().unwrap_or(0);
 
     #[cfg(gusset_allocator_api)]
@@ -664,6 +676,13 @@ pub struct Handle {
     /// twice — which would otherwise shut an unrelated file that reused the number.
     pipe_write_fd: AtomicI32,
     pipe_write_lock: Mutex<()>,
+    /// Completion tickets whose write failed (full pipe past the timeout).
+    ///
+    /// A dropped ticket strands its Go waiter and its pool permit forever:
+    /// after `pool_size` of them every Submit blocks. They are retried ahead of
+    /// the next completion and on every submit, so a reader that stalls and
+    /// then recovers still receives every ticket.
+    undelivered: Mutex<Vec<u64>>,
     poisoned: AtomicBool,
     closed: AtomicBool,
     sender: Mutex<Option<SyncSender<WorkUnit>>>,
@@ -702,7 +721,12 @@ pub const MAX_POOL_SIZE: usize = 1024;
 ///
 /// Zero means "no buffer" on the submit header. A counter that wraps, or that
 /// advances while refusing, later reissues an id that is still live.
-const ID_CEILING: u64 = 1 << 63;
+const ID_CEILING: u64 = TAKE_OWNED_FLAG;
+
+/// Set on `gusset_take`'s buffer id when that id is the result's own buffer,
+/// which the caller frees once consumed (`GUSSET_TAKE_OWNED_FLAG`). Every id is
+/// below [`ID_CEILING`], which is this bit, so the flag never collides.
+pub const TAKE_OWNED_FLAG: u64 = 1 << 63;
 
 /// Reserves the next id, or refuses without advancing once the space is exhausted.
 fn reserve_id(counter: &AtomicU64) -> Result<u64, String> {
@@ -805,6 +829,7 @@ impl Handle {
             // Not owned yet: published below, only once the pool is fully up.
             pipe_write_fd: AtomicI32::new(-1),
             pipe_write_lock: Mutex::new(()),
+            undelivered: Mutex::new(Vec::new()),
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             sender: Mutex::new(Some(sender)),
@@ -889,11 +914,27 @@ impl Handle {
 
             let join_handle = builder
                 .spawn(move || {
+                    // A write to a pipe whose read end is gone raises SIGPIPE on
+                    // the writing thread. On a thread Go did not create, Go's
+                    // handler re-raises it with the default action and the whole
+                    // process exits (status 141) — from a completion write, or
+                    // from the panic hook printing to a closed stderr. Blocked
+                    // here, the write returns EPIPE and is handled as an error.
+                    if !sys::block_sigpipe_on_this_thread() {
+                        crate::ffi::log_event(&format!(
+                            "gusset: worker gusset-w{} could not block SIGPIPE; a write to a \
+                             closed pipe from this thread will terminate the process",
+                            worker_id
+                        ));
+                    }
+
                     // I5/R8: a staticlib never runs std::rt::init, so nothing has
-                    // installed an alternate signal stack for this thread. Without
-                    // one, a stack overflow kills the process before Go's handler
-                    // runs, so a failure here is a real loss of protection and is
-                    // reported rather than shrugged off.
+                    // installed an alternate signal stack for this thread. Go
+                    // requires one on threads it did not create: without it, a
+                    // signal arriving while this thread's stack is nearly used up
+                    // has nowhere to run Go's handler. (An overflow is still fatal
+                    // either way; see sys::sigaltstack_size.) A failure here is a
+                    // real loss of protection and is reported, not shrugged off.
                     let _sig_guard = match sys::install_sigaltstack() {
                         Some(g) => Some(g),
                         None => {
@@ -970,21 +1011,12 @@ impl Handle {
                         if let Some(h) = weak_clone.upgrade() {
                             let result = materialize_result(&h, result);
                             lock_recover(&h.results).insert(ticket, result);
+                            h.publish_completion(ticket);
+                            // Only now is the unit out of flight: shutdown's drain
+                            // counts cancel flags, and removing this one before the
+                            // write let `gusset_shutdown` report a clean drain while
+                            // a worker still sat in the up-to-10 s write backoff.
                             lock_recover(&h.cancel_flags).remove(&ticket);
-
-                            let fd = h.pipe_write_fd.load(Ordering::Acquire);
-                            // The lock covers one syscall attempt. write_ticket's
-                            // backoff sleeps for up to 10s; holding the lock across
-                            // that stalls every other worker's completion and
-                            // Handle::close behind them.
-                            if let Err(e) = write_completion(&h.pipe_write_lock, fd, ticket) {
-                                // The waiting Go caller will never be woken for this
-                                // ticket, so say so rather than dropping it in silence.
-                                crate::ffi::log_event(&format!(
-                                    "gusset: completion write failed for ticket {}: {}",
-                                    ticket, e
-                                ));
-                            }
                         }
                     }
                 })
@@ -1040,6 +1072,10 @@ impl Handle {
         // Auto-respawn replacement workers if any died (I5)
         self.ensure_workers()?;
 
+        // One non-blocking retry of stranded completions, so a recovered
+        // reader gets them even if no further job ever completes.
+        self.retry_undelivered();
+
         // R16: inputs up to 4 KiB copied during submit; larger inputs live in Buffer.
         // Shared buffers are passed as Arc<RawBuffer> without extra byte copy.
         let payload = if buffer_id > 0 {
@@ -1081,7 +1117,18 @@ impl Handle {
                 Some(s) => s,
                 None => return Err("handle is closed".to_string()),
             };
-            lock_recover(&self.cancel_flags).insert(ticket, Arc::clone(&cancel_flag));
+            {
+                let mut flags = lock_recover(&self.cancel_flags);
+                flags.insert(ticket, Arc::clone(&cancel_flag));
+                // begin_shutdown sets SHUTTING_DOWN and then cancels every
+                // flag under this lock. A submit that passed the check above
+                // before the store, but inserts after that cancel_all, would
+                // run uncancelled and eat the whole drain budget. Under the
+                // lock, the store is visible here if cancel_all already ran.
+                if is_shutting_down() {
+                    cancel_flag.store(true, Ordering::Release);
+                }
+            }
             if let Err(err) = sender.try_send(unit) {
                 lock_recover(&self.cancel_flags).remove(&ticket);
                 return Err(match err {
@@ -1188,7 +1235,8 @@ impl Handle {
 
     /// Registers an engine's `BufferAlloc` output as a result buffer, zero-copy.
     ///
-    /// Runs on the worker inside the engine firewall. An empty output is an empty
+    /// Runs on the worker after the engine's own `catch_unwind`, under the
+    /// worker's outer firewall. An empty output is an empty
     /// result; one over the 1 GiB ceiling is refused (and freed) exactly as a
     /// `Vec<u8>` of that size is; memory that cannot be adopted as-is is copied.
     #[cfg(gusset_allocator_api)]
@@ -1331,6 +1379,69 @@ impl Handle {
             // following an explicit close, finds -1 and closes nothing.
             let fd = self.pipe_write_fd.swap(-1, Ordering::AcqRel);
             sys::close_fd(fd);
+        }
+    }
+
+    /// Writes a completion ticket, first flushing any earlier ones that failed.
+    ///
+    /// The lock inside `write_completion` covers one syscall attempt; its
+    /// backoff sleeps for up to 10 s outside it, so one full pipe does not stall
+    /// every other worker and `close`.
+    fn publish_completion(&self, ticket: u64) {
+        let fd = self.pipe_write_fd.load(Ordering::Acquire);
+        let mut pending = std::mem::take(&mut *lock_recover(&self.undelivered));
+        pending.push(ticket);
+        let mut failed: Vec<u64> = Vec::new();
+        for t in pending {
+            if !failed.is_empty() {
+                failed.push(t); // keep order; the pipe is not draining
+                continue;
+            }
+            if let Err(e) = write_completion(&self.pipe_write_lock, fd, t) {
+                self.completion_write_failed(t, &e);
+                failed.push(t);
+            }
+        }
+        if !failed.is_empty() {
+            lock_recover(&self.undelivered).extend(failed);
+        }
+    }
+
+    /// Single non-blocking pass over stranded tickets, stopping at the first
+    /// one the pipe will not take.
+    fn retry_undelivered(&self) {
+        let mut pending = lock_recover(&self.undelivered);
+        if pending.is_empty() {
+            return;
+        }
+        let fd = self.pipe_write_fd.load(Ordering::Acquire);
+        let mut sent = 0;
+        for &t in pending.iter() {
+            let ok = {
+                let _g = lock_recover(&self.pipe_write_lock);
+                sys::write_ticket_attempt(fd, t).is_ok()
+            };
+            if !ok {
+                break;
+            }
+            sent += 1;
+        }
+        pending.drain(..sent);
+    }
+
+    fn completion_write_failed(&self, ticket: u64, e: &std::io::Error) {
+        crate::ffi::log_event(&format!(
+            "gusset: completion write failed for ticket {}: {} (kept for retry)",
+            ticket, e
+        ));
+        // EPIPE/EBADF: the reader is gone for good, so no retry will ever land.
+        // Refuse new work instead of accepting jobs whose completions cannot be
+        // delivered.
+        if !matches!(
+            e.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ) {
+            self.poisoned.store(true, Ordering::Release);
         }
     }
 
