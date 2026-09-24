@@ -539,10 +539,13 @@ fn execute_unit(weak: &Weak<Handle>, mut unit: WorkUnit) -> JobResult {
             ))
         }
         Ok(Ok(JobOutput::Buffer(buf_id))) => match weak.upgrade() {
-            Some(h) => match h.claim_output(buf_id) {
-                Ok(()) => JobResult::Buffer(buf_id),
-                Err(e) => JobResult::Err(e),
-            },
+            Some(h) => {
+                let live: &Handle = &h;
+                match live.claim_output(buf_id) {
+                    Ok(()) => JobResult::Buffer(buf_id),
+                    Err(e) => JobResult::Err(e),
+                }
+            }
             None => JobResult::Err("handle is closed".to_string()),
         },
         Ok(Err(err)) => JobResult::Err(err),
@@ -757,7 +760,8 @@ impl Handle {
         // Spawn pool worker threads. Workers park in recv() until the first submit,
         // which cannot happen before this function returns, so publishing the
         // descriptor after the spawn cannot race a completion write.
-        handle.spawn_workers(pool_size)?;
+        let pool: &Handle = &handle;
+        pool.spawn_workers(pool_size)?;
 
         // Take ownership of the completion pipe only now that opening has
         // succeeded. On any error path above, the descriptor stays the caller's and
@@ -897,7 +901,7 @@ impl Handle {
 
                         // Store result and wake netpoller if handle still alive
                         if let Some(h) = weak_clone.upgrade() {
-                            let result = h.materialize_result(result);
+                            let result = materialize_result(&h, result);
                             lock_recover(&h.results).insert(ticket, result);
                             lock_recover(&h.cancel_flags).remove(&ticket);
 
@@ -1115,25 +1119,6 @@ impl Handle {
         Ok((id, ptr))
     }
 
-    /// Moves a large `JobResult::Ok` onto a Buffer so `gusset_take` does not
-    /// memcpy on the cgo thread.
-    fn materialize_result(&self, result: JobResult) -> JobResult {
-        match result {
-            JobResult::Ok(data) if data.len() > MAX_BUFFER_BYTES => JobResult::Err(format!(
-                "output {} bytes exceeds maximum {} bytes",
-                data.len(),
-                MAX_BUFFER_BYTES
-            )),
-            JobResult::Ok(data) if data.len() > MAX_INLINE_INPUT => {
-                match self.buf_from_bytes(&data) {
-                    Ok((id, _)) => JobResult::Buffer(id),
-                    Err(e) => JobResult::Err(e),
-                }
-            }
-            other => other,
-        }
-    }
-
     /// Transfers a live buffer to a job's result, refusing any second owner.
     ///
     /// Refused when the buffer is already some result's output, when Go still
@@ -1243,6 +1228,28 @@ impl Handle {
     /// Returns pool size.
     pub fn pool_size(&self) -> usize {
         self.pool_size
+    }
+}
+
+/// Moves a large `JobResult::Ok` onto a Buffer so `gusset_take` does not
+/// memcpy on the cgo thread.
+///
+/// The worker holds an upgraded `Arc`, not `&self`, so this is a function on
+/// `&Handle` rather than a method.
+fn materialize_result(handle: &Handle, result: JobResult) -> JobResult {
+    match result {
+        JobResult::Ok(data) if data.len() > MAX_BUFFER_BYTES => JobResult::Err(format!(
+            "output {} bytes exceeds maximum {} bytes",
+            data.len(),
+            MAX_BUFFER_BYTES
+        )),
+        JobResult::Ok(data) if data.len() > MAX_INLINE_INPUT => {
+            match handle.buf_from_bytes(&data) {
+                Ok((id, _)) => JobResult::Buffer(id),
+                Err(e) => JobResult::Err(e),
+            }
+        }
+        other => other,
     }
 }
 

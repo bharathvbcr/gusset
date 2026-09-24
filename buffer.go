@@ -86,13 +86,19 @@ func newBufferFromRaw(s *handleState, id uint64, slice []byte) *Buffer {
 	}
 
 	if id > 0 {
-		// AddCleanup backstop if caller forgets to explicitly Free
+		// AddCleanup backstop if caller forgets to explicitly Free.
 		buf.cleanup = runtime.AddCleanup(buf, func(info bufferCleanupInfo) {
-			_ = info.state.bufFreeCleanup(info.id)
+			releaseForgottenBuffer(info)
 		}, bufferCleanupInfo{state: s, id: id})
 	}
 
 	return buf
+}
+
+// releaseForgottenBuffer frees a buffer whose Go owner became unreachable
+// without an explicit Free.
+func releaseForgottenBuffer(info bufferCleanupInfo) {
+	_ = info.state.bufFreeCleanup(info.id)
 }
 
 func (s *handleState) bufFreeCleanup(id uint64) error {
