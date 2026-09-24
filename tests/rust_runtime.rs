@@ -330,3 +330,161 @@ fn panic_locations_stay_bounded_across_unclaimed_panics() {
         count
     );
 }
+
+/// Reads until EOF or `deadline`, returning the bytes seen and whether EOF came.
+fn read_until_eof(fd: i32, deadline: Duration) -> (Vec<u8>, bool) {
+    let start = Instant::now();
+    let mut bytes = Vec::new();
+    while start.elapsed() < deadline {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut pfd, 1, 200) } <= 0 {
+            continue;
+        }
+        let mut buf = [0u8; 4096];
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if n == 0 {
+            return (bytes, true);
+        }
+        if n > 0 {
+            bytes.extend_from_slice(&buf[..n as usize]);
+        }
+    }
+    (bytes, false)
+}
+
+/// A worker publishing a completion upgrades its `Weak<Handle>`. If the caller
+/// drops the last `Arc` in that window, the worker's upgrade is the last owner
+/// and `Handle::drop` → `close` runs *on that worker*, which then joined its own
+/// thread: EDEADLK, a std panic outside every firewall, the rest of the pool
+/// detached and the completion pipe never closed. Now the worker skips itself,
+/// the others are joined, and the pipe reaches EOF.
+///
+/// The window is widened deterministically: the pipe is filled first, so the
+/// worker sits in its completion-write backoff holding the upgraded `Arc` while
+/// the caller drops its own; draining the pipe then lets it finish.
+#[test]
+fn a_worker_holding_the_last_reference_closes_the_handle_cleanly() {
+    let (r, w) = make_pipe();
+    let h = match Handle::open(3, w) {
+        Ok(h) => h,
+        Err(e) => panic!("open: {e}"),
+    };
+    // open made the write end non-blocking; fill it until it refuses.
+    let junk = [0xEEu8; 4096];
+    let mut filled = 0usize;
+    loop {
+        let n = unsafe { libc::write(w, junk.as_ptr() as *const libc::c_void, junk.len()) };
+        if n <= 0 {
+            break;
+        }
+        filled += n as usize;
+    }
+    let header = CallHeader {
+        flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+        ..Default::default()
+    };
+    // Mode 9, 2 units: sleeps 20 ms without checking, then echoes.
+    let ticket = match h.submit(header, &[9, 2], 0) {
+        Ok(t) => t,
+        Err(e) => panic!("submit: {e}"),
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    drop(h);
+    let (bytes, eof) = read_until_eof(r, Duration::from_secs(8));
+    unsafe { libc::close(r) };
+    assert!(
+        eof,
+        "the completion pipe never closed: close deadlocked on its own worker"
+    );
+    assert_eq!(
+        bytes.len(),
+        filled + 8,
+        "expected the filler plus exactly one ticket"
+    );
+    let t = &bytes[filled..];
+    assert_eq!(
+        u64::from_ne_bytes([t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]]),
+        ticket,
+        "the stalled completion must still be delivered"
+    );
+}
+
+/// `gusset_submit` built its input slice before validating it. A length past
+/// `isize::MAX` made `slice::from_raw_parts` undefined behaviour (an abort in
+/// debug builds, before any firewall), and a null pointer with a length was
+/// silently treated as empty input.
+#[test]
+fn submit_validates_inline_input_before_building_a_slice() {
+    use gusset::ffi::status::{FfiStatus, FFI_BAD_ARG, FFI_OK};
+    use gusset::ffi::{gusset_buf_alloc, gusset_buf_free, gusset_status_free, gusset_submit};
+
+    let (r, w) = make_pipe();
+    let h = match Handle::open(1, w) {
+        Ok(h) => h,
+        Err(e) => panic!("open: {e}"),
+    };
+    let raw = std::sync::Arc::as_ptr(&h) as *mut Handle;
+    let header = CallHeader {
+        flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+        ..Default::default()
+    };
+    let mut ticket = 0u64;
+    let mut st = FfiStatus::ok();
+
+    let bogus = std::ptr::NonNull::<u8>::dangling().as_ptr();
+    for (ptr, len, what) in [
+        (std::ptr::null(), 16usize, "null pointer with a length"),
+        (bogus as *const u8, usize::MAX, "length past isize::MAX"),
+        (bogus as *const u8, 4097, "length past the inline limit"),
+    ] {
+        let rc = unsafe { gusset_submit(raw, &header, ptr, len, 0, &mut ticket, &mut st) };
+        assert_eq!(rc, FFI_BAD_ARG, "{what} must be refused");
+        unsafe { gusset_status_free(&mut st) };
+    }
+
+    // A buffer submission never reads the inline pair, however bogus it is.
+    let mut id = 0u64;
+    let mut p = std::ptr::null_mut();
+    let rc = unsafe { gusset_buf_alloc(raw, 8, &mut id, &mut p, &mut st) };
+    assert_eq!(rc, FFI_OK);
+    unsafe { std::ptr::write_bytes(p, 0, 8) };
+    let rc = unsafe { gusset_submit(raw, &header, bogus, usize::MAX, id, &mut ticket, &mut st) };
+    assert_eq!(rc, FFI_OK, "buffer submission must ignore the inline pair");
+    let mut b = [0u8; 8];
+    let n = unsafe { libc::read(r, b.as_mut_ptr() as *mut libc::c_void, 8) };
+    assert_eq!(n, 8);
+    let _ = h.take(ticket);
+    let rc = unsafe { gusset_buf_free(raw, id, &mut st) };
+    assert_eq!(rc, FFI_OK);
+    h.close();
+    unsafe { libc::close(r) };
+}
+
+/// Bounded concurrency only rules out a full completion pipe if the pipe holds
+/// `pool_size` tickets. Linux hands out one-page pipes (512 tickets) under
+/// `pipe-user-pages-soft` pressure; open now grows the pipe to fit.
+#[cfg(target_os = "linux")]
+#[test]
+fn open_grows_a_one_page_completion_pipe_to_fit_the_pool() {
+    let (r, w) = make_pipe();
+    let page = unsafe { libc::fcntl(w, libc::F_SETPIPE_SZ, 4096) };
+    assert!(page >= 4096, "could not shrink the test pipe");
+    let pool = (page as usize / 8) + 8;
+    assert!(pool <= MAX_POOL_SIZE);
+    let h = match Handle::open(pool as u32, w) {
+        Ok(h) => h,
+        Err(e) => panic!("open: {e}"),
+    };
+    let now = unsafe { libc::fcntl(r, libc::F_GETPIPE_SZ) };
+    assert!(
+        now as usize >= pool * 8,
+        "pipe holds {now} bytes, pool of {pool} needs {}",
+        pool * 8
+    );
+    h.close();
+    unsafe { libc::close(r) };
+}

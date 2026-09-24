@@ -42,6 +42,54 @@ jobs:
       - name: Run Go test suite (Panic Zoo & Pitfalls)
         run: go test -v -timeout 10m ./...
 
+  # The stable Allocator trait lands in Rust 1.100. Until that is the stable
+  # channel, nightly carries it; switch `toolchain` to 1.100 once released. The
+  # build probe decides per compiler, so GUSSET_ALLOCATOR_API=1 turns a silent
+  # fallback into a build error and GUSSET_EXPECT_ALLOCATOR_API=1 makes the
+  # fallback test fail too: this lane cannot pass without exercising the path.
+  allocator-api:
+    name: Allocator API (Rust 1.100+, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      GUSSET_ALLOCATOR_API: '1'
+      GUSSET_EXPECT_ALLOCATOR_API: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust (1.100+)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: clippy
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: false
+
+      - name: Clippy with the allocator-aware surface compiled in
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build Rust static library
+        run: cargo build --release
+
+      - name: Generate Go archive hash
+        run: go generate ./internal/ffi
+
+      - name: Rust tests (BufferAlloc, Counting as Allocator, zero-copy adoption)
+        run: cargo test --workspace --release
+
+      - name: Go suite against the allocator-backed library
+        run: go test -timeout 15m ./...
+
+      - name: Go interop stress under the race detector
+        run: go test -race -run 'TestInterop' -count=3 -timeout 15m ./tests/pitfalls/
+
   lint:
     name: Lint & Boundary Audits
     runs-on: ubuntu-latest

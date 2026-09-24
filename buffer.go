@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/bharathvbcr/gusset/internal/ffi"
 )
@@ -27,6 +28,13 @@ type Buffer struct {
 	data    []byte
 	freed   atomic.Bool
 	cleanup runtime.Cleanup
+	// owner keeps the Handle reachable for as long as this Buffer is. The
+	// Handle's AddCleanup closes it when it becomes unreachable, and closing
+	// frees every Rust buffer of that handle — so a caller who kept only the
+	// Buffer (exactly what the Bytes doc tells them to do) had its memory
+	// released underneath a live slice. No cycle: the Handle's cleanup argument
+	// is its state, not the Handle.
+	owner *Handle
 }
 
 type bufferCleanupInfo struct {
@@ -41,6 +49,9 @@ func (h *Handle) NewBuffer(n int) (*Buffer, error) {
 		return nil, errors.New("gusset: handle is nil")
 	}
 	buf, err := h.state.newBuffer(n)
+	if buf != nil {
+		buf.owner = h
+	}
 	runtime.KeepAlive(h)
 	return buf, err
 }
@@ -93,6 +104,22 @@ func newBufferFromRaw(s *handleState, id uint64, slice []byte) *Buffer {
 	}
 
 	return buf
+}
+
+// newHeapBuffer copies a small result into 64-byte aligned Go memory.
+//
+// Id 0: nothing to free in Rust, and submit sends its bytes inline. Only used
+// for results within the 4 KiB inline limit.
+func newHeapBuffer(s *handleState, data []byte) *Buffer {
+	const align = 64
+	backing := make([]byte, len(data)+align-1)
+	off := 0
+	if rem := int(uintptr(unsafe.Pointer(unsafe.SliceData(backing))) % align); rem != 0 {
+		off = align - rem
+	}
+	view := backing[off : off+len(data) : off+len(data)]
+	copy(view, data)
+	return &Buffer{state: s, data: view}
 }
 
 // releaseForgottenBuffer frees a buffer whose Go owner became unreachable

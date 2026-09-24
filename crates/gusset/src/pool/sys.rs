@@ -1,7 +1,9 @@
 //! Low-level system interfaces: sigaltstack, pipe writing, and buffer allocation (R8, R16).
 #![allow(unsafe_code)]
 
-use crate::alloc::{record_alloc, record_dealloc};
+#[cfg(gusset_allocator_api)]
+use crate::alloc::BufferAlloc;
+use crate::alloc::{record_alloc, record_dealloc, BUFFER_ALIGN};
 use std::alloc::Layout;
 use std::io::{Error, ErrorKind, Result};
 
@@ -28,6 +30,10 @@ pub fn check_buffer_len(len: usize) -> std::result::Result<(), String> {
 }
 
 /// Raw buffer allocated in Rust memory with 64-byte alignment (R16).
+///
+/// `len` is what Go sees; `layout.size()` is what was allocated. They differ only
+/// for an adopted [`BufferAlloc`] vector, whose spare capacity is kept rather
+/// than paid for with a shrinking realloc.
 #[derive(Debug)]
 pub struct RawBuffer {
     ptr: *mut u8,
@@ -42,8 +48,8 @@ impl RawBuffer {
     /// Allocates 64-byte aligned memory.
     pub fn allocate(len: usize) -> std::result::Result<Self, String> {
         check_buffer_len(len)?;
-        let layout =
-            Layout::from_size_align(len, 64).map_err(|e| format!("invalid layout: {}", e))?;
+        let layout = Layout::from_size_align(len, BUFFER_ALIGN)
+            .map_err(|e| format!("invalid layout: {}", e))?;
         let ptr = unsafe { std::alloc::alloc(layout) };
         if ptr.is_null() {
             return Err("allocation failed".to_string());
@@ -63,6 +69,40 @@ impl RawBuffer {
             std::ptr::copy_nonoverlapping(src.as_ptr(), buf.ptr, src.len());
         }
         Ok(buf)
+    }
+
+    /// Takes ownership of a `Vec<u8, BufferAlloc>` without copying its bytes.
+    ///
+    /// The vector's memory was allocated by `BufferAlloc` as
+    /// `(capacity, BUFFER_ALIGN)` through the global allocator and counted once —
+    /// exactly what [`RawBuffer::allocate`] does — so `Drop` below frees and
+    /// uncounts it with the same layout and the accounting stays balanced.
+    ///
+    /// Hands the vector back when it cannot be adopted as-is: empty (possibly a
+    /// dangling pointer), over [`MAX_BUFFER_BYTES`], or not 64-byte aligned.
+    /// The last can only happen if unsafe engine code built the vector with
+    /// `Vec::from_raw_parts_in` over foreign memory; refusing it keeps Go's
+    /// alignment guarantee and keeps a mismatched layout away from `dealloc`.
+    #[cfg(gusset_allocator_api)]
+    pub fn adopt(v: Vec<u8, BufferAlloc>) -> std::result::Result<Self, Vec<u8, BufferAlloc>> {
+        if v.is_empty() || v.len() > MAX_BUFFER_BYTES || v.capacity() > isize::MAX as usize {
+            return Err(v);
+        }
+        if !(v.as_ptr() as usize).is_multiple_of(BUFFER_ALIGN) {
+            return Err(v);
+        }
+        let layout = match Layout::from_size_align(v.capacity(), BUFFER_ALIGN) {
+            Ok(l) => l,
+            Err(_) => return Err(v),
+        };
+        // BufferAlloc is a zero-sized Copy type, so forgetting the vector forgets
+        // nothing but the allocation this RawBuffer now owns.
+        let mut v = std::mem::ManuallyDrop::new(v);
+        Ok(Self {
+            ptr: v.as_mut_ptr(),
+            len: v.len(),
+            layout,
+        })
     }
 
     /// Returns the raw pointer.
@@ -97,7 +137,7 @@ impl Drop for RawBuffer {
             unsafe {
                 std::alloc::dealloc(self.ptr, self.layout);
             }
-            record_dealloc(self.len);
+            record_dealloc(self.layout.size());
         }
     }
 }
@@ -297,6 +337,45 @@ pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
             Err(err) => return Err(err),
         }
     }
+}
+
+/// Makes sure the pipe behind `fd` can hold `bytes` unread bytes.
+///
+/// Linux only: the capacity is adjustable there and can be as small as one
+/// page. Elsewhere (macOS grows pipe buffers on demand to at least 16 KiB) this
+/// is a no-op. A descriptor that is not a pipe reports EBADF/EINVAL from
+/// F_GETPIPE_SZ and is left alone — tests hand in other descriptor kinds, and
+/// the ownership contract for those is checked elsewhere.
+pub fn ensure_pipe_capacity(fd: i32, bytes: usize) -> std::result::Result<(), String> {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let cur = libc::fcntl(fd, libc::F_GETPIPE_SZ);
+        if cur < 0 || cur as usize >= bytes {
+            return Ok(());
+        }
+        let want = match libc::c_int::try_from(bytes) {
+            Ok(w) => w,
+            Err(_) => {
+                return Err(format!(
+                    "completion pipe capacity {} is not representable",
+                    bytes
+                ))
+            }
+        };
+        if libc::fcntl(fd, libc::F_SETPIPE_SZ, want) < 0 {
+            return Err(format!(
+                "completion pipe holds {} bytes but this pool needs {} for its unread tickets, \
+                 and growing it failed: {} (lower the pool size or raise \
+                 /proc/sys/fs/pipe-user-pages-soft)",
+                cur,
+                bytes,
+                Error::last_os_error()
+            ));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (fd, bytes);
+    Ok(())
 }
 
 /// Sets the given file descriptor to non-blocking mode (O_NONBLOCK).

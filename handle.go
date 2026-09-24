@@ -94,11 +94,19 @@ type handleState struct {
 	closed        atomic.Bool
 	pipe          *os.File
 	drainDone     chan struct{}
-	mu            sync.Mutex
-	cgoMu         sync.RWMutex
-	pending       map[uint64]chan callResult
-	completed     map[uint64]callResult
-	semTickets    map[uint64]struct{}
+	// closeDone is closed once close has fully released the handle, so a
+	// second concurrent Close waits for the first rather than returning while
+	// workers are still being joined.
+	closeDone chan struct{}
+	// drainExited is set, under mu, when drainPipe stops reading. After that
+	// no completion can ever be delivered, so a new submission or waiter is
+	// refused instead of parking forever.
+	drainExited atomic.Bool
+	mu          sync.Mutex
+	cgoMu       sync.RWMutex
+	pending     map[uint64]chan callResult
+	completed   map[uint64]callResult
+	semTickets  map[uint64]struct{}
 	// abandoned holds tickets whose owner was released by its context before
 	// the engine finished. The permit stays in semTickets — the worker is still
 	// busy — and deliver reclaims both the result and the permit when the
@@ -173,6 +181,7 @@ func Open(opts ...Option) (*Handle, error) {
 		sem:           make(chan struct{}, cfg.poolSize),
 		pipe:          r,
 		drainDone:     make(chan struct{}),
+		closeDone:     make(chan struct{}),
 		pending:       make(map[uint64]chan callResult),
 		completed:     make(map[uint64]callResult),
 		semTickets:    make(map[uint64]struct{}),
@@ -185,9 +194,14 @@ func Open(opts ...Option) (*Handle, error) {
 	// Register AddCleanup backstop (logs if app forgot to close).
 	// Because drainPipe receives state and not h, h can be garbage collected
 	// if the application drops all references to it without calling Close().
+	//
+	// close runs on its own goroutine. The runtime executes cleanups one at a
+	// time on a single goroutine, and close joins worker threads — unbounded for
+	// an engine that never calls JobContext::check — so running it inline stalled
+	// every other cleanup in the process, Gusset's own Buffer backstops included.
 	h.cleanup = runtime.AddCleanup(h, func(s *handleState) {
 		slog.Warn("gusset: handle was garbage collected without explicit Close()")
-		_ = s.close()
+		go func() { _ = s.close() }()
 	}, state)
 
 	// Start pipe reader goroutine (parks on netpoller)
@@ -215,6 +229,7 @@ func drainPipe(s *handleState) {
 			}
 			s.pending = make(map[uint64]chan callResult)
 			s.completed = make(map[uint64]callResult)
+			s.drainExited.Store(true)
 			s.takeIDs = make(map[uint64]uint64)
 			// Permits held by abandoned tickets are returned by close, which
 			// drains every entry in semTickets. Clearing the set here only stops
@@ -331,8 +346,10 @@ func (h *Handle) Close() error {
 
 func (s *handleState) close() error {
 	if s.closed.Swap(true) {
+		<-s.closeDone
 		return nil
 	}
+	defer close(s.closeDone)
 
 	// 1. Cancel in-flight jobs in Rust memory (R9, I3)
 	s.cgoMu.RLock()
@@ -452,6 +469,9 @@ func (h *Handle) CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error) {
 		return nil, err
 	}
 	out, err := h.state.waitBuffer(ctx, ticket)
+	if out != nil {
+		out.owner = h
+	}
 	runtime.KeepAlive(h)
 	return out, err
 }
@@ -478,7 +498,7 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 	if s.poisoned.Load() {
 		return 0, ErrPoisoned
 	}
-	if s.closed.Load() {
+	if s.closed.Load() || s.drainExited.Load() {
 		return 0, errors.New("gusset: handle is closed")
 	}
 
@@ -505,6 +525,16 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 			return 0, errors.New("gusset: buffer belongs to a different handle")
 		}
 		bufferID = v.id
+		if bufferID == 0 {
+			// A Go-heap result buffer (see waitBuffer): no Rust id to pass, so
+			// its bytes travel inline. Id 0 used to mean "no input", which
+			// silently ran the engine on nothing.
+			data := v.Bytes()
+			if len(data) > inlineResultBytes {
+				return 0, errors.New("gusset: buffer without a Rust id exceeds the 4096-byte copy limit")
+			}
+			rawInput = data
+		}
 	case nil:
 	default:
 		return 0, errors.New("gusset: input must be []byte or *Buffer")
@@ -553,7 +583,7 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 	if err != nil {
 		s.cgoMu.RUnlock()
 		<-s.sem
-		if errors.Is(err, ErrPanic) {
+		if errors.Is(err, ErrPanic) || errors.Is(err, ErrPoisoned) {
 			s.poisoned.Store(true)
 		}
 		return 0, err
@@ -595,6 +625,9 @@ func (h *Handle) WaitBuffer(ctx context.Context, ticket uint64) (*Buffer, error)
 		return nil, errors.New("gusset: nil context")
 	}
 	buf, err := h.state.waitBuffer(ctx, ticket)
+	if buf != nil {
+		buf.owner = h
+	}
 	runtime.KeepAlive(h)
 	return buf, err
 }
@@ -653,6 +686,14 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 
 	if len(res.data) > 0 {
 		buf, err := s.newBuffer(len(res.data))
+		if errors.Is(err, ErrPoisoned) {
+			// This result already exists; poison refuses new work only (I2).
+			// NewBuffer's Rust allocation is poison-checked, so a sibling's
+			// panic used to turn a finished result into ErrPoisoned after it
+			// had already been removed from completed — lost for good. Carry
+			// it on the Go heap instead, 64-byte aligned like a Rust buffer.
+			return newHeapBuffer(s, res.data), nil
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -693,7 +734,7 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 		return callResult{}, 0, ErrUnknownTicket
 	}
 
-	if s.closed.Load() {
+	if s.closed.Load() || s.drainExited.Load() {
 		s.mu.Unlock()
 		return callResult{}, 0, errors.New("gusset: handle is closed")
 	}

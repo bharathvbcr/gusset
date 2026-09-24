@@ -96,6 +96,23 @@ fn adopter_engine_runs_and_displaces_the_diagnostic_engine() {
         other => panic!("expected echo, got {:?}", other),
     }
 
+    // Opcode 13 (Rust 1.100+): reversed tail built in BufferAlloc memory and
+    // adopted zero-copy as the result buffer, 64-byte aligned.
+    #[cfg(gusset_allocator_api)]
+    match run(&handle, r, CallHeader::default(), &[13, 1, 2, 3, 4, 5]) {
+        JobResult::Buffer(id) => {
+            let (ptr, len) = match handle.buf_get(id) {
+                Ok(v) => v,
+                Err(e) => panic!("buf_get: {e}"),
+            };
+            assert_eq!(ptr as usize % gusset::BUFFER_ALIGN, 0);
+            let got = unsafe { std::slice::from_raw_parts(ptr, len) };
+            assert_eq!(got, &[5, 4, 3, 2, 1]);
+            assert!(handle.buf_free(id).is_ok());
+        }
+        other => panic!("expected an adopted buffer from opcode 13, got {:?}", other),
+    }
+
     // An unknown opcode is an engine error, not a panic and not a silent echo.
     match run(&handle, r, CallHeader::default(), &[99]) {
         JobResult::Err(msg) => assert!(

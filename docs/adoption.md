@@ -253,9 +253,50 @@ Things worth knowing before you hit them:
 - **`Buffer.Bytes()` returns Rust memory.** The Go garbage collector does not trace
   it, and holding the slice does not keep the `Buffer` alive. Keep the `*Buffer`
   reachable for as long as you use its bytes, and do not use a slice after `Free`
-  or `Handle.Close`.
+  or `Handle.Close`. A `*Buffer` keeps its `*Handle` reachable, so a
+  handle cannot be collected, and closed, while one of its buffers is still in use.
+- **Buffers are 64-byte aligned on every path.** That includes a small
+  `WaitBuffer` result on a poisoned handle, which is carried in aligned Go memory
+  (`ID() == 0`) rather than lost.
 - **Trace propagation is explicit.** Attach a value implementing
   `TraceID() [16]byte` / `SpanID() [8]byte` under `gusset.SpanContextKey`.
+
+## 5. Zero-copy output with the stable `Allocator` trait (Rust 1.100+)
+
+When your umbrella crate builds with Rust 1.100 or newer, `gusset::BufferAlloc`
+implements `std::alloc::Allocator`. Build a large output directly in buffer memory
+and return it. Gusset hands that allocation to Go as the result buffer. There is
+no copy on the worker and none on the cgo thread, and the memory is 64-byte
+aligned:
+
+```rust
+use gusset::{BufferAlloc, JobOutput};
+
+gusset::register_engine(7, |ctx, input| {
+    let mut out: Vec<u8, BufferAlloc> = Vec::new_in(BufferAlloc);
+    out.try_reserve(estimate(input)).map_err(|e| e.to_string())?; // fallible
+    render_into(&mut out, input, ctx)?;
+    Ok(JobOutput::from(out))
+});
+```
+
+- **Grow fallibly.** Use `try_reserve`. If an infallible `push` or `extend`
+  cannot allocate, it aborts the whole process, Go included, and no panic
+  firewall can catch an abort. The 1 GiB buffer ceiling is checked when Gusset
+  adopts the output, not inside the allocator, for the same reason.
+- **Accounting stays exact.** `BufferAlloc` bytes are counted once in
+  `gusset.Stats()`, whether or not you install `Counting` as the global
+  allocator. `Counting<A>` also works as a per-collection allocator. Wrap
+  `System` or an arena with it, not a proxy for `Global`:
+  `Vec::new_in(Counting::new(System))`.
+- **Spare capacity is kept, not reallocated away.** Go sees `len`, and
+  `Stats()` counts `capacity`. Call `shrink_to_fit` yourself if the slack
+  matters.
+- **Older compilers are unaffected.** A build-time probe
+  (`crates/gusset/allocator_probe.rs`) enables all of this per compiler, and
+  `gusset::ALLOCATOR_API` reports the result. Gate your own code with the same
+  probe, as `crates/gusset-example/build.rs` does. `GUSSET_ALLOCATOR_API=0`
+  forces the fallback, and `=1` turns a failed probe into a build error.
 
 ---
 

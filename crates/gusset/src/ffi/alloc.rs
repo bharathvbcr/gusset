@@ -4,6 +4,26 @@
 use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[cfg(gusset_allocator_api)]
+use std::alloc::{AllocError, Allocator, Global};
+#[cfg(gusset_allocator_api)]
+use std::ptr::NonNull;
+
+/// Whether this build of Gusset implements the stable `std::alloc::Allocator`
+/// trait (Rust 1.100 and newer), making [`BufferAlloc`] usable with `Vec::new_in`
+/// and `JobOutput::Allocated` available.
+///
+/// Decided at build time by probing the compiler, not by comparing versions; see
+/// `crates/gusset/allocator_probe.rs`. On older toolchains everything else in the
+/// crate is unchanged.
+pub const ALLOCATOR_API: bool = cfg!(gusset_allocator_api);
+
+/// Alignment of every Rust-owned buffer Go can see (R16).
+///
+/// `NewBuffer`, promoted results and [`BufferAlloc`] output all share it, so a Go
+/// caller may rely on 64-byte alignment whichever path produced the buffer.
+pub const BUFFER_ALIGN: usize = 64;
+
 /// Global allocator statistics for cross-language memory management.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -113,6 +133,35 @@ fn dec_live_bytes(size: usize) {
     }
 }
 
+/// Records `size` freshly allocated bytes that bypassed the global allocator.
+///
+/// Unlike [`record_alloc`], never skipped: the caller knows these bytes did not
+/// pass through an installed `Counting`, so nothing else will count them.
+#[cfg(gusset_allocator_api)]
+#[inline]
+fn count_alloc_always(size: usize) {
+    if size != 0 {
+        add_live_bytes(size);
+        add_alloc_count();
+    }
+}
+
+/// Moves the live total from `old` to `new` bytes after a resize, with the same
+/// no-op rule as [`record_alloc`] when `always` is false.
+#[cfg(gusset_allocator_api)]
+#[inline]
+fn count_resize(old: usize, new: usize, always: bool) {
+    if !always && counting_is_active() {
+        return;
+    }
+    if new > old {
+        add_live_bytes(new - old);
+    } else if old > new {
+        dec_live_bytes(old - new);
+    }
+    add_alloc_count();
+}
+
 /// GlobalAlloc wrapper that tracks live bytes, peak bytes, and total allocations.
 pub struct Counting<A> {
     inner: A,
@@ -169,6 +218,226 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
             add_alloc_count();
         }
         new_ptr
+    }
+}
+
+/// Whether `A` is `std::alloc::Global`, whose allocations already pass through
+/// an installed `Counting` global allocator.
+#[cfg(gusset_allocator_api)]
+#[inline]
+fn is_global<A: 'static>() -> bool {
+    std::any::TypeId::of::<A>() == std::any::TypeId::of::<Global>()
+}
+
+/// `Counting` as a per-collection allocator (`Vec::new_in(Counting::new(System))`).
+///
+/// Counts into the same process-wide totals `gusset_alloc_stats` exports, so
+/// memory an engine keeps in a local arena or a `System`-backed collection is
+/// visible to `AdviseMemoryLimit` even though it never touches the global
+/// allocator.
+///
+/// Wrapping `Global` while `Counting` is also the `#[global_allocator]` would count
+/// every byte twice; that one case is detected and forwarded uncounted. Any other
+/// allocator that itself routes to the global allocator has the same problem and
+/// cannot be detected — wrap `System`, an arena, or a pool, not a proxy for
+/// `Global`.
+///
+/// Sizes are counted as the layouts the caller passes. A caller that deallocates
+/// with a larger size than it requested (the Allocator contract allows up to the
+/// returned block length) leaves the live total low, never wrapped: the
+/// subtraction saturates.
+#[cfg(gusset_allocator_api)]
+unsafe impl<A: Allocator + 'static> Allocator for Counting<A> {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let block = self.inner.allocate(layout)?;
+        self.count_new(layout.size());
+        Ok(block)
+    }
+
+    fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let block = self.inner.allocate_zeroed(layout)?;
+        self.count_new(layout.size());
+        Ok(block)
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        unsafe { self.inner.deallocate(ptr, layout) };
+        if !self.forwards_to_counted_global() {
+            dec_live_bytes(layout.size());
+        }
+    }
+
+    unsafe fn grow(
+        &self,
+        ptr: NonNull<u8>,
+        old: Layout,
+        new: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let block = unsafe { self.inner.grow(ptr, old, new) }?;
+        self.count_moved(old.size(), new.size());
+        Ok(block)
+    }
+
+    unsafe fn grow_zeroed(
+        &self,
+        ptr: NonNull<u8>,
+        old: Layout,
+        new: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let block = unsafe { self.inner.grow_zeroed(ptr, old, new) }?;
+        self.count_moved(old.size(), new.size());
+        Ok(block)
+    }
+
+    unsafe fn shrink(
+        &self,
+        ptr: NonNull<u8>,
+        old: Layout,
+        new: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let block = unsafe { self.inner.shrink(ptr, old, new) }?;
+        self.count_moved(old.size(), new.size());
+        Ok(block)
+    }
+}
+
+#[cfg(gusset_allocator_api)]
+impl<A: 'static> Counting<A> {
+    #[inline]
+    fn forwards_to_counted_global(&self) -> bool {
+        is_global::<A>() && counting_is_active()
+    }
+
+    #[inline]
+    fn count_new(&self, size: usize) {
+        if !self.forwards_to_counted_global() {
+            count_alloc_always(size);
+        }
+    }
+
+    #[inline]
+    fn count_moved(&self, old: usize, new: usize) {
+        if !self.forwards_to_counted_global() {
+            count_resize(old, new, true);
+        }
+    }
+}
+
+/// The allocator behind every Rust-owned buffer Go can see (R16).
+///
+/// With the stable `Allocator` trait (Rust 1.100+, see [`ALLOCATOR_API`]) an engine
+/// builds its output directly in this memory and returns it without a copy:
+///
+/// ```ignore
+/// let mut out: Vec<u8, BufferAlloc> = Vec::new_in(BufferAlloc);
+/// out.try_reserve(n).map_err(|e| e.to_string())?;
+/// out.extend_from_slice(&header);
+/// Ok(JobOutput::from(out))
+/// ```
+///
+/// Gusset adopts that allocation as the result buffer: no `memcpy` on the worker,
+/// none on the cgo thread, and the pointer Go reads is the one the engine wrote.
+/// A plain `Vec<u8>` result above 4 KiB is copied into a buffer instead, because
+/// its memory is not 64-byte aligned and was not allocated with the layout the
+/// buffer registry frees with.
+///
+/// Every block is 64-byte aligned ([`BUFFER_ALIGN`]) whatever the requested
+/// alignment, and every byte is counted in [`get_alloc_stats`] exactly once: by
+/// an installed `Counting` global allocator, or by hand when there is none.
+///
+/// Growth that fails reports `AllocError`. Use `try_reserve` for sizes derived
+/// from input: an infallible `Vec::push` that cannot allocate aborts the whole
+/// process, Go included, and no panic firewall can intercept that. The 1 GiB
+/// buffer ceiling is enforced when the output is adopted, not here, for the same
+/// reason — refusing inside the allocator would turn an oversized result into an
+/// abort instead of an error.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct BufferAlloc;
+
+impl BufferAlloc {
+    /// The layout this allocator really uses for `layout`: same size, alignment
+    /// raised to [`BUFFER_ALIGN`]. `None` when rounding would overflow `isize`.
+    #[inline]
+    pub fn buffer_layout(layout: Layout) -> Option<Layout> {
+        layout.align_to(BUFFER_ALIGN).ok()
+    }
+}
+
+#[cfg(gusset_allocator_api)]
+unsafe impl Allocator for BufferAlloc {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let real = Self::buffer_layout(layout).ok_or(AllocError)?;
+        let block = Global.allocate(real)?;
+        if real.size() != 0 {
+            record_alloc(real.size());
+        }
+        Ok(block)
+    }
+
+    fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let real = Self::buffer_layout(layout).ok_or(AllocError)?;
+        let block = Global.allocate_zeroed(real)?;
+        if real.size() != 0 {
+            record_alloc(real.size());
+        }
+        Ok(block)
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        // Cannot fail: the same size rounded successfully when it was allocated.
+        // Leaking is the safe answer if it ever did, never a mismatched free.
+        if let Some(real) = Self::buffer_layout(layout) {
+            unsafe { Global.deallocate(ptr, real) };
+            if real.size() != 0 {
+                record_dealloc(real.size());
+            }
+        }
+    }
+
+    unsafe fn grow(
+        &self,
+        ptr: NonNull<u8>,
+        old: Layout,
+        new: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let (o, n) = Self::pair(old, new)?;
+        let block = unsafe { Global.grow(ptr, o, n) }?;
+        count_resize(o.size(), n.size(), false);
+        Ok(block)
+    }
+
+    unsafe fn grow_zeroed(
+        &self,
+        ptr: NonNull<u8>,
+        old: Layout,
+        new: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let (o, n) = Self::pair(old, new)?;
+        let block = unsafe { Global.grow_zeroed(ptr, o, n) }?;
+        count_resize(o.size(), n.size(), false);
+        Ok(block)
+    }
+
+    unsafe fn shrink(
+        &self,
+        ptr: NonNull<u8>,
+        old: Layout,
+        new: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        let (o, n) = Self::pair(old, new)?;
+        let block = unsafe { Global.shrink(ptr, o, n) }?;
+        count_resize(o.size(), n.size(), false);
+        Ok(block)
+    }
+}
+
+#[cfg(gusset_allocator_api)]
+impl BufferAlloc {
+    #[inline]
+    fn pair(old: Layout, new: Layout) -> Result<(Layout, Layout), AllocError> {
+        let o = Self::buffer_layout(old).ok_or(AllocError)?;
+        let n = Self::buffer_layout(new).ok_or(AllocError)?;
+        Ok((o, n))
     }
 }
 

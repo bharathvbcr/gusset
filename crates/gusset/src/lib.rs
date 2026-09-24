@@ -31,7 +31,7 @@ pub mod header;
 pub mod pool;
 
 // Convenient re-exports
-pub use alloc::{get_alloc_stats, AllocStats, Counting};
+pub use alloc::{get_alloc_stats, AllocStats, BufferAlloc, Counting, ALLOCATOR_API, BUFFER_ALIGN};
 pub use ffi::status::{FfiStatus, FFI_BAD_ARG, FFI_ERR, FFI_OK, FFI_PANIC, FFI_POISONED};
 pub use ffi::{gusset_abi_layout, AbiLayout, GUSSET_ABI_VERSION};
 pub use header::{CallHeader, CancelReason, JobContext};

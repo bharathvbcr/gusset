@@ -44,6 +44,19 @@ pub enum JobOutput {
     Bytes(Vec<u8>),
     /// Pre-allocated or engine-allocated Rust buffer ID for zero-copy egress (R16).
     Buffer(u64),
+    /// Output built directly in buffer memory (Rust 1.100+, stable `Allocator`).
+    ///
+    /// Adopted as the result buffer without a copy: the bytes Go reads are the
+    /// ones the engine wrote. See [`crate::alloc::BufferAlloc`].
+    #[cfg(gusset_allocator_api)]
+    Allocated(Vec<u8, crate::alloc::BufferAlloc>),
+}
+
+#[cfg(gusset_allocator_api)]
+impl From<Vec<u8, crate::alloc::BufferAlloc>> for JobOutput {
+    fn from(v: Vec<u8, crate::alloc::BufferAlloc>) -> Self {
+        JobOutput::Allocated(v)
+    }
 }
 
 impl From<Vec<u8>> for JobOutput {
@@ -274,6 +287,9 @@ pub fn default_dispatch(ctx: &JobContext, input: &[u8]) -> Result<JobOutput, Str
 
     // 3. Diagnostic engine fallback (only for opcode 0)
     if ctx.header().flags & GUSSET_FLAG_DIAGNOSTIC_ENGINE != 0 {
+        if input.first() == Some(&DIAG_MODE_ALLOCATED) {
+            return diagnostic_allocated(ctx, input);
+        }
         return diagnostic_dispatch(ctx, input).map(JobOutput::Bytes);
     }
 
@@ -282,6 +298,42 @@ pub fn default_dispatch(ctx: &JobContext, input: &[u8]) -> Result<JobOutput, Str
          submitting work (submission refused rather than run against a built-in engine)"
             .to_string(),
     )
+}
+
+/// Diagnostic mode 16: a generated output built through the buffer allocator.
+///
+/// `input[1..5]` is the output length (u32 LE), `input[5]` a seed; byte `i` of the
+/// output is `(i as u8) ^ seed`. The output is grown a chunk at a time so every
+/// resize path of [`crate::alloc::BufferAlloc`] runs. Built with the stable
+/// `Allocator` trait it is adopted without a copy; on older toolchains the same
+/// bytes come back as a plain vector, so the Go suite asserts identical results
+/// on both.
+pub const DIAG_MODE_ALLOCATED: u8 = 16;
+
+fn diagnostic_allocated(ctx: &JobContext, input: &[u8]) -> Result<JobOutput, String> {
+    let len = match input.get(1..5) {
+        Some(b) => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize,
+        None => return Err("mode 16 needs a u32 LE length".to_string()),
+    };
+    let seed = input.get(5).copied().unwrap_or(0);
+
+    #[cfg(gusset_allocator_api)]
+    let mut out: Vec<u8, crate::alloc::BufferAlloc> = Vec::new_in(crate::alloc::BufferAlloc);
+    #[cfg(not(gusset_allocator_api))]
+    let mut out: Vec<u8> = Vec::new();
+
+    const CHUNK: usize = 1 << 16;
+    let mut i = 0usize;
+    while i < len {
+        ctx.check().map_err(|r| format!("cancelled: {:?}", r))?;
+        let n = CHUNK.min(len - i);
+        // Fallible growth: an infallible push that cannot allocate aborts the
+        // process, Go included (see BufferAlloc).
+        out.try_reserve(n).map_err(|e| e.to_string())?;
+        out.extend((i..i + n).map(|j| (j as u8) ^ seed));
+        i += n;
+    }
+    Ok(out.into())
 }
 
 /// Built-in diagnostic engine driving the panic zoo and the pitfall suite.
@@ -538,6 +590,11 @@ fn execute_unit(weak: &Weak<Handle>, mut unit: WorkUnit) -> JobResult {
                 }
             ))
         }
+        #[cfg(gusset_allocator_api)]
+        Ok(Ok(JobOutput::Allocated(out))) => match weak.upgrade() {
+            Some(h) => h.adopt_output(out),
+            None => JobResult::Err("handle is closed".to_string()),
+        },
         Ok(Ok(JobOutput::Buffer(buf_id))) => match weak.upgrade() {
             Some(h) => {
                 let live: &Handle = &h;
@@ -730,6 +787,16 @@ impl Handle {
                 pool_size, MAX_POOL_SIZE
             ));
         }
+        // I4 keeps unread tickets at or under pool_size, which is only a
+        // "the pipe never fills" guarantee if the pipe holds that many. Linux
+        // shrinks new pipes to one page (512 tickets) once a user passes
+        // pipe-user-pages-soft, so a 1024-worker pool could stall its
+        // completions for the 10 s write timeout and then drop them. Grow the
+        // pipe to fit, or refuse the pool size instead of discovering it later.
+        if pipe_write_fd >= 0 {
+            sys::ensure_pipe_capacity(pipe_write_fd, pool_size.saturating_mul(8))?;
+        }
+
         let (sender, receiver) = sync_channel(pool_size * 2);
         let receiver = Arc::new(Mutex::new(receiver));
 
@@ -1119,6 +1186,42 @@ impl Handle {
         Ok((id, ptr))
     }
 
+    /// Registers an engine's `BufferAlloc` output as a result buffer, zero-copy.
+    ///
+    /// Runs on the worker inside the engine firewall. An empty output is an empty
+    /// result; one over the 1 GiB ceiling is refused (and freed) exactly as a
+    /// `Vec<u8>` of that size is; memory that cannot be adopted as-is is copied.
+    #[cfg(gusset_allocator_api)]
+    fn adopt_output(&self, out: Vec<u8, crate::alloc::BufferAlloc>) -> JobResult {
+        if out.is_empty() {
+            return JobResult::Ok(Vec::new());
+        }
+        if out.len() > MAX_BUFFER_BYTES {
+            return JobResult::Err(format!(
+                "output {} bytes exceeds maximum {} bytes",
+                out.len(),
+                MAX_BUFFER_BYTES
+            ));
+        }
+        if self.closed.load(Ordering::Acquire) {
+            return JobResult::Err("handle is closed".to_string());
+        }
+        let id = match reserve_id(&self.next_buffer_id) {
+            Ok(id) => id,
+            Err(e) => return JobResult::Err(e),
+        };
+        let buf = match RawBuffer::adopt(out) {
+            Ok(buf) => buf,
+            Err(foreign) => match RawBuffer::from_bytes(&foreign) {
+                Ok(buf) => buf,
+                Err(e) => return JobResult::Err(e),
+            },
+        };
+        // Born as an output, like buf_from_bytes: nothing may return it again.
+        lock_recover(&self.buffers).insert(id, BufferSlot::new(buf, true, false));
+        JobResult::Buffer(id)
+    }
+
     /// Transfers a live buffer to a job's result, refusing any second owner.
     ///
     /// Refused when the buffer is already some result's output, when Go still
@@ -1202,7 +1305,18 @@ impl Handle {
             // spawn replacements onto a handle that is already shutting down.
             let mut workers = lock_recover(&self.workers);
             let handles: Vec<_> = workers.drain(..).collect();
+            let me = thread::current().id();
             for handle in handles {
+                // A worker can run this close itself: it upgrades its Weak to
+                // publish a completion, and if every other Arc was dropped
+                // meanwhile, its upgrade is the last one and Drop runs here, on
+                // that worker. Joining our own thread fails with EDEADLK and
+                // std panics outside any firewall, detaching the rest of the
+                // pool and leaking the pipe. The sender is already gone, so this
+                // worker exits on its next recv; the others are still joined.
+                if handle.thread().id() == me {
+                    continue;
+                }
                 // A worker that died hands back its panic payload here, and
                 // `close` runs under ffi_guard inside an extern "C" export:
                 // a payload whose destructor panics must not unwind from it.
@@ -1275,11 +1389,33 @@ mod tests {
     static SPAWN_FAIL_COUNTDOWN: std::sync::atomic::AtomicI64 =
         std::sync::atomic::AtomicI64::new(-1);
 
-    /// Serialises the tests that arm the injector, since it is process-global and
-    /// `cargo test` runs unit tests on parallel threads.
+    /// The thread that armed the injector. Only its spawns are failed.
+    ///
+    /// The countdown is process-global and `cargo test` runs unit tests on
+    /// parallel threads. `INJECT_LOCK` serialised the tests that *arm* it, but a
+    /// test that merely opens a handle took no lock, so its `open` could consume
+    /// the armed failure and fail with "injected spawn failure" (roughly one run
+    /// in three under `--release`). Scoping the injection to the arming thread
+    /// removes the cross-talk rather than asking every future test to lock.
+    static ARMED_BY: Mutex<Option<thread::ThreadId>> = Mutex::new(None);
+
+    /// Serialises the tests that arm the injector.
     static INJECT_LOCK: Mutex<()> = Mutex::new(());
 
+    fn arm_spawn_failure(after: i64) {
+        *lock_recover(&ARMED_BY) = Some(thread::current().id());
+        SPAWN_FAIL_COUNTDOWN.store(after, Ordering::Release);
+    }
+
+    fn disarm_spawn_failure() {
+        SPAWN_FAIL_COUNTDOWN.store(-1, Ordering::Release);
+        *lock_recover(&ARMED_BY) = None;
+    }
+
     pub(super) fn spawn_should_fail() -> bool {
+        if *lock_recover(&ARMED_BY) != Some(thread::current().id()) {
+            return false;
+        }
         let remaining = SPAWN_FAIL_COUNTDOWN.load(Ordering::Acquire);
         if remaining < 0 {
             return false;
@@ -1337,9 +1473,9 @@ mod tests {
         // Allow two workers, then fail: the failure has to land *after* the Arc and
         // its Drop exist, which is the only window in which the old code could
         // close a descriptor it did not own.
-        SPAWN_FAIL_COUNTDOWN.store(2, Ordering::Release);
+        arm_spawn_failure(2);
         let result = Handle::open(4, w);
-        SPAWN_FAIL_COUNTDOWN.store(-1, Ordering::Release);
+        disarm_spawn_failure();
 
         match result {
             Ok(_) => panic!("injected spawn failure did not fail the open"),

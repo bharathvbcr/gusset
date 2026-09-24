@@ -1,5 +1,7 @@
 use std::env;
 
+include!("allocator_probe.rs");
+
 fn main() {
     // R2: Ensure panic strategy is "unwind". Abort silently disables the panic firewall.
     if let Ok(panic_strategy) = env::var("CARGO_CFG_PANIC") {
@@ -9,4 +11,6 @@ fn main() {
             );
         }
     }
+
+    probe_allocator_api();
 }

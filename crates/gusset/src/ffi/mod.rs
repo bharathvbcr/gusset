@@ -348,12 +348,41 @@ pub unsafe extern "C" fn gusset_submit(
         return FFI_POISONED;
     }
 
-    let call_header = unsafe { *header };
-    let input_slice = if input_len > 0 && !input_ptr.is_null() {
-        unsafe { std::slice::from_raw_parts(input_ptr, input_len) }
-    } else {
+    // Validate (ptr, len) before a slice exists. `slice::from_raw_parts` with a
+    // length past isize::MAX is undefined behaviour — in a debug build its
+    // precondition check aborts rather than unwinds, so no firewall below could
+    // catch it — and a null pointer with a length used to be read as empty input,
+    // running the engine on bytes the caller never sent. A buffer submission
+    // carries its input by id, so any inline bytes alongside it are ignored and
+    // never touched.
+    let input_slice: &[u8] = if buffer_id != 0 || input_len == 0 {
         &[]
+    } else if input_ptr.is_null() {
+        if !status.is_null() {
+            unsafe {
+                ptr::write(
+                    status,
+                    FfiStatus::bad_arg("input_ptr is null with a nonzero input_len"),
+                );
+            }
+        }
+        return FFI_BAD_ARG;
+    } else if input_len > crate::pool::MAX_INLINE_INPUT {
+        if !status.is_null() {
+            unsafe {
+                ptr::write(
+                    status,
+                    FfiStatus::bad_arg(
+                        "inline input exceeds the 4096-byte copy limit; use a Buffer",
+                    ),
+                );
+            }
+        }
+        return FFI_BAD_ARG;
+    } else {
+        unsafe { std::slice::from_raw_parts(input_ptr, input_len) }
     };
+    let call_header = unsafe { *header };
 
     let res = unsafe {
         ffi_guard(status, || {
@@ -429,7 +458,9 @@ pub unsafe extern "C" fn gusset_take(
                 }
                 JobResult::Buffer(buf_id) => {
                     let (buf_ptr, len) = h.buf_get(buf_id).map_err(FfiError::from)?;
-                    // High bit indicates a persistent zero-copy user buffer output (R16)
+                    // High bit: "this id is the result's own buffer; Go frees it once
+                    // the waiter has consumed it" (R16). Ids stay below 1 << 63, so
+                    // the flag loses nothing and Go strips it with &^.
                     ptr::write(out_buf_id, buf_id | (1 << 63));
                     ptr::write(out_ptr, buf_ptr);
                     ptr::write(out_len, len);

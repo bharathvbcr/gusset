@@ -51,3 +51,16 @@ path = "../../tests/rust_status_overwrite.rs"
 [[test]]
 name = "rust_shutdown"
 path = "../../tests/rust_shutdown.rs"
+
+# Stable `Allocator` trait (Rust 1.100+): BufferAlloc, Counting as a local
+# allocator, and zero-copy adoption of engine output. No global allocator, so
+# the manual recorders are what is being measured.
+[[test]]
+name = "rust_allocator_api"
+path = "../../tests/rust_allocator_api.rs"
+
+# Separate binary: installs the counting global allocator to prove BufferAlloc
+# and Counting<Global> never count a byte twice.
+[[test]]
+name = "rust_allocator_counting"
+path = "../../tests/rust_allocator_counting.rs"
