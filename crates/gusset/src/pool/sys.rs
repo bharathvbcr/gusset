@@ -479,17 +479,18 @@ pub fn set_nonblocking(fd: i32) -> Result<()> {
     Ok(())
 }
 
-/// Closes a file descriptor safely with EINTR retry.
+/// Closes a file descriptor.
+///
+/// Called once, never retried. On Linux the descriptor is released even when
+/// close(2) reports EINTR, so a retry could close a number another thread had
+/// just been given for an unrelated file — the double close the descriptor
+/// ownership rules elsewhere exist to prevent. (POSIX leaves the state after
+/// EINTR unspecified; not retrying can at worst leak one descriptor, which is
+/// the safe side.)
 pub fn close_fd(fd: i32) {
     if fd >= 0 {
         unsafe {
-            loop {
-                let ret = libc::close(fd);
-                if ret != 0 && Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                    continue;
-                }
-                break;
-            }
+            libc::close(fd);
         }
     }
 }

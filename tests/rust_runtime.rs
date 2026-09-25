@@ -532,7 +532,8 @@ fn read_exact_within(fd: i32, n: usize, deadline: Duration) -> Vec<u8> {
 ///    the up-to-10 s write backoff.
 /// 2. A completion whose write timed out was logged and dropped. Its Go waiter
 ///    and pool permit were stranded forever; after `pool_size` of them every
-///    Submit blocked. It is now kept and delivered once the reader recovers.
+///    Submit blocked. The worker now keeps retrying until the reader recovers
+///    (or the handle closes), with no later submit needed to trigger it.
 #[test]
 fn a_stalled_completion_counts_as_in_flight_and_is_delivered_after_recovery() {
     let (r, w) = make_pipe();
@@ -556,37 +557,33 @@ fn a_stalled_completion_counts_as_in_flight_and_is_delivered_after_recovery() {
         "a unit whose completion is not yet written is still in flight"
     );
 
-    // Outlast the write timeout: the completion is now undeliverable for good
-    // under the old code.
+    // Outlast the old 10 s write timeout, after which the ticket was dropped.
     std::thread::sleep(Duration::from_millis(10_700));
+    assert_eq!(
+        h.in_flight(),
+        1,
+        "the worker is still delivering; shutdown must not report a clean drain"
+    );
 
-    // The reader recovers.
+    // The reader recovers. The stalled ticket must arrive with no further
+    // submit or completion to trigger it: Go holds a permit per undelivered
+    // ticket, so when all of them are stalled nothing else will ever come.
     let junk = read_exact_within(r, filled, Duration::from_secs(5));
     assert_eq!(junk.len(), filled, "could not drain the filler");
-
-    let second = match h.submit(header, &[0, 2], 0) {
-        Ok(t) => t,
-        Err(e) => panic!("submit after recovery: {e}"),
-    };
-    let bytes = read_exact_within(r, 16, Duration::from_secs(5));
+    let bytes = read_exact_within(r, 8, Duration::from_secs(5));
+    assert_eq!(bytes.len(), 8, "the stalled completion was never delivered");
     assert_eq!(
-        bytes.len(),
-        16,
-        "expected both completions, got {} bytes",
-        bytes.len()
-    );
-    let mut got: Vec<u64> = bytes
-        .as_chunks::<8>()
-        .0
-        .iter()
-        .map(|c| u64::from_ne_bytes(*c))
-        .collect();
-    got.sort_unstable();
-    assert_eq!(
-        got,
-        vec![first, second],
+        u64::from_ne_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]
+        ]),
+        first,
         "the stalled completion was dropped"
     );
+    // The flag is removed just after the write returns; allow that instant.
+    let t0 = Instant::now();
+    while h.in_flight() != 0 && t0.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert!(
         h.take(first).is_ok(),
         "the stalled result must still be collectable"

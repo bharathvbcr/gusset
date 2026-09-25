@@ -51,6 +51,14 @@ const LOG_RING_CAPACITY: usize = 65536;
 
 static LOG_BUFFER: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
+/// Lines `log_event` gave up on because the ring stayed locked.
+///
+/// The lines lost that way are the ones that matter most ("WITHOUT
+/// sigaltstack", "completion write failed", "drain budget expired"), and they
+/// used to vanish with no trace. The count is reported on the next line that
+/// does get in.
+static LOG_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Appends a log line to the bounded internal ring buffer.
 ///
 /// Evicts whole lines from the front until the new line fits, rather than clearing
@@ -83,11 +91,27 @@ pub fn log_event(line: &str) {
             }
             match acquired {
                 Some(b) => b,
-                None => return,
+                None => {
+                    LOG_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
             }
         }
     };
 
+    let dropped = LOG_DROPPED.swap(0, std::sync::atomic::Ordering::Relaxed);
+    if dropped > 0 {
+        let note = format!(
+            "gusset: {} log line(s) dropped while the ring was busy",
+            dropped
+        );
+        append_line(&mut buf, &note);
+    }
+    append_line(&mut buf, line);
+}
+
+/// Appends one line to the ring, evicting whole lines from the front.
+fn append_line(buf: &mut Vec<u8>, line: &str) {
     // Reserve one byte for the newline. Truncate on a char boundary so the ring
     // never hands Go a partial UTF-8 sequence.
     let max_payload = LOG_RING_CAPACITY - 1;

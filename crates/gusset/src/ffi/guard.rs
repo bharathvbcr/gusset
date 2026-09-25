@@ -218,6 +218,9 @@ where
         }
     }
 
+    // Go reuses OS threads across cgo calls; drop any location an earlier,
+    // already-handled panic on this thread left behind (see execute_unit).
+    let _ = take_panic_location();
     let unwind_result = catch_unwind(AssertUnwindSafe(f));
 
     match unwind_result {

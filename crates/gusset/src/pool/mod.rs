@@ -121,8 +121,12 @@ pub fn is_shutting_down() -> bool {
 /// Called from `gusset_init`, making init/shutdown a reversible pair rather than a
 /// one-way door that a second run inside one process could never recover from.
 pub fn rearm() {
+    let _serial = lock_recover(&INIT_SHUTDOWN);
     SHUTTING_DOWN.store(false, Ordering::Release);
 }
+
+/// Serialises `rearm` against an in-progress `shutdown` drain.
+static INIT_SHUTDOWN: Mutex<()> = Mutex::new(());
 
 /// Marks the runtime as shutting down and cancels every job on every live handle.
 ///
@@ -144,13 +148,16 @@ pub fn begin_shutdown() -> usize {
 
 /// Total work units still queued or running across every live handle.
 pub fn total_in_flight() -> usize {
-    let mut registry = lock_recover(&LIVE_HANDLES);
-    registry.retain(|w| w.strong_count() > 0);
-    registry
-        .iter()
-        .filter_map(Weak::upgrade)
-        .map(|h| h.in_flight())
-        .sum()
+    // Upgrade under the registry lock, count after releasing it. Dropping an
+    // upgraded Arc inside the iterator could be the last reference: Drop then
+    // ran `close`, joining every worker with LIVE_HANDLES held, which blocked
+    // every Handle::open and shutdown in the process for the whole join.
+    let live: Vec<Arc<Handle>> = {
+        let mut registry = lock_recover(&LIVE_HANDLES);
+        registry.retain(|w| w.strong_count() > 0);
+        registry.iter().filter_map(Weak::upgrade).collect()
+    };
+    live.iter().map(|h| h.in_flight()).sum()
 }
 
 /// Drains the runtime: refuses new work, cancels in-flight jobs, and waits up to
@@ -162,6 +169,10 @@ pub fn total_in_flight() -> usize {
 /// drained; reporting the count is how the caller learns that rather than being
 /// told the drain succeeded.
 pub fn shutdown(drain: std::time::Duration) -> usize {
+    // Held for the whole drain so a concurrent `rearm` (gusset_init) waits for
+    // it rather than re-enabling submissions halfway through, which let new,
+    // uncancelled work count against the drain.
+    let _serial = lock_recover(&INIT_SHUTDOWN);
     begin_shutdown();
 
     let deadline = std::time::Instant::now() + drain;
@@ -577,6 +588,11 @@ fn execute_unit(weak: &Weak<Handle>, mut unit: WorkUnit) -> JobResult {
         TaskPayload::Shared(buf) => buf.as_slice(),
     };
 
+    // Discard any location a previous, already-handled panic left for this
+    // thread. Entries are keyed by thread id only, and a panic propagated with
+    // `resume_unwind` (rayon, cross-thread joins) never runs the hook, so the
+    // stale entry was reported as this job's panic site.
+    let _ = take_panic_location();
     let dispatch_res = catch_unwind(AssertUnwindSafe(|| default_dispatch(&unit.ctx, slice)));
     unit.ctx.mark_finished();
 
@@ -678,13 +694,6 @@ pub struct Handle {
     /// twice — which would otherwise shut an unrelated file that reused the number.
     pipe_write_fd: AtomicI32,
     pipe_write_lock: Mutex<()>,
-    /// Completion tickets whose write failed (full pipe past the timeout).
-    ///
-    /// A dropped ticket strands its Go waiter and its pool permit forever:
-    /// after `pool_size` of them every Submit blocks. They are retried ahead of
-    /// the next completion and on every submit, so a reader that stalls and
-    /// then recovers still receives every ticket.
-    undelivered: Mutex<Vec<u64>>,
     poisoned: AtomicBool,
     closed: AtomicBool,
     sender: Mutex<Option<SyncSender<WorkUnit>>>,
@@ -748,26 +757,55 @@ fn reserve_id(counter: &AtomicU64) -> Result<u64, String> {
 
 /// Writes a completion ticket, sleeping on a full pipe outside the exclusivity lock.
 ///
-/// `write_ticket` backs off for up to 10s. Holding `pipe_write_lock` across that
-/// sleep stalls every other worker and `Handle::close` behind one full pipe.
-fn write_completion(lock: &Mutex<()>, fd: i32, ticket: u64) -> std::io::Result<()> {
+/// Retries until the write lands, the handle closes, or the pipe reports a hard
+/// error (EPIPE, EBADF). It used to give up after 10 s and set the ticket aside
+/// for a later submit or completion to retry, but Go holds a pool permit until
+/// each ticket is delivered: once every permit was stranded that way, no submit
+/// could reach Rust and no completion was left to retry them, so the waiters
+/// hung forever even after the reader recovered. The worker holding the ticket
+/// is the one thing guaranteed to still be there, so it keeps trying; `close`
+/// sets `closed` first, so it never waits on this loop for longer than one
+/// backoff step.
+///
+/// The descriptor is read under `lock` on every attempt, and `close` swaps it to
+/// -1 and closes it under the same lock: a write can never land on a number
+/// `close` has already released and the process has reused for another file.
+fn write_completion(
+    lock: &Mutex<()>,
+    fd: &AtomicI32,
+    closed: &AtomicBool,
+    ticket: u64,
+) -> std::io::Result<()> {
     let started = std::time::Instant::now();
+    let mut warned = false;
     let mut backoff = std::time::Duration::from_micros(50);
     loop {
         let attempt = {
             let _guard = lock_recover(lock);
-            sys::write_ticket_attempt(fd, ticket)
+            match fd.load(Ordering::Acquire) {
+                -1 => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "handle closed before the completion was written",
+                )),
+                raw => sys::write_ticket_attempt(raw, ticket),
+            }
         };
         match attempt {
             Ok(()) => return Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                if started.elapsed() >= sys::WRITE_TICKET_TIMEOUT {
+                if closed.load(Ordering::Acquire) {
                     return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        format!(
-                            "completion pipe full for {:?}; reader is not draining",
-                            sys::WRITE_TICKET_TIMEOUT
-                        ),
+                        std::io::ErrorKind::NotConnected,
+                        "handle closed while the completion pipe was full",
+                    ));
+                }
+                if !warned && started.elapsed() >= sys::WRITE_TICKET_TIMEOUT {
+                    warned = true;
+                    crate::ffi::log_event(&format!(
+                        "gusset: completion pipe full for {:?}; reader is not draining \
+                         (ticket {} still waiting)",
+                        sys::WRITE_TICKET_TIMEOUT,
+                        ticket
                     ));
                 }
                 std::thread::sleep(backoff);
@@ -831,7 +869,6 @@ impl Handle {
             // Not owned yet: published below, only once the pool is fully up.
             pipe_write_fd: AtomicI32::new(-1),
             pipe_write_lock: Mutex::new(()),
-            undelivered: Mutex::new(Vec::new()),
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             sender: Mutex::new(Some(sender)),
@@ -1039,7 +1076,18 @@ impl Handle {
         if self.closed.load(Ordering::Acquire) {
             return Ok(());
         }
-        workers.retain(|h| !h.is_finished());
+        // Join finished workers rather than dropping their JoinHandles. A
+        // worker that died with a panic payload whose destructor panics would
+        // otherwise hit std's "thread result panicked on drop" abort here, on
+        // the submitting (Go) thread; joining routes the payload through the
+        // same containment close uses.
+        let (done, live): (Vec<_>, Vec<_>) = workers.drain(..).partition(|h| h.is_finished());
+        *workers = live;
+        for h in done {
+            if let Err(payload) = h.join() {
+                drop_panic_payload(payload);
+            }
+        }
 
         if workers.len() < self.pool_size {
             let needed = self.pool_size - workers.len();
@@ -1073,10 +1121,6 @@ impl Handle {
 
         // Auto-respawn replacement workers if any died (I5)
         self.ensure_workers()?;
-
-        // One non-blocking retry of stranded completions, so a recovered
-        // reader gets them even if no further job ever completes.
-        self.retry_undelivered();
 
         // R16: inputs up to 4 KiB copied during submit; larger inputs live in Buffer.
         // Shared buffers are passed as Arc<RawBuffer> without extra byte copy.
@@ -1379,70 +1423,31 @@ impl Handle {
             // 4. Release the completion pipe now that every worker has finished.
             // The swap makes this a once-only transfer: a second close, or a Drop
             // following an explicit close, finds -1 and closes nothing.
+            // Under pipe_write_lock, so no writer holds a loaded copy of the
+            // number while it is closed and possibly reused.
+            let _w = lock_recover(&self.pipe_write_lock);
             let fd = self.pipe_write_fd.swap(-1, Ordering::AcqRel);
             sys::close_fd(fd);
         }
     }
 
-    /// Writes a completion ticket, first flushing any earlier ones that failed.
-    ///
-    /// The lock inside `write_completion` covers one syscall attempt; its
-    /// backoff sleeps for up to 10 s outside it, so one full pipe does not stall
-    /// every other worker and `close`.
+    /// Writes a completion ticket (see [`write_completion`] for the retry rule).
     fn publish_completion(&self, ticket: u64) {
-        let fd = self.pipe_write_fd.load(Ordering::Acquire);
-        let mut pending = std::mem::take(&mut *lock_recover(&self.undelivered));
-        pending.push(ticket);
-        let mut failed: Vec<u64> = Vec::new();
-        for t in pending {
-            if !failed.is_empty() {
-                failed.push(t); // keep order; the pipe is not draining
-                continue;
-            }
-            if let Err(e) = write_completion(&self.pipe_write_lock, fd, t) {
-                self.completion_write_failed(t, &e);
-                failed.push(t);
-            }
-        }
-        if !failed.is_empty() {
-            lock_recover(&self.undelivered).extend(failed);
-        }
-    }
-
-    /// Single non-blocking pass over stranded tickets, stopping at the first
-    /// one the pipe will not take.
-    fn retry_undelivered(&self) {
-        let mut pending = lock_recover(&self.undelivered);
-        if pending.is_empty() {
-            return;
-        }
-        let fd = self.pipe_write_fd.load(Ordering::Acquire);
-        let mut sent = 0;
-        for &t in pending.iter() {
-            let ok = {
-                let _g = lock_recover(&self.pipe_write_lock);
-                sys::write_ticket_attempt(fd, t).is_ok()
-            };
-            if !ok {
-                break;
-            }
-            sent += 1;
-        }
-        pending.drain(..sent);
-    }
-
-    fn completion_write_failed(&self, ticket: u64, e: &std::io::Error) {
-        crate::ffi::log_event(&format!(
-            "gusset: completion write failed for ticket {}: {} (kept for retry)",
-            ticket, e
-        ));
-        // EPIPE/EBADF: the reader is gone for good, so no retry will ever land.
-        // Refuse new work instead of accepting jobs whose completions cannot be
-        // delivered.
-        if !matches!(
-            e.kind(),
-            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        if let Err(e) = write_completion(
+            &self.pipe_write_lock,
+            &self.pipe_write_fd,
+            &self.closed,
+            ticket,
         ) {
+            if e.kind() == std::io::ErrorKind::NotConnected {
+                return; // closing: the waiter is told "closed" by Go
+            }
+            crate::ffi::log_event(&format!(
+                "gusset: completion write failed for ticket {}: {}",
+                ticket, e
+            ));
+            // EPIPE/EBADF: the reader is gone for good. Refuse new work
+            // instead of accepting jobs whose completions cannot be delivered.
             self.poisoned.store(true, Ordering::Release);
         }
     }
