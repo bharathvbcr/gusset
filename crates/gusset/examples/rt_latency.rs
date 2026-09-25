@@ -16,7 +16,10 @@ fn main() {
         flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
         ..Default::default()
     };
-    let n = 20000;
+    let n: u32 = std::env::var("N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20000);
     let t0 = Instant::now();
     for _ in 0..n {
         let t = h.submit(hdr, &[0], 0).unwrap_or_else(|e| panic!("{e}"));

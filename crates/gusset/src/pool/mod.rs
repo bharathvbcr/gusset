@@ -11,14 +11,60 @@ use crate::header::{
 };
 use queue::{JobQueue, PushError, QueueSender};
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::thread;
 use sys::RawBuffer;
 
+/// Hasher for ids Gusset assigns itself (tickets, buffer ids, opcodes).
+///
+/// std's default SipHash-1-3 exists to resist HashDoS, and it cost ~470
+/// instructions of a ~3,900-instruction round trip (callgrind) across the
+/// results/cancel-flag inserts, lookups and removes each call makes. The keys
+/// here are not attacker-chosen: tickets and buffer ids come from Rust's own
+/// counters, and Go can only look them up. A Fibonacci multiply spreads
+/// sequential ids across hashbrown's high control bits and low bucket bits.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        // Not used by u64/u32 keys; a correct fallback for anything else.
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(8) ^ b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    #[inline]
+    fn write_u64(&mut self, n: u64) {
+        self.0 = n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    #[inline]
+    fn write_u32(&mut self, n: u32) {
+        self.write_u64(n as u64);
+    }
+}
+
+/// A map keyed by a Gusset-assigned id.
+pub(crate) type IdMap<K, V> = HashMap<K, V, BuildHasherDefault<IdHasher>>;
+
+/// Largest input carried inside the work unit itself, with no heap allocation.
+///
+/// Request/response payloads are usually tiny (an opcode, a key, a few
+/// fields); each used to cost a `to_vec` malloc on submit and a free on the
+/// worker, ~600 instructions of allocator work per call with the result's.
+const SMALL_INPUT: usize = 56;
+
 /// Task payload for work units (R16 zero-copy guarantee).
 enum TaskPayload {
+    /// Up to SMALL_INPUT bytes, copied into the unit: no allocation.
+    Small { len: u8, bytes: [u8; SMALL_INPUT] },
     /// Inlined payload for small inputs (<= 4 KiB).
     Inline(Vec<u8>),
     /// Reference-counted shared buffer for large inputs (> 4 KiB).
@@ -209,7 +255,7 @@ pub type EngineFn =
     Arc<dyn Fn(&JobContext, &[u8]) -> Result<JobOutput, String> + Send + Sync + 'static>;
 
 static GLOBAL_ENGINE: RwLock<Option<EngineFn>> = RwLock::new(None);
-static ENGINE_REGISTRY: RwLock<Option<HashMap<u32, EngineFn>>> = RwLock::new(None);
+static ENGINE_REGISTRY: RwLock<Option<IdMap<u32, EngineFn>>> = RwLock::new(None);
 
 /// Sets the global engine execution handler.
 ///
@@ -234,7 +280,7 @@ where
     R: Into<JobOutput> + 'static,
 {
     let mut w = ENGINE_REGISTRY.write().unwrap_or_else(|e| e.into_inner());
-    let map = w.get_or_insert_with(HashMap::new);
+    let map = w.get_or_insert_with(IdMap::default);
     map.insert(
         opcode,
         Arc::new(move |ctx, input| f(ctx, input).map(Into::into)),
@@ -585,6 +631,7 @@ fn execute_unit(weak: &Weak<Handle>, mut unit: WorkUnit) -> JobResult {
     }
 
     let slice: &[u8] = match &unit.payload {
+        TaskPayload::Small { len, bytes } => &bytes[..*len as usize],
         TaskPayload::Inline(vec) => vec.as_slice(),
         TaskPayload::Shared(buf) => buf.as_slice(),
     };
@@ -698,14 +745,19 @@ pub struct Handle {
     poisoned: AtomicBool,
     closed: AtomicBool,
     sender: Mutex<Option<QueueSender<WorkUnit>>>,
-    results: Mutex<HashMap<u64, JobResult>>,
-    cancel_flags: Mutex<HashMap<u64, Arc<AtomicBool>>>,
-    buffers: Mutex<HashMap<u64, BufferSlot>>,
+    results: Mutex<IdMap<u64, JobResult>>,
+    cancel_flags: Mutex<IdMap<u64, Arc<AtomicBool>>>,
+    buffers: Mutex<IdMap<u64, BufferSlot>>,
     next_buffer_id: AtomicU64,
     next_worker_id: AtomicU64,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
     receiver: Arc<JobQueue<WorkUnit>>,
     self_weak: Mutex<Weak<Handle>>,
+    /// Workers that have exited since the last reap. Bumped by a drop guard
+    /// in each worker (normal exit or unwind), read by `ensure_workers` so the
+    /// common case — every worker alive — costs one atomic load per submit
+    /// instead of a mutex, a scan of every JoinHandle and two Vec allocations.
+    exited: Arc<AtomicUsize>,
 }
 
 /// Default worker count when the caller passes 0.
@@ -882,14 +934,15 @@ impl Handle {
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             sender: Mutex::new(Some(sender)),
-            results: Mutex::new(HashMap::new()),
-            cancel_flags: Mutex::new(HashMap::new()),
-            buffers: Mutex::new(HashMap::new()),
+            results: Mutex::new(IdMap::default()),
+            cancel_flags: Mutex::new(IdMap::default()),
+            buffers: Mutex::new(IdMap::default()),
             next_buffer_id: AtomicU64::new(1),
             next_worker_id: AtomicU64::new(0),
             workers: Mutex::new(Vec::with_capacity(pool_size)),
             receiver,
             self_weak: Mutex::new(Weak::new()),
+            exited: Arc::new(AtomicUsize::new(0)),
         });
 
         // Store weak self reference for worker threads. If this were skipped the
@@ -951,6 +1004,7 @@ impl Handle {
             }
 
             let weak_clone = weak_handle.clone();
+            let exited = Arc::clone(&self.exited);
             let receiver_clone = Arc::clone(&self.receiver);
             // Monotonic, so a respawned worker never reuses a retired worker's name
             // in a thread dump (workers.len() shrinks when dead entries are reaped).
@@ -962,6 +1016,15 @@ impl Handle {
 
             let join_handle = builder
                 .spawn(move || {
+                    // Counted on any exit, unwinding included, so a dead worker
+                    // is always noticed by the next submit.
+                    struct ExitMark(Arc<AtomicUsize>);
+                    impl Drop for ExitMark {
+                        fn drop(&mut self) {
+                            self.0.fetch_add(1, Ordering::Release);
+                        }
+                    }
+                    let _exit_mark = ExitMark(exited);
                     // A write to a pipe whose read end is gone raises SIGPIPE on
                     // the writing thread. On a thread Go did not create, Go's
                     // handler re-raises it with the default action and the whole
@@ -1074,6 +1137,10 @@ impl Handle {
 
     /// Verifies worker health and respawns replacement workers if any died (I5).
     fn ensure_workers(&self) -> Result<(), String> {
+        // Fast path: no worker has exited, so there is nothing to reap.
+        if self.exited.load(Ordering::Acquire) == 0 {
+            return Ok(());
+        }
         let mut workers = lock_recover(&self.workers);
         // Re-check under the lock: close drains this vec and then joins. A spawn
         // that raced past a pre-lock closed check would leave JoinHandles nobody
@@ -1088,6 +1155,9 @@ impl Handle {
         // same containment close uses.
         let (done, live): (Vec<_>, Vec<_>) = workers.drain(..).partition(|h| h.is_finished());
         *workers = live;
+        // Only the reaped ones: an exit racing this reap stays counted and is
+        // picked up by the next submit.
+        self.exited.fetch_sub(done.len(), Ordering::AcqRel);
         for h in done {
             if let Err(payload) = h.join() {
                 drop_panic_payload(payload);
@@ -1142,7 +1212,16 @@ impl Handle {
                 MAX_INLINE_INPUT
             ));
         } else {
-            TaskPayload::Inline(input.to_vec())
+            if input.len() <= SMALL_INPUT {
+                let mut bytes = [0u8; SMALL_INPUT];
+                bytes[..input.len()].copy_from_slice(input);
+                TaskPayload::Small {
+                    len: input.len() as u8,
+                    bytes,
+                }
+            } else {
+                TaskPayload::Inline(input.to_vec())
+            }
         };
 
         let ticket = reserve_id(&NEXT_TICKET)?;
