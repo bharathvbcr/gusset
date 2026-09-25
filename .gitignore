@@ -10,3 +10,6 @@ bench/results/*.tmp
 .devcouncil/*
 !.devcouncil/
 !.devcouncil/config.yaml
+
+# bench/record.sh holds this while a recording runs and removes it on exit.
+bench/results/.record.lock/
