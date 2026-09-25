@@ -38,11 +38,23 @@ assert_eq_align!(CallHeader, u64);
 /// byte cannot steer a submission into a panic.
 pub const GUSSET_FLAG_DIAGNOSTIC_ENGINE: u32 = 1 << 0;
 
+/// The caller reads completion records, not bare tickets, from the pipe.
+///
+/// With this bit set, a successful result of at most
+/// [`INLINE_RESULT_MAX`](crate::pool::INLINE_RESULT_MAX) bytes is written into
+/// the completion pipe with its ticket, and never stored for `gusset_take`: the
+/// caller skips two FFI calls (`gusset_take`, `gusset_buf_free`), a registry
+/// buffer, and the results-map insert and remove. Any other outcome is a bare
+/// ticket as before. The record format is in `gusset.h`. Go always sets it; a
+/// C host that only understands 8-byte tickets leaves it clear and is
+/// unaffected.
+pub const GUSSET_FLAG_INLINE_COMPLETION: u32 = 1 << 1;
+
 /// Mask of every `flags` bit this ABI version understands.
 ///
 /// A submission carrying an unknown bit is rejected rather than silently ignored,
 /// so a newer caller cannot believe a flag took effect against an older library.
-pub const GUSSET_FLAGS_KNOWN: u32 = GUSSET_FLAG_DIAGNOSTIC_ENGINE;
+pub const GUSSET_FLAGS_KNOWN: u32 = GUSSET_FLAG_DIAGNOSTIC_ENGINE | GUSSET_FLAG_INLINE_COMPLETION;
 
 /// Cancellation or timeout reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,9 +196,13 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_flag_is_bit_zero_and_is_the_only_known_bit() {
+    fn known_flags_are_exactly_the_documented_bits() {
         assert_eq!(GUSSET_FLAG_DIAGNOSTIC_ENGINE, 1);
-        assert_eq!(GUSSET_FLAGS_KNOWN, GUSSET_FLAG_DIAGNOSTIC_ENGINE);
+        assert_eq!(GUSSET_FLAG_INLINE_COMPLETION, 2);
+        assert_eq!(
+            GUSSET_FLAGS_KNOWN,
+            GUSSET_FLAG_DIAGNOSTIC_ENGINE | GUSSET_FLAG_INLINE_COMPLETION
+        );
         // Anything outside the known mask must be detectable as unknown.
         assert_ne!((1u32 << 31) & !GUSSET_FLAGS_KNOWN, 0);
     }

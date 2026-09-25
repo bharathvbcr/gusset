@@ -758,6 +758,10 @@ pub struct Handle {
     /// common case — every worker alive — costs one atomic load per submit
     /// instead of a mutex, a scan of every JoinHandle and two Vec allocations.
     exited: Arc<AtomicUsize>,
+    /// Whether the completion pipe holds `pool_size` inline records. If it
+    /// could only be sized for bare tickets, inline completions are off and
+    /// every caller gets tickets, whatever it asked for.
+    inline_ok: bool,
 }
 
 /// Default worker count when the caller passes 0.
@@ -788,7 +792,7 @@ const ID_CEILING: u64 = TAKE_OWNED_FLAG;
 
 /// Set on `gusset_take`'s buffer id when that id is the result's own buffer,
 /// which the caller frees once consumed (`GUSSET_TAKE_OWNED_FLAG`). Every id is
-/// below [`ID_CEILING`], which is this bit, so the flag never collides.
+/// below `ID_CEILING`, which is this bit, so the flag never collides.
 pub const TAKE_OWNED_FLAG: u64 = 1 << 63;
 
 /// Ticket counter shared by every handle in the process.
@@ -838,6 +842,7 @@ fn write_completion(
     fd: &AtomicI32,
     closed: &AtomicBool,
     ticket: u64,
+    record: &[u8],
 ) -> std::io::Result<()> {
     let started = std::time::Instant::now();
     let mut warned = false;
@@ -850,7 +855,7 @@ fn write_completion(
                     std::io::ErrorKind::NotConnected,
                     "handle closed before the completion was written",
                 )),
-                raw => sys::write_ticket_attempt(raw, ticket),
+                raw => sys::write_record_attempt(raw, record),
             }
         };
         match attempt {
@@ -877,6 +882,32 @@ fn write_completion(
             Err(err) => return Err(err),
         }
     }
+}
+
+/// Largest successful result carried inline in the completion pipe
+/// (see `GUSSET_FLAG_INLINE_COMPLETION`). With the ticket and length words a
+/// record is at most [`INLINE_RECORD_MAX`] bytes, far below `PIPE_BUF`, so a
+/// record is written atomically and records never interleave.
+pub const INLINE_RESULT_MAX: usize = 48;
+
+/// Set on a record's first word when an inline result follows. Tickets stay
+/// below 2^63 (`ID_CEILING`), so the bit never collides with a ticket.
+pub const INLINE_RECORD_FLAG: u64 = 1 << 63;
+
+/// Largest completion record: ticket word, length word, payload padded to 8.
+pub const INLINE_RECORD_MAX: usize = 16 + INLINE_RESULT_MAX;
+
+/// Builds an inline completion record into `buf`, returning its length.
+///
+/// Layout, native-endian u64 words: `ticket | INLINE_RECORD_FLAG`, `len`, then
+/// `len` bytes zero-padded to a multiple of 8.
+fn inline_record(buf: &mut [u8; INLINE_RECORD_MAX], ticket: u64, data: &[u8]) -> usize {
+    buf[..8].copy_from_slice(&(ticket | INLINE_RECORD_FLAG).to_ne_bytes());
+    buf[8..16].copy_from_slice(&(data.len() as u64).to_ne_bytes());
+    let padded = data.len().div_ceil(8) * 8;
+    buf[16..16 + data.len()].copy_from_slice(data);
+    buf[16 + data.len()..16 + padded].fill(0);
+    16 + padded
 }
 
 /// Explicit worker stack size (R8).
@@ -920,9 +951,26 @@ impl Handle {
         // pipe-user-pages-soft, so a 1024-worker pool could stall its
         // completions for the 10 s write timeout and then drop them. Grow the
         // pipe to fit, or refuse the pool size instead of discovering it later.
-        if pipe_write_fd >= 0 {
-            sys::ensure_pipe_capacity(pipe_write_fd, pool_size.saturating_mul(8))?;
-        }
+        //
+        // Inline completion records (up to INLINE_RECORD_MAX bytes each) need
+        // pool_size of those. When the pipe cannot grow that far, fall back to
+        // 8-byte tickets for every result rather than refuse the pool.
+        let inline_ok = if pipe_write_fd < 0 {
+            true
+        } else if cfg!(target_os = "linux") {
+            if sys::ensure_pipe_capacity(pipe_write_fd, pool_size.saturating_mul(INLINE_RECORD_MAX))
+                .is_ok()
+            {
+                true
+            } else {
+                sys::ensure_pipe_capacity(pipe_write_fd, pool_size.saturating_mul(8))?;
+                false
+            }
+        } else {
+            // Elsewhere the capacity cannot be queried. Every BSD-derived pipe
+            // holds at least 16 KiB, so allow records only while they fit there.
+            pool_size.saturating_mul(INLINE_RECORD_MAX) <= 16 * 1024
+        };
 
         let (sender, receiver) = JobQueue::new(pool_size * 2);
 
@@ -943,6 +991,7 @@ impl Handle {
             receiver,
             self_weak: Mutex::new(Weak::new()),
             exited: Arc::new(AtomicUsize::new(0)),
+            inline_ok,
         });
 
         // Store weak self reference for worker threads. If this were skipped the
@@ -1089,6 +1138,9 @@ impl Handle {
                             None => break,
                         };
                         let ticket = unit.ticket;
+                        let wants_inline = unit.ctx.header().flags
+                            & crate::header::GUSSET_FLAG_INLINE_COMPLETION
+                            != 0;
 
                         // The engine call has its own firewall inside execute_unit;
                         // this one covers everything around it, including dropping
@@ -1117,8 +1169,24 @@ impl Handle {
                         // Store result and wake netpoller if handle still alive
                         if let Some(h) = weak_clone.upgrade() {
                             let result = materialize_result(&h, result);
-                            lock_recover(&h.results).insert(ticket, result);
-                            h.publish_completion(ticket);
+                            let mut record = [0u8; INLINE_RECORD_MAX];
+                            match result {
+                                // Small success: the bytes ride in the record;
+                                // nothing is stored for a gusset_take.
+                                JobResult::Ok(ref data)
+                                    if wants_inline
+                                        && h.inline_ok
+                                        && data.len() <= INLINE_RESULT_MAX =>
+                                {
+                                    let n = inline_record(&mut record, ticket, data);
+                                    drop(result);
+                                    h.publish_completion(ticket, &record[..n]);
+                                }
+                                other => {
+                                    lock_recover(&h.results).insert(ticket, other);
+                                    h.publish_completion(ticket, &ticket.to_ne_bytes());
+                                }
+                            }
                             // Only now is the unit out of flight: shutdown's drain
                             // counts cancel flags, and removing this one before the
                             // write let `gusset_shutdown` report a clean drain while
@@ -1516,12 +1584,13 @@ impl Handle {
     }
 
     /// Writes a completion ticket (see [`write_completion`] for the retry rule).
-    fn publish_completion(&self, ticket: u64) {
+    fn publish_completion(&self, ticket: u64, record: &[u8]) {
         if let Err(e) = write_completion(
             &self.pipe_write_lock,
             &self.pipe_write_fd,
             &self.closed,
             ticket,
+            record,
         ) {
             if e.kind() == std::io::ErrorKind::NotConnected {
                 return; // closing: the waiter is told "closed" by Go
@@ -1772,6 +1841,97 @@ mod tests {
 
         handle.close();
         // SAFETY: the read end is still owned by this test; close() took the write end.
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// Reads exactly `n` bytes from the pipe's read end.
+    fn read_exact_fd(r: i32, n: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; n];
+        let mut got = 0usize;
+        while got < n {
+            // SAFETY: reading into the unfilled tail of a valid buffer.
+            let m =
+                unsafe { libc::read(r, buf.as_mut_ptr().add(got) as *mut libc::c_void, n - got) };
+            assert!(m > 0, "completion pipe read failed");
+            got += m as usize;
+        }
+        buf
+    }
+
+    fn word(b: &[u8]) -> u64 {
+        let mut w = [0u8; 8];
+        w.copy_from_slice(&b[..8]);
+        u64::from_ne_bytes(w)
+    }
+
+    /// GUSSET_FLAG_INLINE_COMPLETION: a success of up to INLINE_RESULT_MAX
+    /// bytes arrives in the record and is never stored; one byte more, an
+    /// error, or a caller without the flag gets a bare ticket and a take.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn inline_completion_records_carry_small_results_only_when_asked() {
+        use crate::header::GUSSET_FLAG_INLINE_COMPLETION;
+        let (r, w) = make_pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+        assert!(
+            handle.inline_ok,
+            "a 1-worker pool always fits inline records"
+        );
+        let inline = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE | GUSSET_FLAG_INLINE_COMPLETION,
+            ..Default::default()
+        };
+        let plain = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..Default::default()
+        };
+        let submit = |h: CallHeader, input: &[u8]| match handle.submit(h, input, 0) {
+            Ok(t) => t,
+            Err(e) => panic!("submit failed: {}", e),
+        };
+
+        // Mode 0 echoes its input, mode byte included.
+        for len in [1usize, 7, 8, 9, INLINE_RESULT_MAX - 1, INLINE_RESULT_MAX] {
+            let mut input: Vec<u8> = (0..len as u8).collect();
+            input[0] = 0;
+            let ticket = submit(inline, &input);
+            let head = read_exact_fd(r, 16);
+            assert_eq!(word(&head), ticket | INLINE_RECORD_FLAG, "len {len}");
+            assert_eq!(word(&head[8..]), len as u64);
+            let body = read_exact_fd(r, len.div_ceil(8) * 8);
+            assert_eq!(&body[..len], &input[..], "len {len}");
+            assert!(body[len..].iter().all(|&b| b == 0), "padding is zeroed");
+            assert!(
+                handle.take(ticket).is_err(),
+                "an inline result is not stored"
+            );
+        }
+
+        let bare = |ticket: u64| {
+            let rec = read_exact_fd(r, 8);
+            assert_eq!(word(&rec), ticket, "expected a bare ticket");
+        };
+        // One byte over the limit: stored, bare ticket.
+        let big = vec![0u8; INLINE_RESULT_MAX + 1];
+        let t = submit(inline, &big);
+        bare(t);
+        assert!(matches!(handle.take(t), Ok(JobResult::Ok(ref v)) if v == &big));
+        // Without the flag, even a one-byte result is a bare ticket.
+        let t = submit(plain, &[0]);
+        bare(t);
+        assert!(matches!(handle.take(t), Ok(JobResult::Ok(ref v)) if v == &[0]));
+        // A panic is never inlined (last: it poisons the handle).
+        let t = submit(inline, &[1]);
+        bare(t);
+        assert!(matches!(handle.take(t), Ok(JobResult::Panic { .. })));
+
+        handle.close();
+        // SAFETY: the read end is still owned by this test.
         unsafe {
             libc::close(r);
         }

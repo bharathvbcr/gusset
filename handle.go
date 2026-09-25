@@ -203,7 +203,7 @@ func Open(opts ...Option) (*Handle, error) {
 
 	state := &handleState{
 		ptr:           hPtr,
-		callFlags:     cfg.callFlags,
+		callFlags:     cfg.callFlags | ffi.FlagInlineCompletion,
 		defaultOpcode: cfg.defaultOpcode,
 		bufBudget:     cfg.bufferBudget,
 		sem:           make(chan struct{}, cfg.poolSize),
@@ -239,7 +239,7 @@ func Open(opts ...Option) (*Handle, error) {
 	return h, nil
 }
 
-// drainPipe reads 8-byte completion tickets from the pipe.
+// drainPipe reads completion records from the pipe and routes each result.
 func drainPipe(s *handleState) {
 	defer close(s.drainDone)
 	tr := newTicketReader(s.pipe)
@@ -249,7 +249,7 @@ func drainPipe(s *handleState) {
 	tr.inFlight = func() bool { return len(s.sem) == 1 }
 
 	for {
-		ticket, err := tr.next()
+		ticket, inlineData, inline, err := tr.next()
 		if err != nil {
 			// Pipe closed on handle shutdown or EOF
 			s.mu.Lock()
@@ -275,6 +275,19 @@ func drainPipe(s *handleState) {
 				_ = s.bufFree(id)
 			}
 			return
+		}
+
+		// A small success arrived whole in its record: no gusset_take, no
+		// registry buffer, no gusset_buf_free, and no cgoMu. The bytes alias
+		// the reader's buffer, so they are copied out before the next read.
+		if inline {
+			var out []byte
+			if len(inlineData) > 0 {
+				out = make([]byte, len(inlineData))
+				copy(out, inlineData)
+			}
+			s.deliver(ticket, callResult{data: out}, 0)
+			continue
 		}
 
 		// Synchronize with handle close to eliminate UAF on s.ptr, without
@@ -342,7 +355,7 @@ const ticketReaderSpin = 50 * time.Microsecond
 // the reader as before, so a long-running engine never costs a busy core.
 const ticketReaderSpinBusy = 200 * time.Microsecond
 
-// ticketReader reads 8-byte completion tickets, several per system call.
+// ticketReader reads completion records, several per system call.
 //
 // It used to be one io.ReadFull of 8 bytes per ticket, which under parallel
 // load is one read syscall and one netpoller round per completion; a burst of
@@ -375,10 +388,43 @@ func newTicketReader(f *os.File) *ticketReader {
 	return tr
 }
 
-func (tr *ticketReader) next() (uint64, error) {
-	for tr.end-tr.start < 8 {
-		// Keep a partial ticket at the front; a short read is permitted
-		// even though an 8-byte write is atomic under PIPE_BUF.
+// next returns the next completion: its ticket and, for an inline record
+// (GUSSET_FLAG_INLINE_COMPLETION), the result bytes, which alias the read
+// buffer and are valid only until the following call. inline is false for a
+// bare ticket, whose outcome is collected with gusset_take.
+func (tr *ticketReader) next() (ticket uint64, data []byte, inline bool, err error) {
+	if err := tr.need(8); err != nil {
+		return 0, nil, false, err
+	}
+	w := binary.NativeEndian.Uint64(tr.buf[tr.start : tr.start+8])
+	if w&ffi.InlineRecordFlag == 0 {
+		tr.start += 8
+		tr.lastTicket = time.Now()
+		return w, nil, false, nil
+	}
+	if err := tr.need(16); err != nil {
+		return 0, nil, false, err
+	}
+	n := binary.NativeEndian.Uint64(tr.buf[tr.start+8 : tr.start+16])
+	if n > uint64(ffi.InlineResultMax) {
+		// Rust never writes this; a stream that does is not ours to parse.
+		return 0, nil, false, fmt.Errorf("gusset: corrupt completion record (length %d)", n)
+	}
+	size := 16 + (int(n)+7)&^7
+	if err := tr.need(size); err != nil {
+		return 0, nil, false, err
+	}
+	data = tr.buf[tr.start+16 : tr.start+16+int(n)]
+	tr.start += size
+	tr.lastTicket = time.Now()
+	return w &^ ffi.InlineRecordFlag, data, true, nil
+}
+
+// need buffers at least k unread bytes (k <= len(buf)). A record is one
+// atomic write under PIPE_BUF, but a read may still end partway through one
+// when the buffer fills, so the tail is kept and completed by the next read.
+func (tr *ticketReader) need(k int) error {
+	for tr.end-tr.start < k {
 		if tr.start > 0 {
 			copy(tr.buf[:], tr.buf[tr.start:tr.end])
 			tr.end -= tr.start
@@ -386,14 +432,11 @@ func (tr *ticketReader) next() (uint64, error) {
 		}
 		n, err := tr.fill(tr.buf[tr.end:])
 		tr.end += n
-		if err != nil && tr.end-tr.start < 8 {
-			return 0, err
+		if err != nil && tr.end-tr.start < k {
+			return err
 		}
 	}
-	t := binary.NativeEndian.Uint64(tr.buf[tr.start : tr.start+8])
-	tr.start += 8
-	tr.lastTicket = time.Now()
-	return t, nil
+	return nil
 }
 
 // fill reads what is available, polling briefly before letting the netpoller

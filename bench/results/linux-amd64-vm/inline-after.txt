@@ -1,0 +1,48 @@
+goos: linux
+goarch: amd64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Intel(R) Xeon(R) Processor @ 2.10GHz
+BenchmarkGussetCallNoop-4       	  160227	      8529 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetCallNoop-4       	  145330	      7609 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-4   	  442526	      3127 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-4   	  333759	      3346 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-4     	  156236	      7809 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-4     	  146052	      8851 ns/op	     160 B/op	       2 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.697s
+goos: linux
+goarch: amd64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Intel(R) Xeon(R) Processor @ 2.10GHz
+BenchmarkGussetCallNoop-4       	  176011	      7879 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetCallNoop-4       	  196284	      7274 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-4   	  400651	      3221 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-4   	  312686	      3331 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-4     	  149710	      7679 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-4     	  156714	      7500 ns/op	     160 B/op	       2 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.828s
+goos: linux
+goarch: amd64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Intel(R) Xeon(R) Processor @ 2.10GHz
+BenchmarkGussetCallNoop-4       	  165442	      8368 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetCallNoop-4       	  145816	      7729 ns/op	     161 B/op	       3 allocs/op
+BenchmarkGussetCallParallel-4   	  390276	      2937 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-4   	  487152	      2976 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-4     	  138928	      7425 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-4     	  148429	      7440 ns/op	     160 B/op	       2 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.624s
+goos: linux
+goarch: amd64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Intel(R) Xeon(R) Processor @ 2.10GHz
+BenchmarkGussetCallNoop-4       	  154234	      7414 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetCallNoop-4       	  155616	      7255 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-4   	  361180	      3250 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetCallParallel-4   	  440137	      3424 ns/op	     159 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-4     	  140480	      7565 ns/op	     160 B/op	       2 allocs/op
+BenchmarkGussetSubmitWait-4     	  165645	      7096 ns/op	     160 B/op	       2 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	11.406s

@@ -71,8 +71,11 @@ fn go_const(src: &str, name: &str) -> u64 {
 #[test]
 fn constants_agree_across_rust_c_and_go() {
     use gusset::ffi::status::{FFI_BAD_ARG, FFI_ERR, FFI_OK, FFI_PANIC, FFI_POISONED};
-    use gusset::header::GUSSET_FLAG_DIAGNOSTIC_ENGINE;
-    use gusset::pool::{MAX_BUFFER_BYTES, MAX_INLINE_INPUT, MAX_POOL_SIZE, TAKE_OWNED_FLAG};
+    use gusset::header::{GUSSET_FLAG_DIAGNOSTIC_ENGINE, GUSSET_FLAG_INLINE_COMPLETION};
+    use gusset::pool::{
+        INLINE_RECORD_FLAG, INLINE_RECORD_MAX, INLINE_RESULT_MAX, MAX_BUFFER_BYTES,
+        MAX_INLINE_INPUT, MAX_POOL_SIZE, TAKE_OWNED_FLAG,
+    };
 
     let h = read("internal/ffi/gusset.h");
     let rust_c: &[(&str, u64)] = &[
@@ -89,6 +92,13 @@ fn constants_agree_across_rust_c_and_go() {
         ("GUSSET_MAX_INLINE_INPUT", MAX_INLINE_INPUT as u64),
         ("GUSSET_MAX_BUFFER_BYTES", MAX_BUFFER_BYTES as u64),
         ("GUSSET_TAKE_OWNED_FLAG", TAKE_OWNED_FLAG),
+        (
+            "GUSSET_FLAG_INLINE_COMPLETION",
+            GUSSET_FLAG_INLINE_COMPLETION as u64,
+        ),
+        ("GUSSET_INLINE_RECORD_FLAG", INLINE_RECORD_FLAG),
+        ("GUSSET_INLINE_RESULT_MAX", INLINE_RESULT_MAX as u64),
+        ("GUSSET_INLINE_RECORD_MAX", INLINE_RECORD_MAX as u64),
     ];
     for &(name, want) in rust_c {
         assert_eq!(

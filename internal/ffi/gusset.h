@@ -20,12 +20,29 @@ extern "C" {
  * engine, which selects behaviour from the first input byte. Production callers
  * never set it, so untrusted payload data cannot steer a call into a panic. */
 #define GUSSET_FLAG_DIAGNOSTIC_ENGINE 1u
+/* Bit 1: the caller reads completion records, not bare 8-byte tickets. With it
+ * set, a successful result of at most GUSSET_INLINE_RESULT_MAX bytes arrives in
+ * the pipe with its ticket and is never stored for gusset_take. Every record is
+ * a whole number of native-endian u64 words, written atomically:
+ *   word 0: ticket, with GUSSET_INLINE_RECORD_FLAG set if a result follows
+ *   word 1: result length n (only when the flag is set)
+ *   then n result bytes, zero-padded to a multiple of 8
+ * Without the flag in word 0 the record is that one word, a bare ticket: take
+ * the outcome with gusset_take as usual. A host that leaves this bit clear on
+ * every submission only ever sees bare tickets. The library may deliver a
+ * bare ticket for any job, including when the pipe could not be grown to hold
+ * pool_size records of GUSSET_INLINE_RECORD_MAX bytes. */
+#define GUSSET_FLAG_INLINE_COMPLETION 2u
+#define GUSSET_INLINE_RECORD_FLAG (1ull << 63)
+#define GUSSET_INLINE_RESULT_MAX 48u
+#define GUSSET_INLINE_RECORD_MAX 64u
 
 /* Limits and encodings a C host must honour. tests/constants_match.rs checks
  * each against the Rust constant and the Go constant that mirror it. */
 
 /* Largest pool gusset_handle_open accepts; larger is refused, not clamped. The
- * completion pipe must be able to hold 8 bytes per worker (grown on Linux). */
+ * completion pipe must be able to hold 8 bytes per worker (grown on Linux), and
+ * GUSSET_INLINE_RECORD_MAX per worker for inline completions to be used. */
 #define GUSSET_MAX_POOL_SIZE 1024u
 /* Largest inline input gusset_submit copies; larger returns FFI_BAD_ARG, as
  * does a NULL input_ptr with a nonzero input_len. Use a buffer instead. */

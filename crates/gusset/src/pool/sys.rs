@@ -33,7 +33,7 @@ pub fn check_buffer_len(len: usize) -> std::result::Result<(), String> {
 /// Raw buffer allocated in Rust memory with 64-byte alignment (R16).
 ///
 /// `len` is what Go sees; `layout.size()` is what was allocated. They differ only
-/// for an adopted [`BufferAlloc`] vector, whose spare capacity is kept rather
+/// for an adopted `BufferAlloc` vector, whose spare capacity is kept rather
 /// than paid for with a shrinking realloc.
 #[derive(Debug)]
 pub struct RawBuffer {
@@ -149,7 +149,7 @@ impl RawBuffer {
         self.len == 0
     }
 
-    /// Copies buffer bytes into a new Vec<u8>.
+    /// Copies buffer bytes into a new `Vec<u8>`.
     pub fn to_vec(&self) -> Vec<u8> {
         unsafe { std::slice::from_raw_parts(self.ptr, self.len).to_vec() }
     }
@@ -355,6 +355,14 @@ pub(crate) const WRITE_TICKET_MAX_BACKOFF: std::time::Duration =
 /// lock between the two halves would let another ticket interleave and break
 /// framing for every later completion.
 pub fn write_ticket_attempt(fd: i32, ticket: u64) -> Result<()> {
+    write_record_attempt(fd, &ticket.to_ne_bytes())
+}
+
+/// One non-blocking attempt to write a whole completion record (a bare ticket,
+/// or an inline-result record of at most 64 bytes). Records are far below
+/// `PIPE_BUF`, so on a pipe the write is all-or-nothing; the short-write
+/// handling below is for anything else the descriptor might be.
+pub fn write_record_attempt(fd: i32, bytes: &[u8]) -> Result<()> {
     if fd < 0 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
@@ -362,8 +370,7 @@ pub fn write_ticket_attempt(fd: i32, ticket: u64) -> Result<()> {
         ));
     }
 
-    let bytes = ticket.to_ne_bytes();
-    let mut remaining = &bytes[..];
+    let mut remaining = bytes;
     let mut committed = false;
     let mut partial_spins = 0u32;
 
@@ -415,7 +422,7 @@ pub fn write_ticket_attempt(fd: i32, ticket: u64) -> Result<()> {
 /// `EINTR` is retried without limit: Go's async preemption (`SIGURG`) interrupts
 /// syscalls on this thread constantly and makes no progress claim either way.
 /// `EAGAIN` means the pipe is genuinely full, so it backs off exponentially instead
-/// of spinning `yield_now` at 100% CPU, and gives up once [`WRITE_TICKET_TIMEOUT`]
+/// of spinning `yield_now` at 100% CPU, and gives up once `WRITE_TICKET_TIMEOUT`
 /// has elapsed.
 pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
     let mut backoff = std::time::Duration::from_micros(50);

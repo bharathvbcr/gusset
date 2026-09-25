@@ -40,6 +40,32 @@ Allocations are unchanged: 2/op on `Call` and `Submit`. `B/op` is within 2 bytes
 except zero-copy at +25 B/op, which is the `*Buffer`'s `owner` and budget fields
 (the owner closes a GC use-after-free).
 
+## Later rounds: instruction counts and inline completions
+
+Both were measured after the tables above, in a later container. Its CPU
+reports 2.10 GHz rather than 2.80 GHz, so it may not be the same host. Compare
+rows within one table, not across tables.
+
+`a4e8f0b` cut instructions on the Rust submit and complete path, found with
+callgrind on `crates/gusset/examples/rt_latency.rs`: 78.3M → 56.3M
+instructions for 20k round trips. `Call` no-op went 10.6 → 7.7 µs and parallel
+5.9 → 3.8 µs.
+
+Inline completion records then carry results of up to 48 bytes inside the
+pipe record, which removes two cgo calls and a Rust buffer per small call.
+`inline-before-a4e8f0b.txt` and `inline-after.txt` hold the two arms,
+interleaved four times (n=8 each). They were run by hand with `go test -bench`,
+not through `bench/record.sh`, so they carry no provenance header.
+
+| Benchmark | a4e8f0b | inline records | Δ |
+| --- | ---: | ---: | ---: |
+| Call no-op | 7.76 µs | 7.67 µs | ~ (p=0.80) |
+| Call parallel | 3.97 µs | 3.24 µs | −18.5% |
+| Submit & Wait | 8.11 µs | 7.53 µs | ~ (p=0.07) |
+
+The serial rows are bound by thread wake-ups, which this does not change.
+Allocations stay at 2/op.
+
 ## Against one blocking cgo call per request (`transport-*.txt`, median of 6)
 
 The same integer loop on both transports (`rs_spin` and diagnostic mode 11), so

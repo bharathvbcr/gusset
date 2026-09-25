@@ -464,7 +464,7 @@ pub fn get_alloc_stats() -> AllocStats {
 /// Records an allocation that bypassed the counting wrapper.
 ///
 /// A no-op once `Counting` is installed, because the global allocator has already
-/// counted these bytes. See [`COUNTING_ACTIVE`].
+/// counted these bytes. See `COUNTING_ACTIVE`.
 #[inline]
 pub fn record_alloc(size: usize) {
     if counting_is_active() {

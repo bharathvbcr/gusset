@@ -215,6 +215,17 @@ var AbiFieldNames = [AbiFieldCount]string{
 // See GUSSET_FLAG_DIAGNOSTIC_ENGINE in gusset.h.
 const FlagDiagnosticEngine uint32 = C.GUSSET_FLAG_DIAGNOSTIC_ENGINE
 
+// FlagInlineCompletion asks for small successful results inside the
+// completion record. See GUSSET_FLAG_INLINE_COMPLETION in gusset.h.
+const FlagInlineCompletion uint32 = C.GUSSET_FLAG_INLINE_COMPLETION
+
+// Completion record layout (gusset.h).
+const (
+	InlineRecordFlag uint64 = C.GUSSET_INLINE_RECORD_FLAG
+	InlineResultMax         = int(C.GUSSET_INLINE_RESULT_MAX)
+	InlineRecordMax         = int(C.GUSSET_INLINE_RECORD_MAX)
+)
+
 // TakeOwnedFlag marks a Take buffer id as the result's own buffer, which the
 // caller frees once consumed. Taken from the header so Go and Rust share one
 // definition (tests/constants_match.rs checks the Rust side).
