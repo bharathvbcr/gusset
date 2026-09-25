@@ -1,0 +1,60 @@
+goos: linux
+goarch: amd64
+pkg: ffibench
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkCgoRustNoop-4           	30490869	        38.70 ns/op
+BenchmarkCgoRustNoop-4           	30268303	        39.49 ns/op
+BenchmarkCgoRustNoop-4           	30567387	        39.27 ns/op
+BenchmarkCgoRustNoop-4           	31050984	        39.64 ns/op
+BenchmarkCgoRustNoop-4           	31359921	        40.74 ns/op
+BenchmarkCgoRustNoop-4           	29840892	        38.44 ns/op
+BenchmarkCgoCNoop-4              	34607772	        36.81 ns/op
+BenchmarkCgoCNoop-4              	34806308	        37.00 ns/op
+BenchmarkCgoCNoop-4              	31626952	        36.62 ns/op
+BenchmarkCgoCNoop-4              	34309346	        35.93 ns/op
+BenchmarkCgoCNoop-4              	33250604	        37.52 ns/op
+BenchmarkCgoCNoop-4              	34045310	        35.68 ns/op
+BenchmarkCgoNoopParallel-4       	100000000	        11.16 ns/op
+BenchmarkCgoNoopParallel-4       	100000000	        11.30 ns/op
+BenchmarkCgoNoopParallel-4       	100000000	        10.97 ns/op
+BenchmarkCgoNoopParallel-4       	100000000	        11.78 ns/op
+BenchmarkCgoNoopParallel-4       	100000000	        11.36 ns/op
+BenchmarkCgoNoopParallel-4       	100000000	        11.80 ns/op
+BenchmarkBatch16-4               	28388596	        43.54 ns/op	         2.721 ns/item
+BenchmarkBatch16-4               	27824101	        44.84 ns/op	         2.802 ns/item
+BenchmarkBatch16-4               	28237086	        44.69 ns/op	         2.793 ns/item
+BenchmarkBatch16-4               	28284734	        44.49 ns/op	         2.781 ns/item
+BenchmarkBatch16-4               	27817015	        48.53 ns/op	         3.033 ns/item
+BenchmarkBatch16-4               	26015140	        47.69 ns/op	         2.980 ns/item
+BenchmarkBatch256-4              	 8342162	       147.0 ns/op	         0.5741 ns/item
+BenchmarkBatch256-4              	 8320033	       149.5 ns/op	         0.5841 ns/item
+BenchmarkBatch256-4              	 7388064	       148.4 ns/op	         0.5797 ns/item
+BenchmarkBatch256-4              	 7732934	       141.4 ns/op	         0.5524 ns/item
+BenchmarkBatch256-4              	 7915267	       149.5 ns/op	         0.5840 ns/item
+BenchmarkBatch256-4              	 8225168	       142.0 ns/op	         0.5548 ns/item
+BenchmarkBatch4096-4             	  696568	      1839 ns/op	         0.4490 ns/item
+BenchmarkBatch4096-4             	  688746	      1888 ns/op	         0.4610 ns/item
+BenchmarkBatch4096-4             	  647802	      1816 ns/op	         0.4435 ns/item
+BenchmarkBatch4096-4             	  688488	      1984 ns/op	         0.4843 ns/item
+BenchmarkBatch4096-4             	  685474	      2028 ns/op	         0.4951 ns/item
+BenchmarkBatch4096-4             	  566616	      1813 ns/op	         0.4427 ns/item
+BenchmarkChannelHop-4            	22216645	        56.03 ns/op
+BenchmarkChannelHop-4            	22636454	        54.32 ns/op
+BenchmarkChannelHop-4            	18676429	        59.63 ns/op
+BenchmarkChannelHop-4            	23025285	        55.87 ns/op
+BenchmarkChannelHop-4            	22299586	        53.75 ns/op
+BenchmarkChannelHop-4            	21664434	        58.45 ns/op
+BenchmarkUnbufferedRoundTrip-4   	 2869080	       423.5 ns/op
+BenchmarkUnbufferedRoundTrip-4   	 2801872	       409.9 ns/op
+BenchmarkUnbufferedRoundTrip-4   	 2508655	       442.3 ns/op
+BenchmarkUnbufferedRoundTrip-4   	 2858766	       431.4 ns/op
+BenchmarkUnbufferedRoundTrip-4   	 2827094	       422.1 ns/op
+BenchmarkUnbufferedRoundTrip-4   	 2851618	       417.1 ns/op
+BenchmarkPureGoLoopItem-4        	  466650	      2639 ns/op	         0.6442 ns/item
+BenchmarkPureGoLoopItem-4        	  460011	      2521 ns/op	         0.6156 ns/item
+BenchmarkPureGoLoopItem-4        	  476986	      2670 ns/op	         0.6518 ns/item
+BenchmarkPureGoLoopItem-4        	  432643	      2581 ns/op	         0.6302 ns/item
+BenchmarkPureGoLoopItem-4        	  476733	      2688 ns/op	         0.6562 ns/item
+BenchmarkPureGoLoopItem-4        	  394918	      3125 ns/op	         0.7630 ns/item
+PASS
+ok  	ffibench	71.252s

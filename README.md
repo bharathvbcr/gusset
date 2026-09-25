@@ -288,6 +288,17 @@ construction; the question an adopter actually has is where the curves meet.
 
 ![OS threads against in-flight requests](docs/img/threads.svg)
 
+The table and charts above come from the darwin-arm64 host, and they predate the
+spin-then-park completion path. That change removed two thread wake-ups per
+call. [`bench/results/linux-amd64-vm/`](bench/results/linux-amd64-vm/README.md)
+has a before/after comparison on one Linux VM, with raw data for every suite:
+
+- **Serial no-op `Call`:** 90 µs → 10.6 µs.
+- **Against a blocking cgo call:** 1.1–2.2× for work of 10 µs and up, where it
+  had been as high as 8.6×.
+- **Threads:** 11 OS threads at every concurrency level from 32 to 2048
+  in-flight requests, against raw cgo's 30–47.
+
 The measurement the design rests on. A blocking cgo call parks an M inside Rust
 for its whole duration, so the thread count tracks **concurrency**; Gusset's
 callers park on a Go channel, so it tracks the **pool**.

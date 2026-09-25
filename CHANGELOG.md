@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased] - 2026-09-25 · Performance and the last open gaps
+
+Measured before and after on one Linux VM; the raw data and tables are in
+`bench/results/linux-amd64-vm/`.
+
+- **Serial calls are about 9× faster.** Each call slept twice, once in a Rust worker's `recv` and once in the Go reader's netpoll. On a virtualized host a wake-up costs tens of microseconds. A new `pool::queue` lets workers poll briefly, yielding the CPU, before parking, with no lock held while waiting. The drain reader polls the pipe the same way, reads up to 64 tickets per syscall, and polls longer when one job is in flight. An idle handle costs no CPU.
+  - `Call` no-op: 90 → 10.6 µs.
+  - Parallel: 24.5 → 5.9 µs.
+  - Against a blocking cgo call, for 10 µs of work and up: 1.1–2.2×, down from as much as 8.6×.
+  - Threads stay flat at the pool size.
+- **Allocations are back to main's.** Boxing a `[]byte` through `submit(any)`, and a `*Buffer` escaping through a mutex on the `Submit` path, added one allocation to every `Call` and `Submit` on this branch. Both are gone: 2 allocs/op, as on main.
+- **`NewBuffer` memory is zero-filled.** It returned stale process memory.
+- **`WithBufferBudget` / `ErrBufferBudget`:** an opt-in per-handle cap on live `NewBuffer` bytes.
+- **Gusset buffers come from `System` and are always counted by Gusset.** Accounting no longer depends on an inferred flag.
+- **The allocator probe retries for the host** when the target compile fails (custom target specs, `-Zbuild-std`).
+- **Opcode context values accept any integer kind.**
+- **The BufferLarge benchmarks initialize their input.** Uninitialized input made them run random diagnostic modes.
+
 ## [Unreleased] - 2026-09-25 · Third audit: lock order, state machine, regressions
 
 Each fix is backed by a test that fails against the code before it, unless marked otherwise.

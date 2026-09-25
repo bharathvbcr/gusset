@@ -1,0 +1,19 @@
+# gusset-bench: v1
+# gusset-bench-recorded: 2026-09-25T20:15:18Z
+# gusset-bench-host: vm
+# gusset-bench-uname: Linux 6.18.44-fc-v37 x86_64
+# gusset-bench-package: bench/seed/go .
+# gusset-bench-arms: ThreadPressure/10000000it/Gusset
+# gusset-bench-benchtime: 5x
+# gusset-bench-count: 1
+# gusset-bench-cpu-idle-before: 93.25
+# gusset-bench-cpu-idle-after: 99.50
+# gusset-bench-min-idle: 60
+# gusset-bench-exclusive: yes
+goos: linux
+goarch: amd64
+pkg: ffibench
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkThreadPressure/10000000it-10506us/Gusset/conc512-4         	       5	1474513707 ns/op	         0 peakDthreads	         7.000 peakThreads	  247718 B/op	    3335 allocs/op
+PASS
+ok  	ffibench	8.998s

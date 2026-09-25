@@ -1,0 +1,42 @@
+# gusset-bench: v1
+# gusset-bench-recorded: 2026-09-25T20:57:58Z
+# gusset-bench-host: vm
+# gusset-bench-uname: Linux 6.18.44-fc-v37 x86_64
+# gusset-bench-package: bench/seed/go .
+# gusset-bench-arms: ThreadScaling/RawCgo
+# gusset-bench-benchtime: 3x
+# gusset-bench-count: 6
+# gusset-bench-cpu-idle-before: 99.25
+# gusset-bench-cpu-idle-after: 100.00
+# gusset-bench-min-idle: 60
+# gusset-bench-exclusive: yes
+goos: linux
+goarch: amd64
+pkg: ffibench
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkThreadScaling/RawCgo/conc32-4         	       3	  94269430 ns/op	        32.00 concurrency	         5.000 peakDthreads	         9.617 peakRSSmib	        29.00 peakThreads	      3254 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc32-4         	       3	  96253990 ns/op	        32.00 concurrency	         1.000 peakDthreads	         9.902 peakRSSmib	        30.00 peakThreads	      3326 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc32-4         	       3	  95242221 ns/op	        32.00 concurrency	         0 peakDthreads	         9.887 peakRSSmib	        30.00 peakThreads	      3326 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc32-4         	       3	  98514294 ns/op	        32.00 concurrency	         0 peakDthreads	        10.05 peakRSSmib	        30.00 peakThreads	      3326 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc32-4         	       3	  96954117 ns/op	        32.00 concurrency	         2.000 peakDthreads	        10.00 peakRSSmib	        33.00 peakThreads	      3478 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc32-4         	       3	  99130911 ns/op	        32.00 concurrency	         0 peakDthreads	        10.14 peakRSSmib	        33.00 peakThreads	      3478 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc128-4        	       3	 368883841 ns/op	       128.0 concurrency	         3.000 peakDthreads	        10.90 peakRSSmib	        36.00 peakThreads	      3502 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc128-4        	       3	 364475230 ns/op	       128.0 concurrency	         1.000 peakDthreads	        10.79 peakRSSmib	        37.00 peakThreads	      3510 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc128-4        	       3	 364998040 ns/op	       128.0 concurrency	         0 peakDthreads	        11.27 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc128-4        	       3	 359761007 ns/op	       128.0 concurrency	         0 peakDthreads	        11.16 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc128-4        	       3	 358006552 ns/op	       128.0 concurrency	         0 peakDthreads	        11.01 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc128-4        	       3	 361087753 ns/op	       128.0 concurrency	         0 peakDthreads	        11.21 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc512-4        	       3	1425323337 ns/op	       512.0 concurrency	         0 peakDthreads	        12.27 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc512-4        	       3	1429762825 ns/op	       512.0 concurrency	         0 peakDthreads	        12.54 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc512-4        	       3	1421485276 ns/op	       512.0 concurrency	         0 peakDthreads	        12.39 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc512-4        	       3	1436458731 ns/op	       512.0 concurrency	         0 peakDthreads	        12.35 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc512-4        	       3	1426251967 ns/op	       512.0 concurrency	         0 peakDthreads	        12.54 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc512-4        	       3	1418119491 ns/op	       512.0 concurrency	         0 peakDthreads	        12.39 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc2048-4       	       3	5641974461 ns/op	      2048 concurrency	         0 peakDthreads	        16.21 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc2048-4       	       3	5640211624 ns/op	      2048 concurrency	         0 peakDthreads	        16.51 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc2048-4       	       3	5600240560 ns/op	      2048 concurrency	         0 peakDthreads	        15.94 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc2048-4       	       3	5622029617 ns/op	      2048 concurrency	         0 peakDthreads	        16.08 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc2048-4       	       3	5648310601 ns/op	      2048 concurrency	         0 peakDthreads	        16.39 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+BenchmarkThreadScaling/RawCgo/conc2048-4       	       3	5586323023 ns/op	      2048 concurrency	         0 peakDthreads	        16.65 peakRSSmib	        47.00 peakThreads	      3590 peakVSZmib
+PASS
+ok  	ffibench	181.114s

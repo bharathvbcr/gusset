@@ -1,0 +1,42 @@
+# gusset-bench: v1
+# gusset-bench-recorded: 2026-09-25T20:18:49Z
+# gusset-bench-host: vm
+# gusset-bench-uname: Linux 6.18.44-fc-v37 x86_64
+# gusset-bench-package: bench/seed/go .
+# gusset-bench-arms: ThreadScaling/Gusset
+# gusset-bench-benchtime: 3x
+# gusset-bench-count: 6
+# gusset-bench-cpu-idle-before: 95.49
+# gusset-bench-cpu-idle-after: 100.00
+# gusset-bench-min-idle: 60
+# gusset-bench-exclusive: yes
+goos: linux
+goarch: amd64
+pkg: ffibench
+cpu: Intel(R) Xeon(R) Processor @ 2.80GHz
+BenchmarkThreadScaling/Gusset/conc32-4         	       3	 101241992 ns/op	        32.00 concurrency	         0 peakDthreads	         9.934 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc32-4         	       3	 100491044 ns/op	        32.00 concurrency	         0 peakDthreads	        10.07 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc32-4         	       3	  99059954 ns/op	        32.00 concurrency	         0 peakDthreads	        10.08 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc32-4         	       3	  98305238 ns/op	        32.00 concurrency	         0 peakDthreads	        10.11 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc32-4         	       3	  98957056 ns/op	        32.00 concurrency	         0 peakDthreads	        10.34 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc32-4         	       3	 100510631 ns/op	        32.00 concurrency	         0 peakDthreads	        10.34 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc128-4        	       3	 378378010 ns/op	       128.0 concurrency	         0 peakDthreads	        11.61 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc128-4        	       3	 384892816 ns/op	       128.0 concurrency	         0 peakDthreads	        11.63 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc128-4        	       3	 378581792 ns/op	       128.0 concurrency	         0 peakDthreads	        11.54 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc128-4        	       3	 382954180 ns/op	       128.0 concurrency	         0 peakDthreads	        11.60 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc128-4        	       3	 389914874 ns/op	       128.0 concurrency	         0 peakDthreads	        11.56 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc128-4        	       3	 381184481 ns/op	       128.0 concurrency	         0 peakDthreads	        11.56 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc512-4        	       3	1524087570 ns/op	       512.0 concurrency	         0 peakDthreads	        14.62 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc512-4        	       3	1510271143 ns/op	       512.0 concurrency	         0 peakDthreads	        14.72 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc512-4        	       3	1519660561 ns/op	       512.0 concurrency	         0 peakDthreads	        14.48 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc512-4        	       3	1520273037 ns/op	       512.0 concurrency	         0 peakDthreads	        14.43 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc512-4        	       3	1526787313 ns/op	       512.0 concurrency	         0 peakDthreads	        14.63 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc512-4        	       3	1497535972 ns/op	       512.0 concurrency	         0 peakDthreads	        15.27 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc2048-4       	       3	6010718087 ns/op	      2048 concurrency	         0 peakDthreads	        17.56 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc2048-4       	       3	6075472654 ns/op	      2048 concurrency	         0 peakDthreads	        17.63 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc2048-4       	       3	6075451257 ns/op	      2048 concurrency	         0 peakDthreads	        17.65 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc2048-4       	       3	6040613058 ns/op	      2048 concurrency	         0 peakDthreads	        17.59 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc2048-4       	       3	6075339174 ns/op	      2048 concurrency	         0 peakDthreads	        17.54 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+BenchmarkThreadScaling/Gusset/conc2048-4       	       3	6065733999 ns/op	      2048 concurrency	         0 peakDthreads	        17.63 peakRSSmib	        10.00 peakThreads	      2174 peakVSZmib
+PASS
+ok  	ffibench	194.728s
