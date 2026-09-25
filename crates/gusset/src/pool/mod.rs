@@ -1,5 +1,6 @@
 //! Worker pool and Handle lifecycle with bounded concurrency and signal protection (I4, I5).
 
+pub mod queue;
 pub mod sys;
 
 use crate::ffi::guard::{
@@ -8,10 +9,10 @@ use crate::ffi::guard::{
 use crate::header::{
     CallHeader, CancelReason, JobContext, GUSSET_FLAGS_KNOWN, GUSSET_FLAG_DIAGNOSTIC_ENGINE,
 };
+use queue::{JobQueue, PushError, QueueSender};
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::thread;
 use sys::RawBuffer;
@@ -696,14 +697,14 @@ pub struct Handle {
     pipe_write_lock: Mutex<()>,
     poisoned: AtomicBool,
     closed: AtomicBool,
-    sender: Mutex<Option<SyncSender<WorkUnit>>>,
+    sender: Mutex<Option<QueueSender<WorkUnit>>>,
     results: Mutex<HashMap<u64, JobResult>>,
     cancel_flags: Mutex<HashMap<u64, Arc<AtomicBool>>>,
     buffers: Mutex<HashMap<u64, BufferSlot>>,
     next_buffer_id: AtomicU64,
     next_worker_id: AtomicU64,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
-    receiver: Arc<Mutex<Receiver<WorkUnit>>>,
+    receiver: Arc<JobQueue<WorkUnit>>,
     self_weak: Mutex<Weak<Handle>>,
 }
 
@@ -871,8 +872,7 @@ impl Handle {
             sys::ensure_pipe_capacity(pipe_write_fd, pool_size.saturating_mul(8))?;
         }
 
-        let (sender, receiver) = sync_channel(pool_size * 2);
-        let receiver = Arc::new(Mutex::new(receiver));
+        let (sender, receiver) = JobQueue::new(pool_size * 2);
 
         let handle = Arc::new(Self {
             pool_size,
@@ -1019,15 +1019,11 @@ impl Handle {
                     }
 
                     loop {
-                        let unit = {
-                            // Poison-recovering: the guard protects only the receiver,
-                            // and treating "poisoned" as "shut down" would retire the
-                            // whole pool on an unrelated panic.
-                            let guard = lock_recover(&receiver_clone);
-                            match guard.recv() {
-                                Ok(u) => u,
-                                Err(_) => break, // Disconnected on handle close
-                            }
+                        // Spin briefly, then park (see pool::queue). None once
+                        // the handle closed and the queue is drained.
+                        let unit = match receiver_clone.pop() {
+                            Some(u) => u,
+                            None => break,
                         };
                         let ticket = unit.ticket;
 
@@ -1187,8 +1183,8 @@ impl Handle {
             if let Err(err) = sender.try_send(unit) {
                 lock_recover(&self.cancel_flags).remove(&ticket);
                 return Err(match err {
-                    TrySendError::Full(_) => "submission queue is full".to_string(),
-                    TrySendError::Disconnected(_) => "handle is closed".to_string(),
+                    PushError::Full(_) => "submission queue is full".to_string(),
+                    PushError::Closed(_) => "handle is closed".to_string(),
                 });
             }
         }

@@ -218,10 +218,10 @@ func Open(opts ...Option) (*Handle, error) {
 // drainPipe reads 8-byte completion tickets from the pipe.
 func drainPipe(s *handleState) {
 	defer close(s.drainDone)
-	var buf [8]byte
+	tr := newTicketReader(s.pipe)
 
 	for {
-		_, err := io.ReadFull(s.pipe, buf[:])
+		ticket, err := tr.next()
 		if err != nil {
 			// Pipe closed on handle shutdown or EOF
 			s.mu.Lock()
@@ -248,8 +248,6 @@ func drainPipe(s *handleState) {
 			}
 			return
 		}
-
-		ticket := binary.NativeEndian.Uint64(buf[:])
 
 		// Synchronize with handle close to eliminate UAF on s.ptr, without
 		// ever blocking. This goroutine used to wait on cgoMu.RLock behind
@@ -295,6 +293,110 @@ func drainPipe(s *handleState) {
 		s.cgoMu.RUnlock()
 
 		s.deliver(ticket, res, takeID)
+	}
+}
+
+// ticketReaderSpin is how long the drain reader polls the pipe after a
+// completion before parking in the netpoller.
+//
+// Parking hands the wake-up to epoll, and on virtualized hosts waking an idle
+// thread costs tens of microseconds — the same cost the Rust workers avoid by
+// polling their queue (pool::queue). A caller that submits again right after
+// its result lands gets its next completion read by a goroutine that is still
+// running. The budget restarts only when a ticket arrives, so an idle handle
+// polls once and then parks: no CPU at rest.
+const ticketReaderSpin = 50 * time.Microsecond
+
+// ticketReader reads 8-byte completion tickets, several per system call.
+//
+// It used to be one io.ReadFull of 8 bytes per ticket, which under parallel
+// load is one read syscall and one netpoller round per completion; a burst of
+// completions now drains in a single read.
+type ticketReader struct {
+	f     *os.File
+	rc    syscall.RawConn
+	buf   [512]byte
+	start int
+	end   int
+	// lastTicket is when the previous ticket was consumed.
+	lastTicket time.Time
+	// State for readFn, which is built once: a closure created per read
+	// escapes through the RawConn interface and cost three allocations per
+	// call (3 -> 6 allocs/op on CallNoop).
+	dst    []byte
+	n      int
+	rerr   error
+	readFn func(uintptr) bool
+}
+
+func newTicketReader(f *os.File) *ticketReader {
+	tr := &ticketReader{f: f}
+	if rc, err := f.SyscallConn(); err == nil {
+		tr.rc = rc
+	}
+	tr.readFn = tr.readOnce
+	return tr
+}
+
+func (tr *ticketReader) next() (uint64, error) {
+	for tr.end-tr.start < 8 {
+		// Keep a partial ticket at the front; a short read is permitted
+		// even though an 8-byte write is atomic under PIPE_BUF.
+		if tr.start > 0 {
+			copy(tr.buf[:], tr.buf[tr.start:tr.end])
+			tr.end -= tr.start
+			tr.start = 0
+		}
+		n, err := tr.fill(tr.buf[tr.end:])
+		tr.end += n
+		if err != nil && tr.end-tr.start < 8 {
+			return 0, err
+		}
+	}
+	t := binary.NativeEndian.Uint64(tr.buf[tr.start : tr.start+8])
+	tr.start += 8
+	tr.lastTicket = time.Now()
+	return t, nil
+}
+
+// fill reads what is available, polling briefly before letting the netpoller
+// park the goroutine. Returns io.EOF when every write end is closed.
+func (tr *ticketReader) fill(p []byte) (int, error) {
+	if tr.rc == nil {
+		return io.ReadAtLeast(tr.f, p, 1)
+	}
+	tr.dst, tr.n, tr.rerr = p, 0, nil
+	err := tr.rc.Read(tr.readFn)
+	tr.dst = nil
+	if err != nil {
+		return tr.n, err // deadline set by close, or the file was closed
+	}
+	return tr.n, tr.rerr
+}
+
+// readOnce is the RawConn.Read callback: true when done, false to park.
+func (tr *ticketReader) readOnce(fd uintptr) bool {
+	for {
+		m, e := syscall.Read(int(fd), tr.dst)
+		switch {
+		case m > 0:
+			tr.n = m
+			return true
+		case e == nil && m == 0:
+			tr.rerr = io.EOF
+			return true
+		case e == syscall.EINTR:
+			continue
+		case e == syscall.EAGAIN:
+			if !tr.lastTicket.IsZero() && time.Since(tr.lastTicket) < ticketReaderSpin {
+				runtime.Gosched()
+				continue
+			}
+			return false // park until readable
+		default:
+			tr.rerr = e
+			return true
+		}
 	}
 }
 
