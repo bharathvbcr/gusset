@@ -238,9 +238,12 @@ Things worth knowing before you hit them:
   is only read where your engine calls `ctx.check()`, so an engine that never
   checks runs to completion regardless — nothing is interrupted, the caller is
   simply no longer blocked on it. Call `ctx.check()` inside long loops if you
-  want the work to stop early rather than merely be abandoned, and note that
-  `gusset.Shutdown` will report an engine that never checks as still in flight
-  when its drain budget expires.
+  want the work to stop early rather than merely be abandoned. Check once per
+  chunk (for example `for chunk in data.chunks(4096) { ctx.check()?; … }`), not
+  on every iteration: a branch in the hot loop stops LLVM from vectorizing it.
+  Moving the check made the example engine's sum of squares about 4× faster
+  (see [choosing](choosing.md)). Note that `gusset.Shutdown` will report an
+  engine that never checks as still in flight when its drain budget expires.
 - **`Handle.Close` has no budget.** It cancels, then *joins* its worker threads,
   so its latency is whatever your engine still has left to do — detaching them
   would leave OS threads running against Rust memory `Close` is about to free.

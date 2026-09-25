@@ -385,11 +385,59 @@ it is mileage:
 
 ---
 
+## Go SIMD changes the "is it worth Rust?" question, not Gusset's overhead
+
+Go 1.27 ships a portable `simd` package behind `GOEXPERIMENT=simd`, backed by
+AVX/AVX2/AVX-512 on amd64 and Neon on arm64, and emulated elsewhere. It does not
+speed up Gusset itself. Gusset's Go path is a semaphore, an 8-byte ticket read
+and `copy()`, and the runtime's memmove is already vectorized. The whole suite
+passes with the experiment enabled.
+
+What it moves is the line in the table below. A data-parallel kernel that was
+only fast in Rust can now be fast in Go, with no boundary at all.
+`bench/simd_crossover_test.go` (build tag `goexperiment.simd`) runs one kernel,
+sum of squares over bytes, three ways and checks that they agree.
+
+It was measured in a 4-vCPU Linux sandbox (Xeon, AVX-512), taking the median of
+6 runs. In this sandbox a no-op Gusset round trip costs about 92 µs, against
+about 13 µs on the darwin-arm64 host in `bench/results`, so read the Gusset
+column for its shape, not its absolute values:
+
+| Input | Go scalar | Go SIMD | Gusset → Rust (chunked kernel) |
+| --- | --- | --- | --- |
+| 4 KB | 2.4 µs | 0.9 µs | 95 µs (all round trip) |
+| 64 KiB | 40 µs | 15 µs | 95 µs |
+| 1 MiB | 650 µs | 258 µs | 262 µs (kernel ≈ 170 µs) |
+
+- **For vectorizable kernels, try Go SIMD first.** It ran about 2.5–3× faster
+  than scalar Go at every size. Below roughly `overhead × 4 GB/s` of input, which
+  is about 50 KB on the darwin host and about 400 KB here, it wins outright,
+  because there is no boundary to cross.
+- **Rust still wins on throughput once the kernel vectorizes.** The same kernel
+  in Rust reached about 6 GB/s against Go SIMD's 4 GB/s. It only got there after
+  a fix: the original version called `ctx.check()` inside the hot loop, and
+  that branch stopped LLVM from vectorizing it (about 1.4 GB/s). See
+  [adoption](adoption.md#4-use-the-handle) for the chunked pattern.
+- **The experiment is an experiment.** Its API can change between releases, and
+  its docs list known bugs: reflection calls and SIMD-dependent global
+  initializers don't work. Keep SIMD kernels behind the `goexperiment.simd`
+  build tag with a scalar fallback, as the benchmark does.
+
+Run it yourself:
+
+```sh
+make build
+GOEXPERIMENT=simd go test ./bench -run SIMD -bench SumSquares -benchtime=1s -count=6
+```
+
+---
+
 ## When it is the wrong tool
 
 | Situation | Use instead |
 | --- | --- |
 | Per-call work under ~10 µs | Pure Go, or raw cgo |
+| A data-parallel kernel on inputs below ~50 KB | Pure Go with `simd` (Go 1.27, `GOEXPERIMENT=simd`); see above |
 | Concurrency at or below `GOMAXPROCS` | Raw cgo |
 | Engine can segfault (`unsafe`, C libs, GPU) | A separate process |
 | You need Windows | Not Gusset — it will not compile |

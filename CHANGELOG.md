@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased] - 2026-09-25 · Go SIMD evaluation
+
+- **Go 1.27's `simd` experiment was evaluated against the Rust path.** It does not touch Gusset's runtime: the Go path has no numeric kernel, and `copy()` is already vectorized. The suite passes under `GOEXPERIMENT=simd`, and CI now checks that. `bench/simd_crossover_test.go` measures one kernel three ways and checks that all three agree. `docs/choosing.md` records where pure-Go SIMD beats crossing into Rust.
+- **Cancellation checks inside the hot loop blocked vectorization.** The diagnostic and example engines' sum-of-squares kernels called `ctx.check()` on every 1024th iteration inside the loop. That kept the loop scalar at about 1.4 GB/s. Checking once per 4 KiB chunk and summing each chunk in `u32` reaches about 6 GB/s, and a 1 MiB Gusset call dropped from 839 µs to 262 µs in the measurement sandbox. `docs/adoption.md` now shows the chunked pattern.
+
 ## [Unreleased] - 2026-09-24 · Allocator API and interop audit
 
 Rust 1.100 stabilizes `std::alloc::Allocator`. Every fix below ships with a

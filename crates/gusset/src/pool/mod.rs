@@ -478,13 +478,15 @@ pub fn diagnostic_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, St
         }
         // Mode 10: Vector sum-and-square computation (Phase 2 CPU-bound engine)
         10 => {
+            // Cancellation is checked per chunk, outside the hot loop, so the
+            // inner fold vectorizes (see the example engine's opcode 10).
             let mut acc = 0u64;
-            for (i, &b) in input[1..].iter().enumerate() {
-                if i % 1024 == 0 {
-                    ctx.check().map_err(|e| format!("cancelled: {:?}", e))?;
-                }
-                let val = b as u64;
-                acc = acc.wrapping_add(val.wrapping_mul(val));
+            for chunk in input[1..].chunks(4096) {
+                ctx.check().map_err(|e| format!("cancelled: {:?}", e))?;
+                // 4096 * 255^2 < 2^32: a chunk sums exactly in u32, which
+                // packs twice as many lanes per vector as u64.
+                let chunk_sum: u32 = chunk.iter().map(|&b| (b as u32) * (b as u32)).sum();
+                acc = acc.wrapping_add(chunk_sum as u64);
             }
             Ok(acc.to_le_bytes().to_vec())
         }

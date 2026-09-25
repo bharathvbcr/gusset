@@ -42,6 +42,17 @@ jobs:
       - name: Run Go test suite (Panic Zoo & Pitfalls)
         run: go test -v -timeout 10m ./...
 
+      # Adopters may build with Go 1.27's SIMD experiment for their own
+      # kernels; Gusset must keep working under it. Also checks that the SIMD
+      # benchmark kernel agrees with the scalar Go and the Rust kernels.
+      - name: Go suite under GOEXPERIMENT=simd
+        env:
+          GOEXPERIMENT: simd
+        run: |
+          go vet ./...
+          go test -timeout 10m ./...
+          go test -run SIMD -count=1 ./bench
+
   # The stable Allocator trait lands in Rust 1.100. Until that is the stable
   # channel, nightly carries it; switch `toolchain` to 1.100 once released. The
   # build probe decides per compiler, so GUSSET_ALLOCATOR_API=1 turns a silent
