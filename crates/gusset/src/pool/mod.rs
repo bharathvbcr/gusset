@@ -700,7 +700,6 @@ pub struct Handle {
     results: Mutex<HashMap<u64, JobResult>>,
     cancel_flags: Mutex<HashMap<u64, Arc<AtomicBool>>>,
     buffers: Mutex<HashMap<u64, BufferSlot>>,
-    next_ticket: AtomicU64,
     next_buffer_id: AtomicU64,
     next_worker_id: AtomicU64,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
@@ -738,6 +737,17 @@ const ID_CEILING: u64 = TAKE_OWNED_FLAG;
 /// which the caller frees once consumed (`GUSSET_TAKE_OWNED_FLAG`). Every id is
 /// below [`ID_CEILING`], which is this bit, so the flag never collides.
 pub const TAKE_OWNED_FLAG: u64 = 1 << 63;
+
+/// Ticket counter shared by every handle in the process.
+///
+/// Per-handle counters all started at 1, so two handles issued the same ticket
+/// numbers. Go keys its bookkeeping by ticket per handle, and `Wait` on handle
+/// B with a ticket from handle A found B's own ticket of that number: B's
+/// result went to A's caller with a nil error, and B's real waiter then got
+/// `ErrUnknownTicket`. Unique tickets make a foreign ticket unknown everywhere
+/// but its own handle, which is what `ErrUnknownTicket` promises. 2^63 tickets
+/// is ~292,000 years at a million submissions a second.
+static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 
 /// Reserves the next id, or refuses without advancing once the space is exhausted.
 fn reserve_id(counter: &AtomicU64) -> Result<u64, String> {
@@ -875,7 +885,6 @@ impl Handle {
             results: Mutex::new(HashMap::new()),
             cancel_flags: Mutex::new(HashMap::new()),
             buffers: Mutex::new(HashMap::new()),
-            next_ticket: AtomicU64::new(1),
             next_buffer_id: AtomicU64::new(1),
             next_worker_id: AtomicU64::new(0),
             workers: Mutex::new(Vec::with_capacity(pool_size)),
@@ -1140,7 +1149,7 @@ impl Handle {
             TaskPayload::Inline(input.to_vec())
         };
 
-        let ticket = reserve_id(&self.next_ticket)?;
+        let ticket = reserve_id(&NEXT_TICKET)?;
         let cancel_flag = Arc::new(AtomicBool::new(false));
 
         let ctx = JobContext::new(header, Arc::clone(&cancel_flag));
@@ -1779,35 +1788,60 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn ticket_ids_stop_at_the_ceiling_instead_of_wrapping() {
-        let _serialise = lock_recover(&INJECT_LOCK);
-        let (r, w) = make_pipe();
-        let handle = match Handle::open(1, w) {
-            Ok(h) => h,
-            Err(e) => panic!("open failed: {}", e),
-        };
+        // Tickets come from a process-wide counter now, which a parallel test
+        // must not push to the ceiling; the ceiling rule lives in reserve_id.
+        let counter = AtomicU64::new(ID_CEILING);
+        assert!(
+            reserve_id(&counter).is_err(),
+            "an id at the ceiling must be refused"
+        );
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            ID_CEILING,
+            "a refused id must not advance the counter"
+        );
+        let counter = AtomicU64::new(ID_CEILING - 1);
+        assert_eq!(reserve_id(&counter).ok(), Some(ID_CEILING - 1));
+        assert!(
+            reserve_id(&counter).is_err(),
+            "the last id is below the ceiling"
+        );
+    }
 
-        handle.next_ticket.store(1 << 63, Ordering::Relaxed);
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn tickets_are_unique_across_handles() {
+        let _serialise = lock_recover(&INJECT_LOCK);
         let header = CallHeader {
             flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
             ..Default::default()
         };
-        if let Ok(ticket) = handle.submit(header, &[0u8], 0) {
-            panic!("ticket {ticket} is past the ceiling and must be refused");
+        let (ra, wa) = make_pipe();
+        let (rb, wb) = make_pipe();
+        let a = match Handle::open(1, wa) {
+            Ok(h) => h,
+            Err(e) => panic!("open a: {e}"),
+        };
+        let b = match Handle::open(1, wb) {
+            Ok(h) => h,
+            Err(e) => panic!("open b: {e}"),
+        };
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..8 {
+            for (h, r) in [(&a, ra), (&b, rb)] {
+                let t = match h.submit(header, &[0u8], 0) {
+                    Ok(t) => t,
+                    Err(e) => panic!("submit: {e}"),
+                };
+                assert_eq!(drain_ticket(r), t);
+                assert!(seen.insert(t), "ticket {t} was issued by two handles");
+            }
         }
-        assert_eq!(
-            handle.next_ticket.load(Ordering::Relaxed),
-            1 << 63,
-            "a refused ticket must not advance the counter"
-        );
-        assert_eq!(
-            handle.in_flight(),
-            0,
-            "a refused submit must not leak a flag"
-        );
-
-        handle.close();
+        a.close();
+        b.close();
         unsafe {
-            libc::close(r);
+            libc::close(ra);
+            libc::close(rb);
         }
     }
 

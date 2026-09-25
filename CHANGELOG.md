@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased] - 2026-09-25 · Third audit: lock order, state machine, regressions
+
+Each fix is backed by a test that fails against the code before it, unless marked otherwise.
+
+- **A ticket waited on the wrong handle returned another caller's result.** Every handle numbered its tickets from 1. `Wait` on handle B with A's ticket found B's own ticket of that number, returned B's result with a nil error, and left B's real waiter with `ErrUnknownTicket`. Tickets now come from one process-wide counter, so a foreign ticket is `ErrUnknownTicket`.
+- **`Close` could hang forever.** It waited for EOF on the completion pipe, and a surviving copy of the write end prevents EOF: a child forked outside Go's `ForkLock`, or a panic in `gusset_handle_close` before the descriptor was closed. Close now ends the reader with a read deadline once the workers are joined.
+- **A completion whose write timed out could strand every permit.** It was retried only by a later submit or completion. When every permit was held by such a ticket, neither could happen. The worker now retries until the write lands or the handle closes. The completion fd is read and closed under the write lock, so a write never reaches a reused descriptor, and `close(2)` is never retried after EINTR.
+- **A panic could be reported at the wrong location.** The panic hook records locations by thread, and `resume_unwind` skips the hook, so an earlier, already-handled panic's `file:line` was reported for the next failure. Stale entries are now cleared before every `catch_unwind`.
+- **Errors now say what happened.**
+  - A poisoned handle that has been closed reports "closed", not `ErrPoisoned`, and the poisoned error now has a message.
+  - Work cancelled by `Shutdown` is `ErrShutdown`, not `context.Canceled`: the caller's context was live.
+  - An expired drain budget is `ErrShutdownIncomplete`.
+- **Runtime fixes without dedicated tests:**
+  - `gusset_init` waits for a shutdown drain in progress.
+  - `total_in_flight` no longer drops handles while holding the registry lock.
+  - Finished workers are joined, not dropped.
+  - Log lines dropped under contention are counted.
+  - The signal-stack guard does not unmap a stack the kernel may still use.
+  - The Go drain reader does not block during `Close`.
+- **Tooling and tests:**
+  - `gussetvet` checks the syntax tree. It catches every reference to `C.free`, `free()` in cgo preambles, `//export` callbacks, and exports without a Go wrapper.
+  - A `RawBuffer` releases exactly the bytes it counted.
+  - Timing-dependent tests wait on observable state, not fixed sleeps.
+  - `TestStress_ConcurrentZeroCopyEgressAndCloseRace` counted a withdrawn view (`Bytes` is `nil` after `Close`) as corruption. That is the documented contract, and it failed about 1 run in 10 under `-race`.
+
 ## [Unreleased] - 2026-09-25 · Go SIMD evaluation
 
 - **Go 1.27's `simd` experiment was evaluated against the Rust path.** It does not touch Gusset's runtime: the Go path has no numeric kernel, and `copy()` is already vectorized. The suite passes under `GOEXPERIMENT=simd`, and CI now checks that. `bench/simd_crossover_test.go` measures one kernel three ways and checks that all three agree. `docs/choosing.md` records where pure-Go SIMD beats crossing into Rust.

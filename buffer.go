@@ -63,11 +63,11 @@ func (s *handleState) newBuffer(n int) (*Buffer, error) {
 	if n > MaxBufferBytes {
 		return nil, fmt.Errorf("gusset: buffer size exceeds maximum %d bytes", MaxBufferBytes)
 	}
-	if s.poisoned.Load() {
-		return nil, ErrPoisoned
-	}
 	if s.closed.Load() {
 		return nil, errors.New("gusset: handle is closed")
+	}
+	if s.poisoned.Load() {
+		return nil, errHandlePoisoned
 	}
 
 	if !s.enterCgo() {
@@ -75,7 +75,7 @@ func (s *handleState) newBuffer(n int) (*Buffer, error) {
 	}
 	if s.poisoned.Load() {
 		s.cgoMu.RUnlock()
-		return nil, ErrPoisoned
+		return nil, errHandlePoisoned
 	}
 	id, slice, err := ffi.BufAlloc(s.ptr, n)
 	s.cgoMu.RUnlock()

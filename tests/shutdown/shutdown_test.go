@@ -102,8 +102,10 @@ func TestShutdown_DrainsInFlightWorkThenRefusesSubmissions(t *testing.T) {
 		if err == nil {
 			continue // finished before the cancel landed
 		}
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, gusset.ErrGeneric) {
-			t.Fatalf("ticket %d: drained work must report a cancellation, got %v", i, err)
+		// The caller's context is live: this was Shutdown, not the caller.
+		// It used to read as context.Canceled.
+		if !errors.Is(err, gusset.ErrShutdown) || errors.Is(err, context.Canceled) {
+			t.Fatalf("ticket %d: drained work must report ErrShutdown, not context.Canceled; got %v", i, err)
 		}
 	}
 
@@ -158,8 +160,8 @@ func TestShutdown_ReportsWorkItCouldNotDrain(t *testing.T) {
 	}
 	// With nothing in flight this is a clean drain; the assertion is that it
 	// answers at all and does not wedge.
-	if err != nil && !errors.Is(err, gusset.ErrGeneric) {
-		t.Fatalf("Shutdown(0) returned an unexpected error type: %v", err)
+	if err != nil && !errors.Is(err, gusset.ErrShutdownIncomplete) {
+		t.Fatalf("Shutdown(0) must report an undrained budget as ErrShutdownIncomplete, got %v", err)
 	}
 
 	// A negative budget must be treated as zero rather than wrapping into a

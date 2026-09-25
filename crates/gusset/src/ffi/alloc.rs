@@ -61,6 +61,14 @@ fn mark_counting_active() {
 }
 
 /// Reports whether a `Counting` wrapper is installed as the global allocator.
+///
+/// Inferred: the flag is set by the first allocation any `Counting` serves
+/// through `GlobalAlloc`. Calling `GlobalAlloc` methods on a `Counting` that is
+/// *not* the global allocator flips it too, after which bytes counted by hand
+/// earlier on the `BufferAlloc` path are no longer uncounted (buffers track
+/// what they recorded and are immune). Do not call a non-global `Counting`
+/// through `GlobalAlloc`; use it as an `Allocator` (`Vec::new_in`), which
+/// never touches the flag.
 #[inline]
 pub fn counting_is_active() -> bool {
     COUNTING_ACTIVE.load(Ordering::Relaxed)

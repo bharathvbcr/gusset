@@ -182,10 +182,23 @@ impl Drop for SigAltStackGuard {
     fn drop(&mut self) {
         if !self.map_base.is_null() {
             unsafe {
+                // Unmap only if the kernel no longer points at this mapping.
+                // SS_DISABLE fails with EPERM while running on the alternate
+                // stack, and something else may have installed its own since;
+                // unmapping in either case would leave the next signal on this
+                // thread running on unmapped memory. Leaking is the safe side.
                 let mut ss: libc::stack_t = std::mem::zeroed();
                 ss.ss_flags = libc::SS_DISABLE;
-                let _ = libc::sigaltstack(&ss, std::ptr::null_mut());
-                libc::munmap(self.map_base, self.map_len);
+                let disabled = libc::sigaltstack(&ss, std::ptr::null_mut()) == 0;
+                let mut cur: libc::stack_t = std::mem::zeroed();
+                let read = libc::sigaltstack(std::ptr::null(), &mut cur) == 0;
+                let base = self.map_base as usize;
+                let ours =
+                    (cur.ss_sp as usize) >= base && (cur.ss_sp as usize) < base + self.map_len;
+                let still_installed = read && (cur.ss_flags & libc::SS_DISABLE) == 0 && ours;
+                if disabled && read && !still_installed {
+                    libc::munmap(self.map_base, self.map_len);
+                }
             }
         }
     }
@@ -423,8 +436,12 @@ pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
 /// Makes sure the pipe behind `fd` can hold `bytes` unread bytes.
 ///
 /// Linux only: the capacity is adjustable there and can be as small as one
-/// page. Elsewhere (macOS grows pipe buffers on demand to at least 16 KiB) this
-/// is a no-op. A descriptor that is not a pipe reports EBADF/EINVAL from
+/// page. macOS has no interface to query or grow a pipe; it normally grows
+/// pipe buffers on demand (16–64 KiB), but under kernel memory pressure can
+/// hand out 512 bytes, 64 tickets. A pool larger than that on macOS can then
+/// see completion writes wait for the reader. They are delayed, never lost:
+/// the worker retries until the reader drains or the handle closes, and Go's
+/// reader keeps draining during Close. A descriptor that is not a pipe reports EBADF/EINVAL from
 /// F_GETPIPE_SZ and is left alone — tests hand in other descriptor kinds, and
 /// the ownership contract for those is checked elsewhere.
 pub fn ensure_pipe_capacity(fd: i32, bytes: usize) -> std::result::Result<(), String> {

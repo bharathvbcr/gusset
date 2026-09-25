@@ -10,7 +10,8 @@ package bench_test
 // Gusset faster. What it changes is the adopter's decision docs/choosing.md is
 // about: a kernel that vectorizes in pure Go may no longer be worth crossing
 // into Rust. This measures that crossover on the diagnostic engine's mode 10
-// (sum of squares of bytes), which the Rust side runs scalar.
+// (sum of squares of bytes), which the Rust side vectorizes by checking
+// cancellation per 4 KiB chunk.
 //
 // Run:
 //

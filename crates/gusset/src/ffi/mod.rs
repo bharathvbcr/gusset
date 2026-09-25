@@ -504,7 +504,17 @@ pub unsafe extern "C" fn gusset_take(
                 }),
                 JobResult::Cancelled(reason) => Err(FfiError {
                     code: FFI_ERR,
-                    msg: format!("cancelled: {:?}", reason),
+                    // A cancel flag set by gusset_shutdown reads as Explicit to
+                    // the engine. Reported that way, Go mapped it to
+                    // context.Canceled although the caller's context was live;
+                    // "Shutdown" lets it surface as ErrShutdown instead.
+                    msg: if reason == crate::header::CancelReason::Explicit
+                        && crate::pool::is_shutting_down()
+                    {
+                        "cancelled: Shutdown".to_string()
+                    } else {
+                        format!("cancelled: {:?}", reason)
+                    },
                     file: Some("gusset.rs"),
                     line: line!(),
                 }),

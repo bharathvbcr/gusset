@@ -392,7 +392,9 @@ fn a_worker_holding_the_last_reference_closes_the_handle_cleanly() {
         Ok(t) => t,
         Err(e) => panic!("submit: {e}"),
     };
-    std::thread::sleep(Duration::from_millis(300));
+    // The job takes 20 ms; the worker must be inside its write backoff,
+    // holding its upgraded Arc, before our drop. Generous for slow CI.
+    std::thread::sleep(Duration::from_millis(1500));
     drop(h);
     let (bytes, eof) = read_until_eof(r, Duration::from_secs(8));
     unsafe { libc::close(r) };

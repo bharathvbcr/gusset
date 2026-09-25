@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/bharathvbcr/gusset/internal/ffi"
@@ -375,7 +377,14 @@ func (s *handleState) close() error {
 	s.ptr = nil
 	s.cgoMu.Unlock()
 
-	// 3. Wait for pipe drain reader to receive EOF from closed write fd
+	// 3. Stop the drain reader. It used to wait for EOF, which needs every
+	// copy of the write end closed: a child forked outside Go's ForkLock (from
+	// Rust or C) that inherited it, or a panic inside gusset_handle_close
+	// before it closed the descriptor, left Close — and every concurrent
+	// Close and every Submit parked on a permit — blocked forever. The workers
+	// are joined by now and any ticket still unread would be answered
+	// "closed" anyway, so a read deadline ends the reader either way.
+	_ = s.pipe.SetReadDeadline(time.Now())
 	<-s.drainDone
 	_ = s.pipe.Close()
 
@@ -400,6 +409,19 @@ func (s *handleState) close() error {
 		_ = s.bufFree(id)
 	}
 
+	return err
+}
+
+// shutdownCause reports a cancellation caused by Shutdown as ErrShutdown.
+//
+// Shutdown cancels every job through the same flag a caller's cancel uses, and
+// an engine reports it in its own words ("cancelled: Explicit"), which matched
+// context.Canceled. A caller whose context is still live did not cancel
+// anything; telling it so would send it retrying work the runtime is refusing.
+func shutdownCause(ctx context.Context, err error) error {
+	if shutdownStarted.Load() && ctx.Err() == nil && errors.Is(err, context.Canceled) {
+		return fmt.Errorf("%w (%v)", ErrShutdown, err)
+	}
 	return err
 }
 
@@ -524,11 +546,14 @@ func (h *Handle) Submit(ctx context.Context, in any) (uint64, error) {
 }
 
 func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
-	if s.poisoned.Load() {
-		return 0, ErrPoisoned
-	}
+	// Closed before poisoned: a poisoned handle that was then closed used to
+	// answer ErrPoisoned, sending a caller whose policy is "on poison, close
+	// and reopen" back to close a handle it had already closed.
 	if s.closed.Load() || s.drainExited.Load() {
 		return 0, errors.New("gusset: handle is closed")
+	}
+	if s.poisoned.Load() {
+		return 0, errHandlePoisoned
 	}
 
 	var rawInput []byte
@@ -593,7 +618,7 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 	}
 	if s.poisoned.Load() {
 		<-s.sem
-		return 0, ErrPoisoned
+		return 0, errHandlePoisoned
 	}
 
 	header, err := extractCallHeader(ctx, s.callFlags, s.defaultOpcode)
@@ -608,7 +633,7 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 	if s.poisoned.Load() {
 		s.cgoMu.RUnlock()
 		<-s.sem
-		return 0, ErrPoisoned
+		return 0, errHandlePoisoned
 	}
 	ticket, err := ffi.Submit(s.ptr, header, rawInput, bufferID)
 	if err != nil {
@@ -673,7 +698,7 @@ var ErrTicketBusy = errors.New("gusset: ticket already has a waiter")
 func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	res, takeID, err := s.waitInternal(ctx, ticket)
 	if err != nil {
-		return nil, err
+		return nil, shutdownCause(ctx, err)
 	}
 	if takeID != 0 {
 		// Close takes cgoMu exclusively before HandleClose frees Rust memory.
@@ -695,7 +720,7 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, error) {
 	res, takeID, err := s.waitInternal(ctx, ticket)
 	if err != nil {
-		return nil, err
+		return nil, shutdownCause(ctx, err)
 	}
 
 	// Wrap under cgoMu so Close cannot HandleClose the take buffer between

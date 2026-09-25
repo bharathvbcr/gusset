@@ -62,6 +62,7 @@ package ffi
 import "C"
 import (
 	"context"
+	"errors"
 	"fmt"
 	"unsafe"
 )
@@ -104,9 +105,24 @@ func (e *Error) Is(target error) bool {
 		return e.Msg == "cancelled: DeadlineExceeded"
 	case context.Canceled:
 		return e.Msg == "cancelled: Explicit"
+	case ErrShutdown:
+		// Work cancelled by, or refused because of, gusset_shutdown.
+		return e.Msg == "cancelled: Shutdown" || e.Msg == "gusset runtime is shutting down"
+	case ErrShutdownIncomplete:
+		return e.Msg == shutdownIncompleteMsg
 	}
 	return false
 }
+
+// ErrShutdown matches work cancelled by Shutdown, or refused after it. It is
+// deliberately not context.Canceled: the caller's context was still live.
+var ErrShutdown = errors.New("gusset: runtime is shutting down")
+
+// ErrShutdownIncomplete matches a Shutdown whose drain budget expired with work
+// still running (an engine that does not call JobContext::check).
+var ErrShutdownIncomplete = errors.New("gusset: shutdown drain budget expired with work in flight")
+
+const shutdownIncompleteMsg = "shutdown drain budget expired with work in flight"
 
 // Sentinel errors for matching with errors.Is.
 var (
@@ -346,7 +362,7 @@ func Init() error {
 func Shutdown(drainMS uint32) error {
 	code := C.gusset_shutdown(C.uint32_t(drainMS))
 	if code != C.FFI_OK {
-		return &Error{Code: int(code), Msg: "shutdown failed"}
+		return &Error{Code: int(code), Msg: shutdownIncompleteMsg}
 	}
 	return nil
 }

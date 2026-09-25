@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"runtime/metrics"
+	"sync/atomic"
 	"time"
 
 	"github.com/bharathvbcr/gusset/internal/ffi"
@@ -19,7 +20,22 @@ var (
 	ErrPanic    = ffi.ErrPanic
 	ErrPoisoned = ffi.ErrPoisoned
 	ErrBadArg   = ffi.ErrBadArg
+
+	// ErrShutdown matches work cancelled by Shutdown or refused after it. It
+	// is not context.Canceled: the caller's own context was still live.
+	ErrShutdown = ffi.ErrShutdown
+	// ErrShutdownIncomplete is returned by Shutdown when its drain budget
+	// expired with work still running (an engine that never checks its
+	// JobContext).
+	ErrShutdownIncomplete = ffi.ErrShutdownIncomplete
 )
+
+// errHandlePoisoned is ErrPoisoned with a message; errors.Is matches by code.
+// The bare sentinel printed as "gusset error [3]: ".
+var errHandlePoisoned = &ffi.Error{
+	Code: ffi.ErrPoisoned.Code,
+	Msg:  "handle is poisoned: a job panicked; Close it and open a new handle",
+}
 
 // Expected ABI constants compiled into Go (I6).
 //
@@ -175,8 +191,12 @@ func Shutdown(drain time.Duration) error {
 	if ms > int64(MaxDrain/time.Millisecond) {
 		ms = int64(MaxDrain / time.Millisecond)
 	}
+	shutdownStarted.Store(true)
 	return ffi.Shutdown(uint32(ms))
 }
+
+// shutdownStarted is set once Shutdown has run; see shutdownCause.
+var shutdownStarted atomic.Bool
 
 // MaxDrain caps [Shutdown]'s budget.
 //

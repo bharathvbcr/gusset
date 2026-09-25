@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math/rand"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -279,7 +280,11 @@ func TestInterop_ConcurrentCloseWaitsForTheFirst(t *testing.T) {
 	_ = h.Close()
 	second := time.Now().UnixNano()
 	wg.Wait()
-	if first := firstDone.Load(); second < first {
+	// Both calls wake on the same closeDone, and the first goroutine stamps
+	// its time a few microseconds after its Close returns, so allow slack.
+	// The bug this pins returned the second Close ~330 ms early.
+	const slack = int64(50 * time.Millisecond)
+	if first := firstDone.Load(); second < first-slack {
 		t.Fatalf("second Close returned %v before the first finished", time.Duration(first-second))
 	}
 }
@@ -330,11 +335,11 @@ func TestInterop_ForgottenBufferCleanupDoesNotStallDuringClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 150 units: 1.5 s, never checks ctx, so Close joins it for that long.
-	if _, err := h.Submit(context.Background(), []byte{9, 150}); err != nil {
+	// 250 units: 2.5 s, never checks ctx, so Close joins it for that long.
+	if _, err := h.Submit(context.Background(), []byte{9, 250}); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(50 * time.Millisecond) // running, so Close has a join to wait on
+	time.Sleep(200 * time.Millisecond) // running, so Close has a join to wait on
 	func() {
 		for i := 0; i < 20; i++ {
 			if _, err := h.NewBuffer(4096); err != nil {
@@ -344,7 +349,8 @@ func TestInterop_ForgottenBufferCleanupDoesNotStallDuringClose(t *testing.T) {
 	}()
 	closed := make(chan struct{})
 	go func() { _ = h.Close(); close(closed) }()
-	time.Sleep(100 * time.Millisecond) // Close now holds cgoMu for the join
+	waitClosing(t, h) // Close has set closed and is heading into the join
+	time.Sleep(20 * time.Millisecond)
 
 	fired := make(chan struct{}, 100)
 	func() {
@@ -355,7 +361,7 @@ func TestInterop_ForgottenBufferCleanupDoesNotStallDuringClose(t *testing.T) {
 	}()
 	start := time.Now()
 	got := 0
-	deadline := time.After(700 * time.Millisecond)
+	deadline := time.After(1500 * time.Millisecond)
 	for got < 100 {
 		runtime.GC()
 		select {
@@ -380,23 +386,105 @@ func TestInterop_BytesDuringCloseDoesNotBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.Submit(context.Background(), []byte{9, 100}); err != nil { // 1 s
+	if _, err := h.Submit(context.Background(), []byte{9, 200}); err != nil { // 2 s
 		t.Fatal(err)
 	}
 	// Let the worker dequeue it: a job cancelled before it starts never runs,
 	// and Close would have nothing to join.
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	closed := make(chan struct{})
 	go func() { _ = h.Close(); close(closed) }()
-	time.Sleep(100 * time.Millisecond)
+	waitClosing(t, h)
 
 	start := time.Now()
 	b := buf.Bytes()
-	if took := time.Since(start); took > 200*time.Millisecond {
+	if took := time.Since(start); took > 500*time.Millisecond {
 		t.Fatalf("Bytes blocked %v behind Close", took)
 	}
 	if b != nil {
 		t.Fatal("Bytes returned a view of a buffer whose handle is closing")
 	}
 	<-closed
+}
+
+// waitClosing returns once h's Close has begun: Submit then fails fast with
+// "closed" instead of waiting for a permit. Replaces a fixed sleep that a slow
+// runner could outlast, which made the test assert before Close had started.
+func waitClosing(t *testing.T, h *gusset.Handle) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		_, err := h.Submit(ctx, []byte{0})
+		cancel()
+		if err != nil && strings.Contains(err.Error(), "closed") {
+			return
+		}
+	}
+	t.Fatal("Close never started")
+}
+
+// Every handle numbered its tickets from 1, so a ticket from handle A waited
+// on handle B found B's own ticket of the same number: B's result went to A's
+// caller with a nil error, and B's real waiter then got ErrUnknownTicket.
+func TestInterop_ForeignTicketIsUnknownNotAnotherCallersResult(t *testing.T) {
+	a, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	ta, err := a.Submit(ctx, []byte{0, 'A'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb, err := b.Submit(ctx, []byte{0, 'B', 'B'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ta == tb {
+		t.Fatalf("two handles issued the same ticket %d", ta)
+	}
+	if out, err := b.Wait(ctx, ta); !errors.Is(err, gusset.ErrUnknownTicket) {
+		t.Fatalf("Wait on B with A's ticket must be ErrUnknownTicket, got %q, %v", out, err)
+	}
+	if out, err := b.Wait(ctx, tb); err != nil || string(out) != "\x00BB" {
+		t.Fatalf("B's own waiter: %q, %v", out, err)
+	}
+	if out, err := a.Wait(ctx, ta); err != nil || string(out) != "\x00A" {
+		t.Fatalf("A's own waiter: %q, %v", out, err)
+	}
+}
+
+// A poisoned handle that was then closed must say it is closed. It answered
+// ErrPoisoned (with an empty message), telling a "close and reopen on poison"
+// caller to close a handle it had already closed.
+func TestInterop_ClosedWinsOverPoisoned(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := h.Call(ctx, []byte{1}); !errors.Is(err, gusset.ErrPanic) {
+		t.Fatalf("expected a panic, got %v", err)
+	}
+	_, err = h.Call(ctx, []byte{0})
+	if !errors.Is(err, gusset.ErrPoisoned) || !strings.Contains(err.Error(), "poisoned") {
+		t.Fatalf("poisoned handle must say so, got %v", err)
+	}
+	_ = h.Close()
+	_, err = h.Call(ctx, []byte{0})
+	if errors.Is(err, gusset.ErrPoisoned) || err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("a closed handle must report closed, got %v", err)
+	}
+	if _, err := h.NewBuffer(8); err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("NewBuffer on a closed handle must report closed, got %v", err)
+	}
 }

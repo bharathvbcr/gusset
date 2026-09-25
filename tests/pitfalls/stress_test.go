@@ -576,7 +576,8 @@ func TestStress_ConcurrentCallAndCloseRace(t *testing.T) {
 
 // TestStress_ConcurrentZeroCopyEgressAndCloseRace subjects WaitBuffer to severe concurrent
 // load while racing handle close. It proves that WaitBuffer either yields a valid, readable
-// *Buffer or fails cleanly with ErrClosed/canceled, never returning a nil or corrupted slice.
+// *Buffer or fails cleanly with ErrClosed/canceled, and that a view is never corrupted: a
+// Close that lands afterwards withdraws it (Bytes returns nil), per the Bytes contract.
 func TestStress_ConcurrentZeroCopyEgressAndCloseRace(t *testing.T) {
 	for trial := 0; trial < 5; trial++ {
 		h, err := gusset.Open(gusset.WithPoolSize(8), gusset.WithDiagnosticEngine())
@@ -608,7 +609,17 @@ func TestStress_ConcurrentZeroCopyEgressAndCloseRace(t *testing.T) {
 						return
 					}
 					slice := buf.Bytes()
-					if slice == nil || len(slice) < 3 || slice[1] != byte(gid) || slice[2] != byte(i) {
+					if slice == nil {
+						// Close landed between WaitBuffer and Bytes. Bytes is
+						// documented to withdraw the view once the handle is
+						// closed; that is the contract working, not corruption.
+						// (Counted as corruption, this failed ~1 run in 10
+						// under -race, before this change as well.)
+						_ = buf.Free()
+						closedCount.Add(1)
+						return
+					}
+					if len(slice) < 3 || slice[1] != byte(gid) || slice[2] != byte(i) {
 						t.Errorf("corrupted WaitBuffer response: %v", slice)
 						_ = buf.Free()
 						return
