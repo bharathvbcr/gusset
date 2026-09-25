@@ -249,10 +249,14 @@ func drainPipe(s *handleState) {
 
 		ticket := binary.NativeEndian.Uint64(buf[:])
 
-		// Synchronize with handle close to eliminate UAF on s.ptr
-		s.cgoMu.RLock()
-		if s.closed.Load() || s.ptr == nil {
-			s.cgoMu.RUnlock()
+		// Synchronize with handle close to eliminate UAF on s.ptr, without
+		// ever blocking. This goroutine used to wait on cgoMu.RLock behind
+		// Close's exclusive lock, so for the whole worker join nobody read the
+		// pipe. On a small pipe (macOS falls back to 512 bytes, 64 tickets,
+		// under memory pressure) workers then sat in the 10 s write backoff and
+		// Close took that long. During a close every result is discarded
+		// anyway, so keep reading and hand each waiter "closed".
+		if !s.enterCgo() {
 			s.deliver(ticket, callResult{err: errors.New("gusset: handle closed")}, 0)
 			continue
 		}

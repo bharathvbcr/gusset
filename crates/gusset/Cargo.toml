@@ -79,3 +79,8 @@ path = "../../tests/rust_allocator_counting.rs"
 [[test]]
 name = "rust_sigpipe"
 path = "../../tests/rust_sigpipe.rs"
+
+# Separate binary: flips the process-wide COUNTING_ACTIVE flag permanently.
+[[test]]
+name = "rust_counting_flip"
+path = "../../tests/rust_counting_flip.rs"

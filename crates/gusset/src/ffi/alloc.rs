@@ -474,6 +474,34 @@ pub fn record_alloc(size: usize) {
     add_alloc_count();
 }
 
+/// Like [`record_alloc`], but reports whether the bytes were counted here, so
+/// the owner can release exactly what it recorded with [`release_recorded`].
+///
+/// `COUNTING_ACTIVE` flips on the first allocation any `Counting` services,
+/// which is normally the global allocator's first allocation — but an adopter
+/// who calls a non-global `Counting` directly flips it later. A buffer counted
+/// by hand before that point was then never uncounted (`record_dealloc` had
+/// become a no-op), leaving `live_bytes` inflated for the rest of the process
+/// and `AdviseMemoryLimit` shrinking the Go heap for memory already freed.
+#[inline]
+pub fn record_alloc_tracked(size: usize) -> bool {
+    if counting_is_active() {
+        return false;
+    }
+    add_live_bytes(size);
+    add_alloc_count();
+    true
+}
+
+/// Releases bytes recorded by [`record_alloc_tracked`], by what was recorded
+/// rather than by the flag's current value.
+#[inline]
+pub fn release_recorded(size: usize, recorded: bool) {
+    if recorded {
+        dec_live_bytes(size);
+    }
+}
+
 /// Records a deallocation that bypassed the counting wrapper.
 ///
 /// Paired with [`record_alloc`]: both consult the same flag, and the flag cannot

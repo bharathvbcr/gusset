@@ -3,7 +3,7 @@
 
 #[cfg(gusset_allocator_api)]
 use crate::alloc::BufferAlloc;
-use crate::alloc::{record_alloc, record_dealloc, BUFFER_ALIGN};
+use crate::alloc::{record_alloc_tracked, release_recorded, BUFFER_ALIGN};
 use std::alloc::Layout;
 use std::io::{Error, ErrorKind, Result};
 
@@ -39,6 +39,8 @@ pub struct RawBuffer {
     ptr: *mut u8,
     len: usize,
     layout: Layout,
+    /// Whether these bytes were counted by hand, so Drop uncounts exactly that.
+    recorded: bool,
 }
 
 unsafe impl Send for RawBuffer {}
@@ -54,8 +56,13 @@ impl RawBuffer {
         if ptr.is_null() {
             return Err("allocation failed".to_string());
         }
-        record_alloc(len);
-        Ok(Self { ptr, len, layout })
+        let recorded = record_alloc_tracked(len);
+        Ok(Self {
+            ptr,
+            len,
+            layout,
+            recorded,
+        })
     }
 
     /// Copies `src` into a newly allocated buffer.
@@ -105,6 +112,10 @@ impl RawBuffer {
             ptr: v.as_mut_ptr(),
             len: v.len(),
             layout,
+            // BufferAlloc counted this block by hand exactly when no Counting
+            // global allocator is active; the flag cannot have flipped since
+            // unless a non-global Counting was called directly.
+            recorded: !crate::ffi::alloc::counting_is_active(),
         })
     }
 
@@ -140,7 +151,7 @@ impl Drop for RawBuffer {
             unsafe {
                 std::alloc::dealloc(self.ptr, self.layout);
             }
-            record_dealloc(self.layout.size());
+            release_recorded(self.layout.size(), self.recorded);
         }
     }
 }

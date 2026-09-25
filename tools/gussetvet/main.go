@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -114,6 +116,20 @@ func main() {
 	}
 	violations = append(violations, crossFree...)
 
+	callbacks, err := checkNoCallbacks(".")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gussetvet: R5 callback scan failed: %v\n", err)
+		os.Exit(1)
+	}
+	violations = append(violations, callbacks...)
+
+	wrappers, err := checkWrappers(targetDir, exports)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gussetvet: R1 wrapper scan failed: %v\n", err)
+		os.Exit(1)
+	}
+	violations = append(violations, wrappers...)
+
 	if len(violations) > 0 {
 		fmt.Fprintln(os.Stderr, "gussetvet: violations found:")
 		for _, v := range violations {
@@ -123,7 +139,9 @@ func main() {
 	}
 
 	fmt.Println("gussetvet: R5 checks passed (all exports carry noescape and nocallback)")
-	fmt.Println("gussetvet: R4 checks passed (no C.free on Rust-owned memory)")
+	fmt.Println("gussetvet: R4 checks passed (no C.free or preamble free() on Rust-owned memory)")
+	fmt.Println("gussetvet: R5 checks passed (no //export callbacks from C into Go)")
+	fmt.Println("gussetvet: R1 checks passed (every export has a Go wrapper)")
 }
 
 // crossFreeAllowed lists the paths permitted to call C.free.
@@ -145,23 +163,145 @@ var crossFreeAllowed = map[string]bool{
 // `C.free` on a Rust pointer is visible in the source, so it can be caught on every
 // commit on every platform instead of waiting for a sanitizer to notice the heap
 // is corrupt.
+//
+// Checked on the syntax tree, not the text. A line scan missed a reference that
+// is not a call (`f := C.free` and a later `f(p)`), and needed ad-hoc comment
+// stripping that a string literal containing "//" defeated. Any reference to the
+// C pseudo-package's free — call or value — is a violation, as is a cgo preamble
+// that calls free() itself, which is the same cross-free one level down.
 func checkAllocatorSymmetry(root string) ([]string, error) {
 	var violations []string
+	err := walkGo(root, func(rel string, fset *token.FileSet, file *ast.File) {
+		if crossFreeAllowed[rel] {
+			return
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "C" && sel.Sel.Name == "free" {
+				violations = append(violations, fmt.Sprintf(
+					"%s:%d: R4: C.free on Rust-owned memory; use gusset_buf_free / Buffer.Free",
+					rel, fset.Position(sel.Pos()).Line))
+			}
+			return true
+		})
+		for _, line := range preambleLines(file) {
+			if preambleFree.MatchString(line.text) {
+				violations = append(violations, fmt.Sprintf(
+					"%s:%d: R4: free() in a cgo preamble; Rust memory is released only by its own *_free export",
+					rel, fset.Position(line.pos).Line))
+			}
+		}
+	})
+	return violations, err
+}
 
-	// Assembled from fragments so the literal never appears in this file. The
-	// alternative — exempting the checker from its own rule — is how the CI lint
-	// job came to fail on every commit by matching the rules as written in
-	// AGENTS.md, and an exemption here would also hide a genuine violation if this
-	// tool ever grew a cgo call.
-	needle := "C." + "free("
+// preambleFree matches a call to free( in C code, not gusset_buf_free( or
+// gusset_status_free(.
+var preambleFree = regexp.MustCompile(`(^|[^A-Za-z0-9_])free\s*\(`)
 
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+// checkNoCallbacks enforces the other half of R5: no Go function is exported
+// to C. `//export` makes a Go function callable from C, and a Rust engine that
+// reached it would be a Rust thread calling into Go — the callback every
+// `#cgo nocallback` directive promises cgo will never happen.
+func checkNoCallbacks(root string) ([]string, error) {
+	var violations []string
+	err := walkGo(root, func(rel string, fset *token.FileSet, file *ast.File) {
+		for _, cg := range file.Comments {
+			for _, c := range cg.List {
+				if strings.HasPrefix(c.Text, "//export ") {
+					violations = append(violations, fmt.Sprintf(
+						"%s:%d: R5: //export makes Go callable from C; Gusset exports must never call back into Go",
+						rel, fset.Position(c.Pos()).Line))
+				}
+			}
+		}
+	})
+	return violations, err
+}
+
+// checkWrappers requires a Go reference to every export in exports.txt from the
+// ffi package. An export with no wrapper is ABI surface nothing exercises or
+// verifies from Go; exports_match proves the symbol exists, not that it is used.
+func checkWrappers(dir string, exports []string) ([]string, error) {
+	used := map[string]bool{}
+	err := walkGo(dir, func(rel string, fset *token.FileSet, file *ast.File) {
+		ast.Inspect(file, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok {
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "C" {
+					used[sel.Sel.Name] = true
+				}
+			}
+			return true
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	var violations []string
+	for _, fn := range exports {
+		fn = strings.TrimSpace(fn)
+		if fn == "" || strings.HasPrefix(fn, "#") {
+			continue
+		}
+		if !used[fn] {
+			violations = append(violations, fmt.Sprintf(
+				"%s: R1: export %s has no Go wrapper (no C.%s reference)", dir, fn, fn))
+		}
+	}
+	return violations, nil
+}
+
+type preambleLine struct {
+	text string
+	pos  token.Pos
+}
+
+// preambleLines returns the lines of the comment attached to `import "C"`.
+func preambleLines(file *ast.File) []preambleLine {
+	var out []preambleLine
+	for _, imp := range file.Imports {
+		if imp.Path.Value != `"C"` {
+			continue
+		}
+		doc := imp.Doc
+		if doc == nil {
+			for _, d := range file.Decls {
+				if g, ok := d.(*ast.GenDecl); ok && g.Tok == token.IMPORT {
+					for _, sp := range g.Specs {
+						if sp == imp {
+							doc = g.Doc
+						}
+					}
+				}
+			}
+		}
+		if doc == nil {
+			continue
+		}
+		for _, c := range doc.List {
+			for _, l := range strings.Split(c.Text, "\n") {
+				out = append(out, preambleLine{text: l, pos: c.Pos()})
+			}
+		}
+	}
+	return out
+}
+
+// walkGo parses every non-test .go file under root, skipping build output and
+// dependency trees. Test files are included: a cross-free in a test corrupts
+// the heap just as well.
+func walkGo(root string, visit func(rel string, fset *token.FileSet, file *ast.File)) error {
+	fset := token.NewFileSet()
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "target", "vendor", "node_modules":
+			case ".git", "target", "vendor", "node_modules", "testdata":
 				return filepath.SkipDir
 			}
 			return nil
@@ -169,34 +309,17 @@ func checkAllocatorSymmetry(root string) ([]string, error) {
 		if !strings.HasSuffix(path, ".go") {
 			return nil
 		}
-
-		rel := strings.TrimPrefix(path, "./")
-		if crossFreeAllowed[rel] {
-			return nil
-		}
-
-		lines, err := readLines(path)
+		file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
 		if err != nil {
-			return err
+			return fmt.Errorf("parse %s: %w", path, err)
 		}
-		for i, line := range lines {
-			// Ignore the rule as written in a comment, so documenting R4 does not
-			// violate it — the same mistake that made the CI lint job fail on
-			// every commit by matching its own rule text.
-			code := line
-			if idx := strings.Index(code, "//"); idx >= 0 {
-				code = code[:idx]
-			}
-			if strings.Contains(code, needle) {
-				violations = append(violations, fmt.Sprintf(
-					"%s:%d: R4: C.free on Rust-owned memory; use gusset_buf_free / Buffer.Free",
-					rel, i+1))
-			}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			rel = path
 		}
+		visit(rel, fset, file)
 		return nil
 	})
-
-	return violations, err
 }
 
 func readLines(path string) ([]string, error) {
