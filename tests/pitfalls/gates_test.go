@@ -96,8 +96,16 @@ func TestGate_CgoCheck2IsArmedWhenRequested(t *testing.T) {
 func TestSoak_GoroutineLeakProfileIsEmptyAfterDrain(t *testing.T) {
 	prof := pprof.Lookup("goroutineleak")
 	if prof == nil {
-		t.Fatalf("the goroutineleak profile is unavailable on %s; the soak job's leak "+
-			"assertion cannot run and must not be reported as passing", runtime.Version())
+		// go.mod's floor is Go 1.26, which has no such profile. A plain run
+		// there skips (visibly, not as a pass); the lanes that own this
+		// assertion set GUSSET_REQUIRE_LEAK_PROFILE=1 so it can never skip
+		// where it is supposed to hold.
+		if os.Getenv("GUSSET_REQUIRE_LEAK_PROFILE") == "1" {
+			t.Fatalf("the goroutineleak profile is unavailable on %s; the soak job's leak "+
+				"assertion cannot run and must not be reported as passing", runtime.Version())
+		}
+		t.Skipf("the goroutineleak profile needs Go 1.27; %s cannot run this assertion "+
+			"(set GUSSET_REQUIRE_LEAK_PROFILE=1 to make that a failure)", runtime.Version())
 	}
 
 	baseline := prof.Count()

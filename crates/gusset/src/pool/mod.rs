@@ -910,6 +910,31 @@ fn inline_record(buf: &mut [u8; INLINE_RECORD_MAX], ticket: u64, data: &[u8]) ->
     16 + padded
 }
 
+/// Sizes the completion pipe for `pool_size` unread completions and reports
+/// whether inline records fit (`Ok(true)`) or only bare tickets do.
+///
+/// `grow` makes the pipe hold at least the given number of bytes. Where the
+/// capacity can be queried and grown (`can_grow`, Linux), records are tried
+/// first and tickets are the fallback; only a pipe too small for tickets is an
+/// error. Elsewhere nothing can be grown, and every BSD-derived pipe holds at
+/// least 16 KiB, so records are allowed only while they fit there.
+fn size_completion_pipe(
+    pool_size: usize,
+    can_grow: bool,
+    grow: impl Fn(usize) -> Result<(), String>,
+) -> Result<bool, String> {
+    let records = pool_size.saturating_mul(INLINE_RECORD_MAX);
+    if !can_grow {
+        grow(pool_size.saturating_mul(8))?;
+        return Ok(records <= 16 * 1024);
+    }
+    if grow(records).is_ok() {
+        return Ok(true);
+    }
+    grow(pool_size.saturating_mul(8))?;
+    Ok(false)
+}
+
 /// Explicit worker stack size (R8).
 ///
 /// cgo-created threads inherit the pthread default, which is 128 KiB on musl. Heavy
@@ -957,20 +982,13 @@ impl Handle {
         // 8-byte tickets for every result rather than refuse the pool.
         let inline_ok = if pipe_write_fd < 0 {
             true
-        } else if cfg!(target_os = "linux") {
-            if sys::ensure_pipe_capacity(pipe_write_fd, pool_size.saturating_mul(INLINE_RECORD_MAX))
-                .is_ok()
-            {
-                true
-            } else {
-                sys::ensure_pipe_capacity(pipe_write_fd, pool_size.saturating_mul(8))?;
-                false
-            }
         } else {
-            // Elsewhere the capacity cannot be queried. Every BSD-derived pipe
-            // holds at least 16 KiB, so allow records only while they fit there.
-            pool_size.saturating_mul(INLINE_RECORD_MAX) <= 16 * 1024
+            size_completion_pipe(pool_size, cfg!(target_os = "linux"), |bytes| {
+                sys::ensure_pipe_capacity(pipe_write_fd, bytes)
+            })?
         };
+        #[cfg(test)]
+        let inline_ok = inline_ok && !tests::force_ticket_only();
 
         let (sender, receiver) = JobQueue::new(pool_size * 2);
 
@@ -1841,6 +1859,76 @@ mod tests {
 
         handle.close();
         // SAFETY: the read end is still owned by this test; close() took the write end.
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// The thread whose `Handle::open` sizes the pipe for bare tickets only,
+    /// as when the pipe cannot grow to hold inline records. Scoped to one
+    /// thread like the spawn injector (R7 rules out `thread_local!`), so
+    /// concurrently running tests are unaffected.
+    static FORCE_TICKET_ONLY: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
+
+    pub(super) fn force_ticket_only() -> bool {
+        *lock_recover(&FORCE_TICKET_ONLY) == Some(std::thread::current().id())
+    }
+
+    #[test]
+    fn completion_pipe_sizing_falls_back_to_tickets_then_refuses() {
+        let limit = |max: usize| {
+            move |bytes: usize| {
+                if bytes <= max {
+                    Ok(())
+                } else {
+                    Err(format!("cannot grow to {bytes}"))
+                }
+            }
+        };
+        // Room for 4 records: inline.
+        assert_eq!(
+            size_completion_pipe(4, true, limit(4 * INLINE_RECORD_MAX)),
+            Ok(true)
+        );
+        // Room for tickets but not records: tickets, not an error.
+        assert_eq!(size_completion_pipe(4, true, limit(4 * 8)), Ok(false));
+        // Not even tickets: refused.
+        assert!(size_completion_pipe(4, true, limit(4 * 8 - 1)).is_err());
+        // Cannot grow: records only while pool_size of them fit in 16 KiB.
+        let any = |_: usize| Ok(());
+        assert_eq!(size_completion_pipe(256, false, any), Ok(true));
+        assert_eq!(size_completion_pipe(257, false, any), Ok(false));
+    }
+
+    /// With the pipe sized for tickets only, a caller that asks for inline
+    /// records still gets bare tickets, and every result is taken as before.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ticket_only_pipe_ignores_the_inline_flag() {
+        use crate::header::GUSSET_FLAG_INLINE_COMPLETION;
+        let (r, w) = make_pipe();
+        *lock_recover(&FORCE_TICKET_ONLY) = Some(std::thread::current().id());
+        let opened = Handle::open(1, w);
+        *lock_recover(&FORCE_TICKET_ONLY) = None;
+        let handle = match opened {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+        assert!(!handle.inline_ok);
+        let header = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE | GUSSET_FLAG_INLINE_COMPLETION,
+            ..Default::default()
+        };
+        for input in [&[0u8][..], &[0, 1, 2, 3, 4, 5, 6, 7, 8]] {
+            let ticket = match handle.submit(header, input, 0) {
+                Ok(t) => t,
+                Err(e) => panic!("submit failed: {}", e),
+            };
+            assert_eq!(word(&read_exact_fd(r, 8)), ticket, "expected a bare ticket");
+            assert!(matches!(handle.take(ticket), Ok(JobResult::Ok(ref v)) if v == input));
+        }
+        handle.close();
+        // SAFETY: the read end is still owned by this test.
         unsafe {
             libc::close(r);
         }

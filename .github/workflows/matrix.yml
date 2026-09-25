@@ -39,7 +39,11 @@ jobs:
       - name: Run Rust tests
         run: cargo test --workspace
 
+      # 1.27 has the goroutineleak profile, so the leak gate must run here,
+      # never skip.
       - name: Run Go test suite (Panic Zoo & Pitfalls)
+        env:
+          GUSSET_REQUIRE_LEAK_PROFILE: '1'
         run: go test -v -timeout 10m ./...
 
       # Adopters may build with Go 1.27's SIMD experiment for their own
@@ -52,6 +56,37 @@ jobs:
           go vet ./...
           go test -timeout 10m ./...
           go test -run SIMD -count=1 ./bench
+
+  # go.mod declares Go 1.26 (latest minus one, per DECISIONS), and nothing
+  # else here runs it: every other lane is 1.27. Build, vet and test on the
+  # floor so a 1.27-only API or behaviour cannot slip in unnoticed.
+  go-floor:
+    name: Go 1.26 floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+
+      - name: Build Rust static library
+        run: cargo build --release
+
+      - name: Generate Go archive hash
+        run: go generate ./internal/ffi
+
+      - name: Vet and test on the floor
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          go vet ./...
+          go test -timeout 10m ./...
 
   # The stable Allocator trait lands in Rust 1.100. Until that is the stable
   # channel, nightly carries it; switch `toolchain` to 1.100 once released. The

@@ -81,6 +81,8 @@ jobs:
         run: go test -v -timeout 30m ./...
 
       - name: Soak on Go Tip
+        env:
+          GUSSET_REQUIRE_LEAK_PROFILE: '1'
         run: |
           go test -v -timeout 20m \
             -run 'TestPitfall_ThreadCapBoundedSoak|TestSoak_GoroutineLeakProfileIsEmptyAfterDrain' \
