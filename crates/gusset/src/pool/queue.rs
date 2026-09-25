@@ -122,7 +122,16 @@ impl<T> JobQueue<T> {
             if polls.is_multiple_of(32) && Instant::now() >= deadline {
                 break;
             }
-            std::hint::spin_loop();
+            // Yield rather than burn: under load, the core this poll would
+            // occupy belongs to a worker with a unit to run. Pure spinning
+            // cost ~6% on 1 ms parallel jobs on 4 vCPUs; sched_yield returns
+            // at once when nothing else is runnable, so an idle poll stays
+            // as fast as a spin.
+            if polls.is_multiple_of(4) {
+                std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
         }
         self.spinning.fetch_sub(1, Ordering::SeqCst);
 

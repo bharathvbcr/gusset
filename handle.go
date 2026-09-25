@@ -243,6 +243,10 @@ func Open(opts ...Option) (*Handle, error) {
 func drainPipe(s *handleState) {
 	defer close(s.drainDone)
 	tr := newTicketReader(s.pipe)
+	// Only a lone in-flight job earns the longer poll: under parallel load a
+	// completion is always pending, and polling between them took a core the
+	// workers needed (1 ms parallel jobs +18% on 4 vCPUs).
+	tr.inFlight = func() bool { return len(s.sem) == 1 }
 
 	for {
 		ticket, err := tr.next()
@@ -331,6 +335,13 @@ func drainPipe(s *handleState) {
 // polls once and then parks: no CPU at rest.
 const ticketReaderSpin = 50 * time.Microsecond
 
+// ticketReaderSpinBusy is the longer poll used while exactly one submitted job
+// is in flight, when that completion is the next thing to happen. A serial caller running
+// ~100 µs jobs outlasted the 50 µs window and paid the wake cost on every call
+// (~58 µs of overhead against raw cgo). Capped: a job longer than this parks
+// the reader as before, so a long-running engine never costs a busy core.
+const ticketReaderSpinBusy = 200 * time.Microsecond
+
 // ticketReader reads 8-byte completion tickets, several per system call.
 //
 // It used to be one io.ReadFull of 8 bytes per ticket, which under parallel
@@ -344,6 +355,8 @@ type ticketReader struct {
 	end   int
 	// lastTicket is when the previous ticket was consumed.
 	lastTicket time.Time
+	// inFlight reports whether a completion is imminent enough to poll for.
+	inFlight func() bool
 	// State for readFn, which is built once: a closure created per read
 	// escapes through the RawConn interface and cost three allocations per
 	// call (3 -> 6 allocs/op on CallNoop).
@@ -398,6 +411,13 @@ func (tr *ticketReader) fill(p []byte) (int, error) {
 	return tr.n, tr.rerr
 }
 
+func (tr *ticketReader) spinBudget() time.Duration {
+	if tr.inFlight != nil && tr.inFlight() {
+		return ticketReaderSpinBusy
+	}
+	return ticketReaderSpin
+}
+
 // readOnce is the RawConn.Read callback: true when done, false to park.
 func (tr *ticketReader) readOnce(fd uintptr) bool {
 	for {
@@ -412,7 +432,7 @@ func (tr *ticketReader) readOnce(fd uintptr) bool {
 		case e == syscall.EINTR:
 			continue
 		case e == syscall.EAGAIN:
-			if !tr.lastTicket.IsZero() && time.Since(tr.lastTicket) < ticketReaderSpin {
+			if !tr.lastTicket.IsZero() && time.Since(tr.lastTicket) < tr.spinBudget() {
 				runtime.Gosched()
 				continue
 			}
