@@ -573,3 +573,32 @@ func TestInterop_OpcodeContextAcceptsEveryIntegerKind(t *testing.T) {
 		}
 	}
 }
+
+// NewBuffer memory must be zeroed, like Go's make: uninitialized memory
+// exposed whatever the process last freed at that address.
+func TestInterop_NewBufferIsZeroed(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	for _, n := range []int{64, 4096, 100_000, 1 << 20} {
+		for round := 0; round < 4; round++ {
+			b, err := h.NewBuffer(n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data := b.Bytes()
+			for i, v := range data {
+				if v != 0 {
+					t.Fatalf("n=%d round %d: byte %d = %#x; NewBuffer returned stale memory", n, round, i, v)
+				}
+			}
+			// Dirty it so a reused block would show on the next round.
+			for i := range data {
+				data[i] = 0xA5
+			}
+			_ = b.Free()
+		}
+	}
+}

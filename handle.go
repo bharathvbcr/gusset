@@ -607,7 +607,7 @@ func (h *Handle) Call(ctx context.Context, in []byte) ([]byte, error) {
 }
 
 func (s *handleState) call(ctx context.Context, in []byte) ([]byte, error) {
-	ticket, err := s.submit(ctx, in)
+	ticket, err := s.submitInput(ctx, in, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -640,7 +640,7 @@ func (h *Handle) CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error) {
 		return nil, errors.New("gusset: buffer is not initialized")
 	}
 	defer runtime.KeepAlive(in)
-	ticket, err := h.state.submit(ctx, in)
+	ticket, err := h.state.submitInput(ctx, nil, in)
 	if err != nil {
 		runtime.KeepAlive(h)
 		return nil, err
@@ -671,7 +671,28 @@ func (h *Handle) Submit(ctx context.Context, in any) (uint64, error) {
 	return ticket, err
 }
 
+// submit is the Submit(any) entry: it sorts the input by type and hands a
+// typed pair to submitInput. Call and CallBuffer go to submitInput directly:
+// passing a []byte through `any` boxed its slice header, one heap allocation
+// on every Call (CallNoop 2 -> 3 allocs/op).
 func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
+	switch v := in.(type) {
+	case []byte:
+		return s.submitInput(ctx, v, nil)
+	case *Buffer:
+		if v == nil {
+			return 0, errors.New("gusset: buffer is nil")
+		}
+		return s.submitInput(ctx, nil, v)
+	case nil:
+		return s.submitInput(ctx, nil, nil)
+	default:
+		return 0, errors.New("gusset: input must be []byte or *Buffer")
+	}
+}
+
+// submitInput submits either inline bytes (buf == nil) or a Buffer.
+func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) (uint64, error) {
 	// Closed before poisoned: a poisoned handle that was then closed used to
 	// answer ErrPoisoned, sending a caller whose policy is "on poison, close
 	// and reopen" back to close a handle it had already closed.
@@ -685,16 +706,13 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 	var rawInput []byte
 	var bufferID uint64
 
-	switch v := in.(type) {
-	case []byte:
-		if len(v) > inlineResultBytes {
+	if buf == nil {
+		if len(raw) > inlineResultBytes {
 			return 0, errors.New("gusset: []byte input exceeds 4096-byte copy limit; use NewBuffer")
 		}
-		rawInput = v
-	case *Buffer:
-		if v == nil {
-			return 0, errors.New("gusset: buffer is nil")
-		}
+		rawInput = raw
+	} else {
+		v := buf
 		if v.state == nil {
 			return 0, errors.New("gusset: buffer is not initialized")
 		}
@@ -709,19 +727,19 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 			// A Go-heap result buffer (see waitBuffer): no Rust id to pass, so
 			// its bytes travel inline. Id 0 used to mean "no input", which
 			// silently ran the engine on nothing. Data and liveness are read
-			// together: a Free between two separate reads sent nil as input.
-			data, live := v.snapshot()
-			if !live {
-				return 0, errors.New("gusset: buffer is freed or closed")
-			}
+			// in a way a concurrent Free cannot tear: freed was checked above,
+			// and an id-0 buffer's data is never written after construction
+			// (Free leaves it; the memory is Go's). A Free racing this Submit
+			// therefore sends the real bytes, never the nil that used to
+			// arrive as empty input. No lock: any mutex on this path made
+			// *Buffer escape, which boxed every Submit input on the heap
+			// (SubmitWait 2 -> 3 allocs/op).
+			data := v.data
 			if len(data) > inlineResultBytes {
 				return 0, errors.New("gusset: buffer without a Rust id exceeds the 4096-byte copy limit")
 			}
 			rawInput = data
 		}
-	case nil:
-	default:
-		return 0, errors.New("gusset: input must be []byte or *Buffer")
 	}
 
 	// Acquire semaphore slot

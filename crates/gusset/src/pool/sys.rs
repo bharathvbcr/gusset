@@ -47,14 +47,30 @@ unsafe impl Sync for RawBuffer {}
 
 impl RawBuffer {
     /// Allocates 64-byte aligned memory.
+    ///
+    /// Zero-filled. `NewBuffer` hands this memory to Go, and an engine may
+    /// return a buffer it allocated without writing every byte; uninitialized
+    /// memory there exposed whatever the process last freed at that address
+    /// (a previous request's payload, a key) to a caller that never wrote it.
+    /// Go's own `make` zeroes, so callers reasonably assumed this did too.
     pub fn allocate(len: usize) -> std::result::Result<Self, String> {
+        Self::allocate_with(len, true)
+    }
+
+    fn allocate_with(len: usize, zeroed: bool) -> std::result::Result<Self, String> {
         check_buffer_len(len)?;
         let layout = Layout::from_size_align(len, BUFFER_ALIGN)
             .map_err(|e| format!("invalid layout: {}", e))?;
         // System, not the global allocator: buffer memory is counted by Gusset
         // alone (see count_buffer_alloc), so it must not also pass through an
         // installed Counting.
-        let ptr = unsafe { System.alloc(layout) };
+        let ptr = unsafe {
+            if zeroed {
+                System.alloc_zeroed(layout)
+            } else {
+                System.alloc(layout)
+            }
+        };
         if ptr.is_null() {
             return Err("allocation failed".to_string());
         }
@@ -68,7 +84,8 @@ impl RawBuffer {
     /// thread so `gusset_take` is a pointer return rather than a memcpy on the
     /// cgo thread (R16 egress).
     pub fn from_bytes(src: &[u8]) -> std::result::Result<Self, String> {
-        let buf = Self::allocate(src.len())?;
+        // Every byte is overwritten below, so zeroing first would be waste.
+        let buf = Self::allocate_with(src.len(), false)?;
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), buf.ptr, src.len());
         }

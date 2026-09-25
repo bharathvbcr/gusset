@@ -253,17 +253,6 @@ func (b *Buffer) Bytes() []byte {
 	return b.data
 }
 
-// snapshot returns the view and whether the buffer is still live, read together
-// under b.mu so a concurrent Free cannot slip between the two.
-func (b *Buffer) snapshot() ([]byte, bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.freed.Load() {
-		return nil, false
-	}
-	return b.data, true
-}
-
 // ID returns the Rust buffer id, or 0 for a buffer that owns no Rust memory: an
 // empty result, or a small result carried in Go memory (see WaitBuffer). A
 // 0-id Buffer passed to Submit or CallBuffer sends its bytes inline.
@@ -293,7 +282,12 @@ func (b *Buffer) Free() error {
 	charge := b.budgeted
 	// Drop our own view before releasing the lock, so a Bytes that acquires it
 	// next sees freed and never copies this header out.
-	b.data = nil
+	// An id-0 buffer's data is Go memory and is never written after
+	// construction, so Submit can read it after an atomic freed check without
+	// a lock (see submitInput). Only a Rust view is withdrawn here.
+	if b.id != 0 {
+		b.data = nil
+	}
 	b.mu.Unlock()
 
 	// bufFree takes cgoMu. Do not hold b.mu across that: Bytes acquires cgoMu
