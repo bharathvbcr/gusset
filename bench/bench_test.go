@@ -93,6 +93,16 @@ func BenchmarkGussetBufferLarge(b *testing.B) {
 		b.Fatalf("NewBuffer failed: %v", err)
 	}
 	defer buf.Free()
+	// Fill explicitly. The diagnostic engine dispatches on input[0], and this
+	// benchmark never wrote the buffer, so every iteration ran whatever mode
+	// the allocator's leftover byte selected — panics, and mode 16 asked for
+	// multi-GiB outputs — and runs failed or measured the wrong work. Mode 0
+	// echoes: a 64 KiB request and a 64 KiB result, as the name says.
+	data := buf.Bytes()
+	for i := range data {
+		data[i] = byte(i)
+	}
+	data[0] = 0
 
 	ctx := context.Background()
 
@@ -125,6 +135,16 @@ func BenchmarkGussetBufferLargeZeroCopy(b *testing.B) {
 		b.Fatalf("NewBuffer failed: %v", err)
 	}
 	defer buf.Free()
+	// Fill explicitly. The diagnostic engine dispatches on input[0], and this
+	// benchmark never wrote the buffer, so every iteration ran whatever mode
+	// the allocator's leftover byte selected — panics, and mode 16 asked for
+	// multi-GiB outputs — and runs failed or measured the wrong work. Mode 0
+	// echoes: a 64 KiB request and a 64 KiB result, as the name says.
+	data := buf.Bytes()
+	for i := range data {
+		data[i] = byte(i)
+	}
+	data[0] = 0
 
 	ctx := context.Background()
 
