@@ -3,8 +3,9 @@
 
 #[cfg(gusset_allocator_api)]
 use crate::alloc::BufferAlloc;
-use crate::alloc::{record_alloc_tracked, release_recorded, BUFFER_ALIGN};
+use crate::alloc::{count_buffer_alloc, count_buffer_dealloc, BUFFER_ALIGN};
 use std::alloc::Layout;
+use std::alloc::{GlobalAlloc, System};
 use std::io::{Error, ErrorKind, Result};
 
 /// Hard ceiling on a single Rust-owned buffer.
@@ -39,8 +40,6 @@ pub struct RawBuffer {
     ptr: *mut u8,
     len: usize,
     layout: Layout,
-    /// Whether these bytes were counted by hand, so Drop uncounts exactly that.
-    recorded: bool,
 }
 
 unsafe impl Send for RawBuffer {}
@@ -52,17 +51,15 @@ impl RawBuffer {
         check_buffer_len(len)?;
         let layout = Layout::from_size_align(len, BUFFER_ALIGN)
             .map_err(|e| format!("invalid layout: {}", e))?;
-        let ptr = unsafe { std::alloc::alloc(layout) };
+        // System, not the global allocator: buffer memory is counted by Gusset
+        // alone (see count_buffer_alloc), so it must not also pass through an
+        // installed Counting.
+        let ptr = unsafe { System.alloc(layout) };
         if ptr.is_null() {
             return Err("allocation failed".to_string());
         }
-        let recorded = record_alloc_tracked(len);
-        Ok(Self {
-            ptr,
-            len,
-            layout,
-            recorded,
-        })
+        count_buffer_alloc(len);
+        Ok(Self { ptr, len, layout })
     }
 
     /// Copies `src` into a newly allocated buffer.
@@ -81,9 +78,9 @@ impl RawBuffer {
     /// Takes ownership of a `Vec<u8, BufferAlloc>` without copying its bytes.
     ///
     /// The vector's memory was allocated by `BufferAlloc` as
-    /// `(capacity, BUFFER_ALIGN)` through the global allocator and counted once —
-    /// exactly what [`RawBuffer::allocate`] does — so `Drop` below frees and
-    /// uncounts it with the same layout and the accounting stays balanced.
+    /// `(capacity, BUFFER_ALIGN)` from `System` and counted once — exactly what
+    /// [`RawBuffer::allocate`] does — so `Drop` below frees and uncounts it with
+    /// the same layout and the accounting stays balanced.
     ///
     /// Hands the vector back when it cannot be adopted as-is: empty (possibly a
     /// dangling pointer), over [`MAX_BUFFER_BYTES`], or not 64-byte aligned.
@@ -112,10 +109,6 @@ impl RawBuffer {
             ptr: v.as_mut_ptr(),
             len: v.len(),
             layout,
-            // BufferAlloc counted this block by hand exactly when no Counting
-            // global allocator is active; the flag cannot have flipped since
-            // unless a non-global Counting was called directly.
-            recorded: !crate::ffi::alloc::counting_is_active(),
         })
     }
 
@@ -149,9 +142,9 @@ impl Drop for RawBuffer {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             unsafe {
-                std::alloc::dealloc(self.ptr, self.layout);
+                System.dealloc(self.ptr, self.layout);
             }
-            release_recorded(self.layout.size(), self.recorded);
+            count_buffer_dealloc(self.layout.size());
         }
     }
 }

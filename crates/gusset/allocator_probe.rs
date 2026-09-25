@@ -27,7 +27,6 @@
 fn probe_allocator_api() {
     use std::env;
     use std::path::PathBuf;
-    use std::process::Command;
 
     println!("cargo::rustc-check-cfg=cfg(gusset_allocator_api)");
     println!("cargo::rerun-if-env-changed=GUSSET_ALLOCATOR_API");
@@ -52,13 +51,8 @@ fn probe_allocator_api() {
     // the trait but not (say) `Box::into_raw_with_allocator` falls back instead
     // of failing to build the crate.
     let code = r#"
-        #![no_std]
-        extern crate alloc;
-        use core::alloc::{Allocator, AllocError, Layout};
-        use core::ptr::NonNull;
-        use alloc::alloc::Global;
-        use alloc::boxed::Box;
-        use alloc::vec::Vec;
+        use std::alloc::{Allocator, AllocError, Global, Layout, System};
+        use std::ptr::NonNull;
         #[derive(Clone, Copy)]
         pub struct P;
         unsafe impl Allocator for P {
@@ -75,7 +69,9 @@ fn probe_allocator_api() {
             let b: Box<u8, P> = Box::new_in(1, P);
             let (raw, a) = Box::into_raw_with_allocator(b);
             let b = unsafe { Box::from_raw_in(raw, a) };
-            v.len() + *b as usize + Vec::<u8, P>::new_in(P).capacity()
+            // BufferAlloc allocates from System as an Allocator.
+            let s: Vec<u8, System> = Vec::with_capacity_in(8, System);
+            v.len() + *b as usize + Vec::<u8, P>::new_in(P).capacity() + s.capacity()
         }
     "#;
     if std::fs::write(&src, code).is_err() {
@@ -83,40 +79,24 @@ fn probe_allocator_api() {
         return;
     }
 
-    // Compile the probe the way the crate itself is compiled: through the same
-    // wrapper (as autocfg does) and with the same flags, so a sysroot, target
-    // feature or -Z flag that changes what std offers changes the answer too.
-    let wrapper = env::var_os("RUSTC_WRAPPER").filter(|w| !w.is_empty());
-    let mut cmd = match wrapper {
-        Some(w) => {
-            let mut c = Command::new(w);
-            c.arg(&rustc);
-            c
+    // First, compile the probe the way the crate itself is compiled: through
+    // the same wrapper (as autocfg does), with the same flags and target, so a
+    // sysroot or -Z flag that changes what std offers changes the answer too.
+    let (mut ok, mut stderr) = run_probe(&rustc, &out_dir, &src, true);
+    if !ok {
+        // Retry for the host with no extra flags. Whether `Allocator` is
+        // stable is a property of the compiler release, never of the target,
+        // and the target-mode compile fails for reasons unrelated to it: a
+        // custom target spec (TARGET is only the JSON file's stem) or
+        // -Zbuild-std (no prebuilt std for the target). Those builds used to
+        // fall back silently to the pre-1.100 path.
+        let (host_ok, host_err) = run_probe(&rustc, &out_dir, &src, false);
+        if host_ok {
+            ok = true;
+        } else {
+            stderr = format!("{stderr}\n-- host retry --\n{host_err}");
         }
-        None => Command::new(&rustc),
-    };
-    if let Ok(flags) = env::var("CARGO_ENCODED_RUSTFLAGS") {
-        cmd.args(flags.split('\x1f').filter(|f| !f.is_empty()));
     }
-    cmd.arg("--crate-type=lib")
-        .arg("--edition=2021")
-        .arg("--emit=metadata")
-        .arg("--crate-name=gusset_allocator_probe")
-        .arg("--out-dir")
-        .arg(&out_dir)
-        .arg("--cap-lints=allow");
-    if let Ok(target) = env::var("TARGET") {
-        cmd.arg("--target").arg(target);
-    }
-    cmd.arg(&src);
-
-    let (ok, stderr) = match cmd.output() {
-        Ok(o) => (
-            o.status.success(),
-            String::from_utf8_lossy(&o.stderr).into_owned(),
-        ),
-        Err(e) => (false, format!("could not run rustc: {e}")),
-    };
     if ok {
         println!("cargo::rustc-cfg=gusset_allocator_api");
     } else if forced.as_deref() == Some("1") {
@@ -127,6 +107,52 @@ fn probe_allocator_api() {
         );
     }
     publish(ok);
+}
+
+/// Compiles the probe; `as_target` adds the build's wrapper, flags and target.
+fn run_probe(
+    rustc: &std::ffi::OsStr,
+    out_dir: &std::path::Path,
+    src: &std::path::Path,
+    as_target: bool,
+) -> (bool, String) {
+    use std::env;
+    use std::process::Command;
+
+    let wrapper = env::var_os("RUSTC_WRAPPER").filter(|w| !w.is_empty() && as_target);
+    let mut cmd = match wrapper {
+        Some(w) => {
+            let mut c = Command::new(w);
+            c.arg(rustc);
+            c
+        }
+        None => Command::new(rustc),
+    };
+    if as_target {
+        if let Ok(flags) = env::var("CARGO_ENCODED_RUSTFLAGS") {
+            cmd.args(flags.split('\x1f').filter(|f| !f.is_empty()));
+        }
+    }
+    cmd.arg("--crate-type=lib")
+        .arg("--edition=2021")
+        .arg("--emit=metadata")
+        .arg("--crate-name=gusset_allocator_probe")
+        .arg("--out-dir")
+        .arg(out_dir)
+        .arg("--cap-lints=allow");
+    if as_target {
+        if let Ok(target) = env::var("TARGET") {
+            cmd.arg("--target").arg(target);
+        }
+    }
+    cmd.arg(src);
+    match cmd.output() {
+        Ok(o) => (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        ),
+        Err(e) => (false, format!("could not run rustc: {e}")),
+    }
 }
 
 /// Publishes the probe's answer to dependents as `DEP_GUSSET_ALLOCATOR_API`

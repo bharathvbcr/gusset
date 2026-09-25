@@ -35,11 +35,20 @@ type Buffer struct {
 	// released underneath a live slice. No cycle: the Handle's cleanup argument
 	// is its state, not the Handle.
 	owner *Handle
+	// budgeted is the bytes this buffer holds against WithBufferBudget,
+	// returned exactly once by Free or the cleanup backstop.
+	budgeted int64
 }
+
+// ErrBufferBudget is returned by NewBuffer when the handle's live
+// caller-allocated buffers would exceed WithBufferBudget.
+var ErrBufferBudget = errors.New("gusset: handle buffer budget exhausted; Free buffers before allocating more")
 
 type bufferCleanupInfo struct {
 	state *handleState
 	id    uint64
+	// budgeted is the bytes this buffer holds against WithBufferBudget.
+	budgeted int64
 }
 
 // NewBuffer allocates a 64-byte aligned buffer in Rust-owned memory (R16).
@@ -57,6 +66,35 @@ func (h *Handle) NewBuffer(n int) (*Buffer, error) {
 }
 
 func (s *handleState) newBuffer(n int) (*Buffer, error) {
+	return s.allocBuffer(n, true)
+}
+
+// reserveBudget claims n bytes of the handle's buffer budget, if one is set.
+func (s *handleState) reserveBudget(n int64) bool {
+	if s.bufBudget <= 0 {
+		return true
+	}
+	for {
+		cur := s.bufBytes.Load()
+		if cur+n > s.bufBudget {
+			return false
+		}
+		if s.bufBytes.CompareAndSwap(cur, cur+n) {
+			return true
+		}
+	}
+}
+
+func (s *handleState) releaseBudget(n int64) {
+	if n > 0 {
+		s.bufBytes.Add(-n)
+	}
+}
+
+// allocBuffer allocates a Rust buffer. budgeted buffers count against
+// WithBufferBudget; a finished result re-wrapped for WaitBuffer does not, since
+// refusing it would lose work that already completed.
+func (s *handleState) allocBuffer(n int, budgeted bool) (*Buffer, error) {
 	if n <= 0 {
 		return nil, errors.New("gusset: buffer size must be greater than zero")
 	}
@@ -70,38 +108,53 @@ func (s *handleState) newBuffer(n int) (*Buffer, error) {
 		return nil, errHandlePoisoned
 	}
 
+	var charge int64
+	if budgeted && s.bufBudget > 0 {
+		if !s.reserveBudget(int64(n)) {
+			return nil, ErrBufferBudget
+		}
+		charge = int64(n)
+	}
 	if !s.enterCgo() {
+		s.releaseBudget(charge)
 		return nil, errors.New("gusset: handle is closed")
 	}
 	if s.poisoned.Load() {
 		s.cgoMu.RUnlock()
+		s.releaseBudget(charge)
 		return nil, errHandlePoisoned
 	}
 	id, slice, err := ffi.BufAlloc(s.ptr, n)
 	s.cgoMu.RUnlock()
 
 	if err != nil {
+		s.releaseBudget(charge)
 		if errors.Is(err, ErrPoisoned) {
 			s.poisoned.Store(true)
 		}
 		return nil, err
 	}
 
-	return newBufferFromRaw(s, id, slice), nil
+	return newBufferCharged(s, id, slice, charge), nil
 }
 
 func newBufferFromRaw(s *handleState, id uint64, slice []byte) *Buffer {
+	return newBufferCharged(s, id, slice, 0)
+}
+
+func newBufferCharged(s *handleState, id uint64, slice []byte, charge int64) *Buffer {
 	buf := &Buffer{
-		id:    id,
-		state: s,
-		data:  slice,
+		id:       id,
+		state:    s,
+		data:     slice,
+		budgeted: charge,
 	}
 
 	if id > 0 {
 		// AddCleanup backstop if caller forgets to explicitly Free.
 		buf.cleanup = runtime.AddCleanup(buf, func(info bufferCleanupInfo) {
 			releaseForgottenBuffer(info)
-		}, bufferCleanupInfo{state: s, id: id})
+		}, bufferCleanupInfo{state: s, id: id, budgeted: charge})
 	}
 
 	return buf
@@ -127,6 +180,7 @@ func newHeapBuffer(s *handleState, data []byte) *Buffer {
 // without an explicit Free.
 func releaseForgottenBuffer(info bufferCleanupInfo) {
 	_ = info.state.bufFreeCleanup(info.id)
+	info.state.releaseBudget(info.budgeted)
 }
 
 func (s *handleState) bufFreeCleanup(id uint64) error {
@@ -236,6 +290,7 @@ func (b *Buffer) Free() error {
 	}
 	id := b.id
 	state := b.state
+	charge := b.budgeted
 	// Drop our own view before releasing the lock, so a Bytes that acquires it
 	// next sees freed and never copies this header out.
 	b.data = nil
@@ -246,6 +301,7 @@ func (b *Buffer) Free() error {
 	var err error
 	if state != nil {
 		err = state.bufFree(id)
+		state.releaseBudget(charge)
 	}
 	return err
 }

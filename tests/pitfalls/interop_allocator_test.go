@@ -488,3 +488,88 @@ func TestInterop_ClosedWinsOverPoisoned(t *testing.T) {
 		t.Fatalf("NewBuffer on a closed handle must report closed, got %v", err)
 	}
 }
+
+// WithBufferBudget turns a NewBuffer leak into an error at the allocation that
+// crosses the budget, and returns bytes on Free and on the GC backstop.
+func TestInterop_BufferBudget(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine(),
+		gusset.WithBufferBudget(64<<10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+
+	a, err := h.NewBuffer(40 << 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.NewBuffer(40 << 10); !errors.Is(err, gusset.ErrBufferBudget) {
+		t.Fatalf("second 40 KiB buffer must exceed a 64 KiB budget, got %v", err)
+	}
+	_ = a.Free()
+	_ = a.Free() // idempotent: must not return the charge twice
+	b, err := h.NewBuffer(60 << 10)
+	if err != nil {
+		t.Fatalf("Free must return the charge: %v", err)
+	}
+	if _, err := h.NewBuffer(8 << 10); !errors.Is(err, gusset.ErrBufferBudget) {
+		t.Fatalf("a double Free returned the charge twice: %v", err)
+	}
+	_ = b.Free()
+
+	// Forgotten buffers return their charge through the cleanup backstop.
+	func() {
+		if _, err := h.NewBuffer(60 << 10); err != nil {
+			t.Fatal(err)
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		runtime.GC()
+		c, err := h.NewBuffer(60 << 10)
+		if err == nil {
+			_ = c.Free()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the GC backstop never returned the forgotten buffer's charge: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Results are never charged: a large WaitBuffer succeeds at full budget.
+	full, err := h.NewBuffer(64 << 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer full.Free()
+	out, err := h.Call(context.Background(), allocatedInput(200_000, 1))
+	if err != nil || len(out) != 200_000 {
+		t.Fatalf("a result must not be refused by the buffer budget: %d, %v", len(out), err)
+	}
+}
+
+// Any integer kind, named types included, is a valid opcode context value.
+func TestInterop_OpcodeContextAcceptsEveryIntegerKind(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	type namedOp uint16
+	// No engine is registered for opcode 7: a well-formed opcode reaches Rust
+	// and is refused there ("no engine handler registered for opcode 7").
+	for _, v := range []any{uint8(7), uint16(7), uint32(7), namedOp(7), int8(7), int(7), uint64(7)} {
+		ctx := context.WithValue(context.Background(), gusset.OpcodeContextKey, v)
+		_, err := h.Call(ctx, []byte{0})
+		if err == nil || !strings.Contains(err.Error(), "opcode 7") {
+			t.Fatalf("%T: expected dispatch to opcode 7, got %v", v, err)
+		}
+	}
+	for _, v := range []any{int8(-1), uint64(1 << 40), "7", 7.0} {
+		ctx := context.WithValue(context.Background(), gusset.OpcodeContextKey, v)
+		if _, err := h.Call(ctx, []byte{0}); err == nil || strings.Contains(err.Error(), "opcode 7") {
+			t.Fatalf("%T(%v) must be refused before dispatch, got %v", v, v, err)
+		}
+	}
+}

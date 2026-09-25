@@ -37,6 +37,7 @@ type handleConfig struct {
 	poolSizeInvalid bool
 	callFlags       uint32
 	defaultOpcode   uint32
+	bufferBudget    int64
 }
 
 // MaxPoolSize mirrors gusset::pool::MAX_POOL_SIZE.
@@ -76,6 +77,24 @@ func WithDiagnosticEngine() Option {
 	}
 }
 
+// WithBufferBudget caps the bytes of live buffers allocated with NewBuffer on
+// this handle; NewBuffer beyond it returns ErrBufferBudget. 0 (the default)
+// means unlimited.
+//
+// Rust memory is invisible to Go's GC pacer and each *Buffer is a tiny Go
+// object, so a caller that loops on NewBuffer without Free can reach an OOM
+// long before any GC runs the AddCleanup backstop. The budget turns that into
+// an error at the allocation that crossed it. Result buffers (WaitBuffer,
+// CallBuffer) are not charged: refusing them would lose finished work.
+func WithBufferBudget(bytes int64) Option {
+	return func(c *handleConfig) {
+		if bytes < 0 {
+			bytes = 0
+		}
+		c.bufferBudget = bytes
+	}
+}
+
 // WithOpcode sets the default engine dispatch opcode for this handle (R9).
 // Dispatches to an engine registered with that opcode in Rust without payload byte mangling.
 func WithOpcode(opcode uint32) Option {
@@ -96,6 +115,10 @@ type handleState struct {
 	closed        atomic.Bool
 	pipe          *os.File
 	drainDone     chan struct{}
+	// bufBudget caps live NewBuffer bytes (0 = unlimited); bufBytes is the
+	// current charge. See WithBufferBudget.
+	bufBudget int64
+	bufBytes  atomic.Int64
 	// closeDone is closed once close has fully released the handle, so a
 	// second concurrent Close waits for the first rather than returning while
 	// workers are still being joined. closeErr is written before closeDone
@@ -182,6 +205,7 @@ func Open(opts ...Option) (*Handle, error) {
 		ptr:           hPtr,
 		callFlags:     cfg.callFlags,
 		defaultOpcode: cfg.defaultOpcode,
+		bufBudget:     cfg.bufferBudget,
 		sem:           make(chan struct{}, cfg.poolSize),
 		pipe:          r,
 		drainDone:     make(chan struct{}),
@@ -839,7 +863,7 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 	s.cgoMu.RUnlock()
 
 	if len(res.data) > 0 {
-		buf, err := s.newBuffer(len(res.data))
+		buf, err := s.allocBuffer(len(res.data), false)
 		if err != nil {
 			if s.closed.Load() {
 				return nil, errors.New("gusset: handle is closed")

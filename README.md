@@ -218,6 +218,8 @@ Gusset exports strictly 15 C ABI functions from `libgusset.a` (enforced by `test
 - `gusset.Threads() int64`
 - `gusset.DrainLogs(buf []byte) int`
 
+Options (not entry points): `WithPoolSize`, `WithDiagnosticEngine`, `WithOpcode` (or `ContextWithOpcode` per call; any integer kind is accepted), and `WithBufferBudget`, which caps live `NewBuffer` bytes per handle so a missing `Free` becomes `ErrBufferBudget` instead of an OOM the Go GC cannot see coming. Errors to match with `errors.Is`: `ErrPanic`, `ErrPoisoned`, `ErrUnknownTicket`, `ErrTicketBusy`, `ErrBufferBudget`, `ErrShutdown` (work cancelled by or refused after `Shutdown`, distinct from `context.Canceled`) and `ErrShutdownIncomplete` (drain budget expired).
+
 A context deadline bounds **the caller**, not the work. `Call` and `Wait` return
 `ctx.Err()` when the context expires, whatever the engine is doing; the pool
 permit stays with the still-running job until it actually stops, so in-flight

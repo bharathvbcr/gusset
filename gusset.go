@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"runtime/metrics"
 	"sync/atomic"
 	"time"
@@ -280,35 +281,28 @@ func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) 
 
 func opcodeFromContext(opVal any) (uint32, error) {
 	const reject = "gusset: opcode does not fit in uint32"
-	switch v := opVal.(type) {
-	case uint32:
+	if v, ok := opVal.(uint32); ok { // ContextWithOpcode's type: no reflection
 		return v, nil
-	case int32:
-		if v < 0 {
+	}
+	// Any integer kind, named types included (`type Op uint16`). The explicit
+	// type switch this replaced accepted int/int32/int64/uint/uint64 only, so
+	// a uint8, uint16 or a named opcode type was refused with an error that
+	// said "must be a 32-bit unsigned integer" about a value that was one.
+	rv := reflect.ValueOf(opVal)
+	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		n := rv.Int()
+		if n < 0 || n > math.MaxUint32 {
 			return 0, errors.New(reject)
 		}
-		return uint32(v), nil
-	case int:
-		if v < 0 || uint64(v) > math.MaxUint32 {
+		return uint32(n), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		n := rv.Uint()
+		if n > math.MaxUint32 {
 			return 0, errors.New(reject)
 		}
-		return uint32(v), nil
-	case int64:
-		if v < 0 || v > math.MaxUint32 {
-			return 0, errors.New(reject)
-		}
-		return uint32(v), nil
-	case uint:
-		if uint64(v) > math.MaxUint32 {
-			return 0, errors.New(reject)
-		}
-		return uint32(v), nil
-	case uint64:
-		if v > math.MaxUint32 {
-			return 0, errors.New(reject)
-		}
-		return uint32(v), nil
+		return uint32(n), nil
 	default:
-		return 0, errors.New("gusset: opcode context value must be a 32-bit unsigned integer")
+		return 0, fmt.Errorf("gusset: opcode context value must be an integer, got %T", opVal)
 	}
 }

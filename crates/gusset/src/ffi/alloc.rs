@@ -5,7 +5,7 @@ use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[cfg(gusset_allocator_api)]
-use std::alloc::{AllocError, Allocator, Global};
+use std::alloc::{AllocError, Allocator, Global, System};
 #[cfg(gusset_allocator_api)]
 use std::ptr::NonNull;
 
@@ -63,12 +63,9 @@ fn mark_counting_active() {
 /// Reports whether a `Counting` wrapper is installed as the global allocator.
 ///
 /// Inferred: the flag is set by the first allocation any `Counting` serves
-/// through `GlobalAlloc`. Calling `GlobalAlloc` methods on a `Counting` that is
-/// *not* the global allocator flips it too, after which bytes counted by hand
-/// earlier on the `BufferAlloc` path are no longer uncounted (buffers track
-/// what they recorded and are immune). Do not call a non-global `Counting`
-/// through `GlobalAlloc`; use it as an `Allocator` (`Vec::new_in`), which
-/// never touches the flag.
+/// through `GlobalAlloc`, so a non-global `Counting` called through
+/// `GlobalAlloc` sets it too. Only [`record_alloc`]/[`record_dealloc`] consult
+/// it; Gusset's own buffers never do (see [`count_buffer_alloc`]).
 #[inline]
 pub fn counting_is_active() -> bool {
     COUNTING_ACTIVE.load(Ordering::Relaxed)
@@ -360,8 +357,9 @@ impl<A: 'static> Counting<A> {
 /// buffer registry frees with.
 ///
 /// Every block is 64-byte aligned ([`BUFFER_ALIGN`]) whatever the requested
-/// alignment, and every byte is counted in [`get_alloc_stats`] exactly once: by
-/// an installed `Counting` global allocator, or by hand when there is none.
+/// alignment, comes from `System` (not the global allocator), and is counted in
+/// [`get_alloc_stats`] exactly once, by Gusset, whether or not a `Counting`
+/// global allocator is installed.
 ///
 /// Growth that fails reports `AllocError`. Use `try_reserve` for sizes derived
 /// from input: an infallible `Vec::push` that cannot allocate aborts the whole
@@ -385,19 +383,15 @@ impl BufferAlloc {
 unsafe impl Allocator for BufferAlloc {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let real = Self::buffer_layout(layout).ok_or(AllocError)?;
-        let block = Global.allocate(real)?;
-        if real.size() != 0 {
-            record_alloc(real.size());
-        }
+        let block = System.allocate(real)?;
+        count_buffer_alloc(real.size());
         Ok(block)
     }
 
     fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let real = Self::buffer_layout(layout).ok_or(AllocError)?;
-        let block = Global.allocate_zeroed(real)?;
-        if real.size() != 0 {
-            record_alloc(real.size());
-        }
+        let block = System.allocate_zeroed(real)?;
+        count_buffer_alloc(real.size());
         Ok(block)
     }
 
@@ -405,10 +399,8 @@ unsafe impl Allocator for BufferAlloc {
         // Cannot fail: the same size rounded successfully when it was allocated.
         // Leaking is the safe answer if it ever did, never a mismatched free.
         if let Some(real) = Self::buffer_layout(layout) {
-            unsafe { Global.deallocate(ptr, real) };
-            if real.size() != 0 {
-                record_dealloc(real.size());
-            }
+            unsafe { System.deallocate(ptr, real) };
+            count_buffer_dealloc(real.size());
         }
     }
 
@@ -419,8 +411,8 @@ unsafe impl Allocator for BufferAlloc {
         new: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         let (o, n) = Self::pair(old, new)?;
-        let block = unsafe { Global.grow(ptr, o, n) }?;
-        count_resize(o.size(), n.size(), false);
+        let block = unsafe { System.grow(ptr, o, n) }?;
+        count_resize(o.size(), n.size(), true);
         Ok(block)
     }
 
@@ -431,8 +423,8 @@ unsafe impl Allocator for BufferAlloc {
         new: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         let (o, n) = Self::pair(old, new)?;
-        let block = unsafe { Global.grow_zeroed(ptr, o, n) }?;
-        count_resize(o.size(), n.size(), false);
+        let block = unsafe { System.grow_zeroed(ptr, o, n) }?;
+        count_resize(o.size(), n.size(), true);
         Ok(block)
     }
 
@@ -443,8 +435,8 @@ unsafe impl Allocator for BufferAlloc {
         new: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         let (o, n) = Self::pair(old, new)?;
-        let block = unsafe { Global.shrink(ptr, o, n) }?;
-        count_resize(o.size(), n.size(), false);
+        let block = unsafe { System.shrink(ptr, o, n) }?;
+        count_resize(o.size(), n.size(), true);
         Ok(block)
     }
 }
@@ -482,30 +474,26 @@ pub fn record_alloc(size: usize) {
     add_alloc_count();
 }
 
-/// Like [`record_alloc`], but reports whether the bytes were counted here, so
-/// the owner can release exactly what it recorded with [`release_recorded`].
+/// Counts `size` bytes of Gusset buffer memory. Always counted here.
 ///
-/// `COUNTING_ACTIVE` flips on the first allocation any `Counting` services,
-/// which is normally the global allocator's first allocation — but an adopter
-/// who calls a non-global `Counting` directly flips it later. A buffer counted
-/// by hand before that point was then never uncounted (`record_dealloc` had
-/// become a no-op), leaving `live_bytes` inflated for the rest of the process
-/// and `AdviseMemoryLimit` shrinking the Go heap for memory already freed.
+/// Buffer memory ([`BufferAlloc`] and every `RawBuffer`) comes from `System`,
+/// never from the global allocator, so no installed `Counting` sees it and
+/// nothing else counts it. That makes the count independent of
+/// `COUNTING_ACTIVE`, which is inferred and can flip late (a non-global
+/// `Counting` called through `GlobalAlloc`); consulting it at free time left
+/// buffers counted forever once it flipped.
 #[inline]
-pub fn record_alloc_tracked(size: usize) -> bool {
-    if counting_is_active() {
-        return false;
+pub fn count_buffer_alloc(size: usize) {
+    if size != 0 {
+        add_live_bytes(size);
+        add_alloc_count();
     }
-    add_live_bytes(size);
-    add_alloc_count();
-    true
 }
 
-/// Releases bytes recorded by [`record_alloc_tracked`], by what was recorded
-/// rather than by the flag's current value.
+/// Uncounts `size` bytes of Gusset buffer memory (see [`count_buffer_alloc`]).
 #[inline]
-pub fn release_recorded(size: usize, recorded: bool) {
-    if recorded {
+pub fn count_buffer_dealloc(size: usize) {
+    if size != 0 {
         dec_live_bytes(size);
     }
 }
