@@ -366,7 +366,7 @@ at 3am".*
 and a named owner who reads the Rust. What is missing is not engineering care —
 it is mileage:
 
-- **v0.0.1, one adopter outside this repository.** The most recent audit found a
+- **v0.0.2, one adopter outside this repository.** The most recent audit found a
   bug that made context deadlines decorative for any engine that does not
   cooperate, in a tree that already had 100+ tests and a detailed audit trail.
   That is a healthy audit and an immature codebase at the same time: the defects

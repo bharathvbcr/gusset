@@ -55,7 +55,7 @@ crate-type = ["staticlib"]
 
 [dependencies]
 # Renamed, because this crate cannot also be called `gusset`.
-gusset_core = { package = "gusset", version = "0.0.1" }
+gusset_core = { package = "gusset", version = "0.0.2" }
 my-engine  = { path = "../my-engine" }
 
 [profile.release]

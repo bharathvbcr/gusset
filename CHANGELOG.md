@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased] - 2026-09-26 · Completion ring: no system calls per round trip
+## [0.0.2] - 2026-09-26
+
+Release since v0.0.1. The C ABI is 17 exports. Go `Open` publishes completions into a shared-memory ring and uses the pipe as a doorbell; a success of at most 48 bytes is carried in the record. Rust 1.100+ engines can return `Vec<u8, BufferAlloc>` without a copy. On the recorded Linux VM, serial no-op `Call` is 3.73 µs with the ring (`bench/results/linux-amd64-vm/ring-*.txt`).
+
+### 2026-09-26 · Completion ring: no system calls per round trip
 
 Measured on one Linux VM. The raw data and tables are in `bench/results/linux-amd64-vm/`
 (`ring-*.txt`).
@@ -16,7 +20,7 @@ Measured on one Linux VM. The raw data and tables are in `bench/results/linux-am
 - **`crates/gusset/examples/rt_latency.rs` reports percentiles** and polls a non-blocking pipe, like the Go reader.
 - **The architecture docs describe this path.** README, `AGENTS.md`, `docs/PLAN.md`, `docs/why.md`, `docs/platforms.md`, `docs/choosing.md`, and `docs/adoption.md` had still called the pipe the only completion path and the ABI 15 exports. They now describe the 17-export surface, the ring, inline records of at most 48 bytes, and the pipe as the doorbell.
 
-## [Unreleased] - 2026-09-25 · Performance and the last open gaps
+### 2026-09-25 · Performance and the last open gaps
 
 Measured before and after on one Linux VM; the raw data and tables are in
 `bench/results/linux-amd64-vm/`.
@@ -38,7 +42,7 @@ Measured before and after on one Linux VM; the raw data and tables are in
 - **Opcode context values accept any integer kind.**
 - **The BufferLarge benchmarks initialize their input.** Uninitialized input made them run random diagnostic modes.
 
-## [Unreleased] - 2026-09-25 · Third audit: lock order, state machine, regressions
+### 2026-09-25 · Third audit: lock order, state machine, regressions
 
 Each fix is backed by a test that fails against the code before it, unless marked otherwise.
 
@@ -63,12 +67,12 @@ Each fix is backed by a test that fails against the code before it, unless marke
   - Timing-dependent tests wait on observable state, not fixed sleeps.
   - `TestStress_ConcurrentZeroCopyEgressAndCloseRace` counted a withdrawn view (`Bytes` is `nil` after `Close`) as corruption. That is the documented contract, and it failed about 1 run in 10 under `-race`.
 
-## [Unreleased] - 2026-09-25 · Go SIMD evaluation
+### 2026-09-25 · Go SIMD evaluation
 
 - **Go 1.27's `simd` experiment was evaluated against the Rust path.** It does not touch Gusset's runtime: the Go path has no numeric kernel, and `copy()` is already vectorized. The suite passes under `GOEXPERIMENT=simd`, and CI now checks that. `bench/simd_crossover_test.go` measures one kernel three ways and checks that all three agree. `docs/choosing.md` records where pure-Go SIMD beats crossing into Rust.
 - **Cancellation checks inside the hot loop blocked vectorization.** The diagnostic and example engines' sum-of-squares kernels called `ctx.check()` on every 1024th iteration inside the loop. That kept the loop scalar at about 1.4 GB/s. Checking once per 4 KiB chunk and summing each chunk in `u32` reaches about 6 GB/s, and a 1 MiB Gusset call dropped from 839 µs to 262 µs in the measurement sandbox. `docs/adoption.md` now shows the chunked pattern.
 
-## [Unreleased] - 2026-09-24 · Allocator API and interop audit
+### 2026-09-24 · Allocator API and interop audit
 
 Rust 1.100 stabilizes `std::alloc::Allocator`. Every fix below ships with a
 test that fails against the code before it.
@@ -92,17 +96,17 @@ test that fails against the code before it.
   - CI tests the fallback path on the new compiler, and ASan runs the allocator suite.
   - The lint job's gofmt step passes again: `disruptive_hardening_test.go` had trailing blank lines.
 
-## [Unreleased] - 2026-09-22 · Named field layout
+### 2026-09-22 · Named field layout
 
 - **Equal-width fields could trade places without failing ABI init (I6).** `gusset_abi_layout` reports size and alignment. Swapping `CallHeader.flags` with `reserved` (both `u32`), `span_id` with `timeout_ns` (both 8 bytes), or any two `AllocStats` fields leaves both numbers unchanged, so version 2's check accepted a header that reads those fields from the wrong slots. `gusset_abi_fields` reports the offset and size of every named field and writes no more entries than the caller's `cap`, so the table is not appended to the 36-byte `AbiLayout` a version-2 caller already allocates. Go compares that report with cgo `Offsetof`/`Sizeof`. A planted swap of `flags` and `reserved` panics in `init` with `ABI field CallHeader.flags drifted: Rust offset 32 size 4, cgo offset 36 size 4`. `TestPitfall_EqualWidthFieldSwapKeepsSizeAndBreaksNamedOffsets` walks every equal-width pair and shows the offset multiset is unchanged, which is why a size check or a sorted-offset check cannot see the swap.
 
-## [Unreleased] - 2026-09-22 · Caller-held buffers
+### 2026-09-22 · Caller-held buffers
 
 - **An engine could return a buffer Go still holds (R16).** The alias check refused the unit's own input, id 0, a second claim, and a buffer another unit was reading. A buffer published through `gusset_buf_alloc` (`NewBuffer`) and then returned as `JobOutput::Buffer` was accepted. The waiter frees an output when it is done, which releases that memory under the caller's view. Published allocations are now marked `caller_held`, and `claim_output` refuses them. Engine-private `buf_alloc` may still be returned once. `engine_returning_a_caller_held_buffer_is_refused` fails against the pre-fix code (published buffer 1 was accepted as an output).
 - **`Bytes` raced `Free` on the slice header.** `freed` is atomic, so the flag was synchronized and `b.data` was not: `-race` reported `Free` writing the header while `Bytes` read it. Both now take `Buffer.mu`, and `Bytes` holds `cgoMu` across that read so it cannot hand out a view `Close` is already freeing. `TestPitfall_BytesAndFreeDoNotRace` fails against the pre-fix code with a data race at `buffer.go`.
 - **Engine dispatch held the registry read lock across execution.** `default_dispatch` called `engine(ctx, input)` while holding `ENGINE_REGISTRY.read()` or `GLOBAL_ENGINE.read()`. A concurrent call to `register_engine` or `clear_engine_handlers` took a write lock and queued behind a slow engine, starving all subsequent worker dispatches on POSIX `RwLock`. `EngineFn` is now `Arc<dyn ...>`, and `default_dispatch` clones the handler and releases the lock before invocation.
 
-## [Unreleased] - 2026-09-22 · Containment audit
+### 2026-09-22 · Containment audit
 
 Every fix below ships with a test that fails against the pre-fix code, run from a
 separate worktree of `7a56c3c` with only the new diagnostic mode added.
@@ -114,7 +118,7 @@ separate worktree of `7a56c3c` with only the new diagnostic mode added.
 - **An overwritten error status leaked its message.** `gusset_submit` and `gusset_buf_alloc`, on discovering poison after the guarded call failed, wrote `FFI_POISONED` over the status `ffi_guard` had filled without freeing its boxed message. `FfiStatus::overwrite` frees first. The poison flip that reaches this branch is a race, so `overwriting_an_error_status_releases_its_message` pins the replacement under the counting allocator, with a control arm showing the old pattern's leak is measurable.
 - **Containment stress test.** `TestStress_ContainmentUnderLoad` runs deadline-free callers against every failure above at once — destructor bombs direct and delayed, delayed panics beside slow successes, large zero-copy round trips, mid-flight `Close`, and continuous fork/exec — under a watchdog, and checks typed errors, byte-exact results, and that goroutines and Rust live bytes return to baseline. Against the pre-fix code it hangs until the watchdog fires. `GUSSET_STRESS_ROUNDS` scales it.
 
-## [Unreleased] - 2026-09-21 · Boundary hardening
+### 2026-09-21 · Boundary hardening
 
 - **Allocator live bytes wrapped near the top of `usize`.** `fetch_add` plus `wrapping_add` turned a saturated counter into a small total, so `AdviseMemoryLimit` would raise the Go heap limit while Rust was still holding the memory. The counter now saturates. `accounting_is_balanced_saturating_and_peak_monotonic` fails against the pre-fix code (it observed live bytes `55` after adding 64 to `usize::MAX - 8`).
 - **Ticket and buffer ids advanced through the 63-bit ceiling.** A refused `buf_alloc` still incremented the counter, and a ticket of `1<<63` was accepted. After wrap, the next id collides with a live buffer or an in-flight waiter. `reserve_id` refuses without advancing. `buffer_ids_stop_at_the_ceiling_instead_of_wrapping` and `ticket_ids_stop_at_the_ceiling_instead_of_wrapping` fail against the pre-fix code.
@@ -128,11 +132,11 @@ separate worktree of `7a56c3c` with only the new diagnostic mode added.
 - **Test profile lacked overflow checks.** Explicitly added `[profile.test] overflow-checks = true` to workspace `Cargo.toml` so test builds enforce the same arithmetic safety invariants as dev builds.
 - **Adversarial disruption & chaos test suite.** Added `tests/pitfalls/disruptive_hardening_test.go` covering cross-handle buffer theft, concurrent poison churn assault, raw buffer boundary violations, and non-cooperative engine worker abandonment under deadline expiration.
 
-## [Unreleased] - 2026-09-21 · Go tip bootstrap
+### 2026-09-21 · Go tip bootstrap
 
 - **The weekly tip job could not build Go (run 35594759554).** `Set up Go Tip` cloned tip and ran `./make.bash` with `GOROOT_BOOTSTRAP` unset, so the build used the runner image's Go: `Building Go cmd/dist using /opt/hostedtoolcache/go/1.24.13/x64. (go1.24.13 linux/amd64)` then `found packages main (build.go) and building_Go_requires_Go_1_26_0_or_later (notgo126.go)`. Go tip (1.28) requires a bootstrap >= Go 1.26.0 (`src/make.bash` `bootgo=1.26.0`, `src/cmd/dist/notgo126.go` `//go:build !go1.26`). The job now installs the matrix pin (`1.27.x`) and passes that tree as `GOROOT_BOOTSTRAP`. The suite's `go` floor stays 1.26; this is the compiler that builds tip, not the compiler Gusset ships against. `TestTipWorkflowBootstrapsFromGo1_26OrNewer` fails against the pre-fix workflow.
 
-## [Unreleased] - 2026-09-20 · Audit and hardening
+### 2026-09-20 · Audit and hardening
 
 Findings from a full audit of the v0.0.1 tree, validated by adopting Gusset in a
 second codebase (DevCouncil's `go_orchestrator` driving its `dc-glob` crate). Every

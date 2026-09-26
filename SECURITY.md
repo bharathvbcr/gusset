@@ -10,6 +10,7 @@ We take the security and integrity of this boundary seriously.
 
 | Version | Supported |
 | :--- | :--- |
+| `v0.0.2` | :white_check_mark: |
 | `v0.0.1` | :white_check_mark: |
 | `< v0.0.1` | :x: |
 

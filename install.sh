@@ -114,7 +114,7 @@ if [ -d "$SCRIPT_DIR/internal/ffi" ]; then
 fi
 
 if [ -f "$SCRIPT_DIR/gusset.pc.in" ]; then
-    sed -e "s|@PREFIX@|$PREFIX|g" -e "s|@VERSION@|0.0.1|g" "$SCRIPT_DIR/gusset.pc.in" > "$PKGCONFIGDIR/gusset.pc"
+    sed -e "s|@PREFIX@|$PREFIX|g" -e "s|@VERSION@|0.0.2|g" "$SCRIPT_DIR/gusset.pc.in" > "$PKGCONFIGDIR/gusset.pc"
     chmod 644 "$PKGCONFIGDIR/gusset.pc"
 fi
 
