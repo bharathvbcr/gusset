@@ -14,6 +14,7 @@ Measured on one Linux VM. The raw data and tables are in `bench/results/linux-am
 - **Work-queue pollers read an atomic length before taking the lock, and do not yield for their first 5 µs.** Measured alone: small parallel jobs −3 to −6%.
 - **The diagnostic SIMD kernel picks its vector width at run time.** It is the same loop compiled under `#[target_feature]` for AVX2 and AVX-512BW, dispatched with `is_x86_feature_detected!`. The crate is built for baseline x86-64 (SSE2), which capped it at 148 µs per MiB. It now runs 1 MiB in 46 µs, beating both a `target-cpu=native` build (57 µs) and Go SIMD on the same host (69 µs). `docs/adoption.md` shows the pattern for engine kernels, and `docs/choosing.md` has the new SIMD crossover (about 170 KB on that host).
 - **`crates/gusset/examples/rt_latency.rs` reports percentiles** and polls a non-blocking pipe, like the Go reader.
+- **The architecture docs describe this path.** README, `AGENTS.md`, `docs/PLAN.md`, `docs/why.md`, `docs/platforms.md`, `docs/choosing.md`, and `docs/adoption.md` had still called the pipe the only completion path and the ABI 15 exports. They now describe the 17-export surface, the ring, inline records of at most 48 bytes, and the pipe as the doorbell.
 
 ## [Unreleased] - 2026-09-25 · Performance and the last open gaps
 

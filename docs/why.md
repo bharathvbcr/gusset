@@ -32,7 +32,7 @@ flowchart TD
 
     subgraph Gusset ["Gusset Runtime Contract"]
         G1["ffi_guard: catch_unwind + Safe FfiStatus"] --> S1["Panic Caught: Process Stays Alive"]
-        G2["Go Semaphore + Netpoller Pipe Completion"] --> S2["Thread Cap Bounded (<= PoolSize <= 1024)"]
+        G2["Go Semaphore + Completion Ring (pipe doorbell)"] --> S2["Thread Cap Bounded (<= PoolSize <= 1024)"]
         G3["Rust Worker Pool with Explicit 8 MiB Stacks"] --> S3["Deterministic Stack & sigaltstack Protection"]
         G4["Relative timeout_ns + AtomicBool Flag"] --> S4["Cooperative Cancellation between Work Units"]
         G5["Counting Allocator + AdviseMemoryLimit"] --> S5["Go GC Triggered Before Container OOM"]
@@ -94,7 +94,7 @@ sequenceDiagram
         GoSched->>GoSched: Park on Go Semaphore (permit queue)
         GoSched->>Rust: Submit work unit to bounded pool (e.g. 4 workers)
         Rust-->>GoSched: Return immediately (submit < 5 µs)
-        Note over GoSched: Callers wait on netpoller pipe.<br/>Around twenty Ms at 2,048 in-flight calls,<br/>set by pool size rather than concurrency.
+        Note over GoSched: Completions travel in a shared-memory ring.<br/>The pipe only wakes a parked reader.<br/>Around twenty Ms at 2,048 in-flight calls,<br/>set by pool size rather than concurrency.
     end
 ```
 
@@ -102,7 +102,7 @@ sequenceDiagram
 - Callers acquire a permit from a Go channel semaphore before entering cgo.
 - Bounded concurrency: In-flight calls per handle can never exceed the configured pool size, capped at `gusset.MaxPoolSize` (1024). Requests exceeding the ceiling are refused, not clamped.
 - Submissions are strictly non-blocking (`gusset_submit` copies or references the input and returns a ticket ID in `< 5 µs`, well below the 20 µs P-handoff threshold).
-- Waiters park on Go's Netpoller via an `os.Pipe`, consuming 0 OS threads while awaiting completion.
+- In steady state the reader polls a Rust-owned completion ring and makes no system call. It parks on the netpoller through `os.Pipe` only when idle, and the next worker writes one wake token. Either way a waiter consumes no OS thread.
 - Verified by `TestPitfall_ThreadCapBoundedSoak` (`tests/pitfalls/pitfalls_test.go`): 500 concurrent callers against a 4-worker pool, asserting that `/sched/threads/total:threads` finishes no more than `poolSize + GOMAXPROCS + 16` above where it started. It samples after the callers drain rather than during, which is sound for exactly the reason the thread-pressure benchmark has to run one transport per process: Go never destroys an M, so the count afterwards *is* the high-water mark.
 
 ---
@@ -120,7 +120,7 @@ sequenceDiagram
 **How Gusset Solves It:**
 - Heavy work never runs on the cgo caller's thread stack.
 - Gusset handles open a dedicated worker pool where every thread is spawned explicitly with `thread::Builder::new().stack_size(8 * 1024 * 1024)` (8 MiB).
-- Each worker thread installs a 64 KiB `sigaltstack` in its entry function so stack overflows trigger Go's signal handler cleanly rather than crashing the thread silently.
+- Each worker installs a guard-paged `sigaltstack` of at least 64 KiB (larger when `AT_MINSIGSTKSZ` requires it) and blocks SIGPIPE. The alternate stack lets Go's handler run on that thread. It does not make a stack overflow survivable: the process still exits.
 - Verified by:
   1. `pool::sys::current_thread_stack_size`: runtime inspection on every platform that proves Gusset sized the stack rather than relying on OS defaults.
   2. Dedicated Alpine Linux (`musl`) CI container running the deep-recursion test suite.
@@ -214,21 +214,21 @@ Gusset is a **runtime contract**, not a binding generator. The languages and fra
 | :--- | :--- | :--- | :--- |
 | **Go 1.27** | `goroutineleak` profile is GA (`runtime/pprof` + `/debug/pprof/goroutineleak`). `runtime/metrics` publishes `/sched/threads/total:threads` and `/sched/goroutines/not-in-go:goroutines` (cgo/syscall). Green Tea GC remains default from 1.26. | Recovering a panic that escaped `extern "C"`; seeing the Rust heap | Soak asserts the thread metric. Leak profile is the empty-after-drain gate. Heap-base randomization (1.26) still forbids pointer-value tests. |
 | **Rust 1.81+ (current develop: 1.98.x)** | Uncaught panic out of `extern "C"` **aborts**. `catch_unwind` only catches unwinding panics, not `panic=abort`, not C++ exceptions (unspecified: abort or opaque `Err`). `"C-unwind"` is the ABI that *intends* to unwind. | Go's scheduler, `GOMEMLIMIT`, SIGSEGV ownership in a `staticlib` | R2 forces `panic = "unwind"` at build time. Firewall is `catch_unwind` around the **work unit**, not hope that `extern "C"` is recoverable. Abort and GPU driver faults stay Phase 4. |
-| **cgo (this process)** | `#cgo noescape`/`nocallback` (Go 1.22+); ~20 µs P-handoff; `KeepAlive`; `AddCleanup` | A cross-language memory model; cancelling a call already inside C | Submit-and-return keeps every cgo call under the hand-off. The seed blocking no-op is **18.4 ns** on the current toolchain (Go 1.27.1 / Rust 1.98.0, darwin/arm64) and was **64 ns** on the older x86-64 Linux host, so the commonly quoted "~40 ns cgo call" brackets the range rather than describing it — and the cheaper the raw call gets, the larger Gusset's ratio, not the smaller. Gusset's no-op is **20.09 µs ± 11%**, roughly 1,100x the raw call, because the work is on a Rust worker and the waiter parks on `os.Pipe`. That gap is the product, not a regression: it buys the firewall, the deadline and the bounded thread count, and `docs/img/crossover.svg` shows where real work amortises it. |
+| **cgo (this process)** | `#cgo noescape`/`nocallback` (Go 1.22+); ~20 µs P-handoff; `KeepAlive`; `AddCleanup` | A cross-language memory model; cancelling a call already inside C | Submit-and-return keeps every cgo call under the hand-off. The seed blocking no-op is **18.43 ns** on darwin/arm64 (Go 1.27.1 / Rust 1.98.0, `bench/seed/README.md`) and was **64 ns** on the older x86-64 Linux host, so the commonly quoted "~40 ns cgo call" brackets the range rather than describing it. Gusset's own no-op is the generated row in the README table on that darwin host. The later linux VM comparison, including the completion ring, is in `bench/results/linux-amd64-vm/README.md`. The gap against raw cgo is the product: the work runs on a Rust worker, and the result comes back through the ring. The pipe only wakes a reader that has parked. `docs/img/crossover.svg` shows where real work amortises the darwin measurement; those charts predate the ring. |
 | **rust2go** | Rust-driving-Go async, generated bindings, optional ASM callbacks | Production cgocheck | README still tells callers to set `GODEBUG=invalidptr=0,cgocheck=0`. Issue #109 (open as of 2026-03-28) asks when that is required. Gusset refuses both flags in CI. |
 | **uniffi-bindgen-go** | Type marshalling, `RustBuffer` shape, generated Go | Panic firewall, pool, deadlines, poison | Sit *on top* of Gusset. Adopter example is staticlink; UniFFI's default dynamic load still needs `LD_LIBRARY_PATH`. |
 | **purego / Stoolap `asmcgocall`** | `CGO_ENABLED=0` containers | A supported calling convention | `asmcgocall` skips `entersyscall`; P stays pinned; STW waits. R13. Stoolap is honest that a Go minor can break it. |
 | **Wasm sandboxes** (wazero, Wasmtime, Extism) | A real fault domain *inside* the process: a trap, an out-of-bounds access or an abort is contained by the runtime, with a capability-scoped host interface | Native speed; running an existing native library unmodified | The honest alternative to Gusset's fault-domain trade-off, and the reason it is a trade-off rather than a win. 2026 measurements put **Wasmtime at 2.41x native and wazero at 4.72x** on compute-bound work, and every payload crosses a linear-memory copy. Gusset keeps native speed and gives up in-process fault isolation; Wasm takes the inverse trade. An engine that can genuinely fault — a GPU driver, an unaudited C dependency — wants one of these or Phase 4, not Gusset. |
 | **iceoryx2 v0.10.0** (PyPI 2026-09-18) | Lock-free zero-copy IPC, C/C++/C#/Python bindings, claimed sub-µs latency independent of payload | A Go binding | Language table still lists **Go as planned**. Phase 4 remains specified, not implemented. In-process Gusset cannot survive `SIGKILL` from a GPU driver reset. |
 | **Java FFM (JEP 454, Java 22+)** | Bounded off-heap `MemorySegment`, linker without JNI glue | Go services | The analogous *other-runtime* hardening: deterministic native lifetime, fail-loud bounds. Not a substitute. |
-| **Zig 0.15.1** (0.15.0 retracted) | First-class C ABI (`export fn`, `callconv(.C)`), `zig cc` for musl | A Go runtime contract | A Zig engine could sit behind Gusset's existing 15 C exports. It does not replace the Go-side semaphore, pipe, or poison latch. |
+| **Zig 0.15.1** (0.15.0 retracted) | First-class C ABI (`export fn`, `callconv(.C)`), `zig cc` for musl | A Go runtime contract | A Zig engine could sit behind Gusset's existing 17 C exports. It does not replace the Go-side semaphore, completion ring, or poison latch. |
 | **Swift C++ interop** | In-process Swift↔C++ | Go, cgo, POSIX completion | Irrelevant to this binary. Same C ABI lesson: callbacks must not run on the foreign thread that cannot hop the main actor — the Gusset dual of "Rust never calls Go" (R5). |
 
 Handle and communication, at the language level:
 
 1. **Go `Handle`** is a GC object with an explicit `Close`, a bounded semaphore, and a dispatch goroutine parked on the netpoller. `AddCleanup` is a leak backstop, not the contract.
-2. **Rust `Handle`** is an `Arc` over a fixed worker pool, a results map, a buffer map, and a non-blocking pipe write fd. `Drop` joins workers; Go `HandleClose` is what actually drops it.
-3. **The only shared addresses** are Rust-owned (`Buffer`, cancel `AtomicBool`, status strings). Every cross-boundary value is copied into the 40-byte header or returned through `gusset_take`.
+2. **Rust `Handle`** is an `Arc` over a fixed worker pool, a results map, a buffer map, the completion ring, and a non-blocking pipe write fd. `Drop` joins workers; Go `HandleClose` is what actually drops it. The ring stays alive until the reader calls `gusset_ring_release`.
+3. **The shared addresses** are Rust-owned: `Buffer`s, the completion ring, cancel `AtomicBool`s, and status strings. Header fields are copied. A success of at most 48 bytes comes back inside the completion record; anything else comes back through `gusset_take`.
 4. **Clocks do not cross.** Go computes relative `timeout_ns`; Rust builds its own `Instant`. Overflow of that add is expiry, not infinity.
 5. **Upcoming runtimes** (Go tip weekly, Rust nightly monthly) are gates, never shipped code. A boundary-behaviour change is a version-gated path plus a test, not a raised floor.
 

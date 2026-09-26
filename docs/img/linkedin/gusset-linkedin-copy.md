@@ -185,13 +185,13 @@ So: [Gusset](https://github.com/bharathvbcr/gusset) is a **runtime contract** be
 Six invariants, one for each way the process died.
 
 1. **Panic firewall.** No Rust panic crosses the boundary. Messages move as raw pointer + length with no NUL-termination anywhere, and `Display` formatting gets its own nested `catch_unwind`. Verified by a five-case panic zoo — including the embedded-NUL payload that aborts the naive implementation.
-2. **Bounded concurrency.** Callers take a permit from a Go channel semaphore, submit without blocking, and then park on the netpoller waiting for an 8-byte ticket down a pipe. Zero OS threads consumed while waiting. Your thread count tracks the pool you configured, not your traffic.
-3. **Rust-owned stacks.** Heavy work never touches the caller's thread stack. Workers are spawned with an explicit 8 MiB stack and their own 64 KiB `sigaltstack`. The musl trap stops being a trap.
+2. **Bounded concurrency.** Callers take a permit from a Go channel semaphore and submit without blocking. Completions come back through a shared-memory ring; the pipe only wakes a reader that has parked. Zero OS threads consumed while waiting. Your thread count tracks the pool you configured, not your traffic.
+3. **Rust-owned stacks.** Heavy work never touches the caller's thread stack. Workers are spawned with an explicit 8 MiB stack and their own alternate signal stack of at least 64 KiB. The musl trap stops being a trap. A stack overflow is still fatal.
 4. **Deadlines that cross.** Clocks don't travel, so Gusset doesn't send one. It computes a *relative* `timeout_ns` at submit time; Rust builds its own `Instant` from that. Cancellation is a per-job atomic flag in Rust memory, flipped by a sub-microsecond call.
 5. **One memory budget.** A counting allocator wrapper reports live and peak Rust bytes, and `AdviseMemoryLimit` feeds that back into Go's `SetMemoryLimit`, so the GC collects against the *real* total before the cgroup does something less polite.
 6. **Bulkhead.** A panic latches the handle permanently poisoned. Every subsequent call fails fast with `ErrPoisoned` without re-entering native code. The corpse stops taking traffic.
 
-Fifteen C exports, four `#[repr(C)]` types, and an ABI check at `init()` that verifies version, sizes, alignments and named field offsets before the process serves a single request — because a silently drifted header is heap corruption you find out about much later.
+Seventeen C exports, four `#[repr(C)]` types, and an ABI check at `init()` that verifies version, sizes, alignments and named field offsets before the process serves a single request — because a silently drifted header is heap corruption you find out about much later.
 
 ## What it is actually for
 

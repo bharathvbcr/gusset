@@ -76,8 +76,8 @@ Not a roadmap — a statement of scope, so the cost is visible rather than assum
 ```mermaid
 flowchart TD
     subgraph UnixContract ["Unix Architectural Contract (Supported)"]
-        UPipe["POSIX Pipe (os.Pipe)\nRust writes 8B ticket; Go Netpoller wakes reader"]
-        USig["sigaltstack (64 KiB per worker)\nSurvives Rust stack overflow; Go handles SIGSEGV"]
+        UPipe["Completion ring + POSIX pipe doorbell\nReader parks on os.Pipe; worker writes a wake token"]
+        USig["sigaltstack (at least 64 KiB per worker)\nGo's handler can run; a stack overflow is still fatal"]
         UStack["pthread_attr_setstacksize\nExplicit 8 MiB worker stack; pthread_getattr_np check"]
         UFd["int32 File Descriptor\nPassed directly to gusset_handle_open"]
     end
@@ -95,13 +95,16 @@ flowchart TD
     UFd -. "Requires rewrite" .-> WFd
 ```
 
-- **Completion signalling.** The completion path is a POSIX pipe written from a
-  Rust worker and read by Go's netpoller. Windows needs an IOCP or event-object
-  equivalent that Go's runtime can wait on without pinning an OS thread, which is
-  the property I4 depends on.
-- **Signal protection.** I5 installs a 64 KiB `sigaltstack` per worker so a Rust
-  stack overflow does not kill the process before Go's handler runs. Windows has
-  no `sigaltstack`; the equivalent is a vectored exception handler plus a guard
+- **Completion signalling.** Steady-state completions are published into a
+  Rust-owned ring that Go polls. Parking still uses a POSIX pipe: the reader
+  blocks in the netpoller, and a worker writes one wake token. Windows needs an
+  IOCP or event-object equivalent that Go's runtime can wait on without pinning
+  an OS thread, which is the property I4 depends on. The ring does not remove
+  that wait.
+- **Signal protection.** I5 installs a guard-paged `sigaltstack` of at least
+  64 KiB per worker, larger when `AT_MINSIGSTKSZ` requires it, so Go's handler
+  can run on a Rust thread. A stack overflow is still fatal. Windows has no
+  `sigaltstack`; the equivalent is a vectored exception handler plus a guard
   page, with different semantics.
 - **Stack accounting.** `current_thread_stack_size` uses
   `pthread_get_stacksize_np` on darwin and `pthread_getattr_np` on glibc/musl.

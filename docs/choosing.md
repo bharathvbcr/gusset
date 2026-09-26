@@ -371,8 +371,9 @@ it is mileage:
   cooperate, in a tree that already had 100+ tests and a detailed audit trail.
   That is a healthy audit and an immature codebase at the same time: the defects
   still being found are ones only real use surfaces. You would be early.
-- **Unix only.** Windows is a `compile_error!`, not a gap — the completion path
-  is a POSIX pipe and the signal protection is `sigaltstack`.
+- **Unix only.** Windows is a `compile_error!`, not a gap. Completions travel
+  in a Rust-owned ring, but a parked reader still waits on a POSIX pipe, and
+  the signal protection is `sigaltstack`.
 - **In-process is a fault domain, not a sandbox.** Gusset contains Rust
   `panic!`. It cannot contain `SIGSEGV`, `SIGBUS`, `std::process::abort`, a
   corrupt C library or a GPU driver fault — those take the Go process with them.
@@ -389,8 +390,8 @@ it is mileage:
 
 Go 1.27 ships a portable `simd` package behind `GOEXPERIMENT=simd`, backed by
 AVX/AVX2/AVX-512 on amd64 and Neon on arm64, and emulated elsewhere. It does not
-speed up Gusset itself. Gusset's Go path is a semaphore, an 8-byte ticket read
-and `copy()`, and the runtime's memmove is already vectorized. The whole suite
+speed up Gusset itself. Gusset's Go path is a semaphore, a poll of the
+completion ring, and `copy()`, and the runtime's memmove is already vectorized. The whole suite
 passes with the experiment enabled.
 
 What it moves is the line in the table below. A data-parallel kernel that was
@@ -457,7 +458,7 @@ GOEXPERIMENT=simd go test ./bench -run SIMD -bench SumSquares -benchtime=1s -cou
 | Situation | Use instead |
 | --- | --- |
 | Per-call work under ~10 µs | Pure Go, or raw cgo |
-| A data-parallel kernel on inputs below ~100 KB | Pure Go with `simd` (Go 1.27, `GOEXPERIMENT=simd`); see above |
+| A data-parallel kernel below the SIMD crossover (~170 KB on the AVX-512 host above) | Pure Go with `simd` (Go 1.27, `GOEXPERIMENT=simd`); see above |
 | Concurrency at or below `GOMAXPROCS` | Raw cgo |
 | Engine can segfault (`unsafe`, C libs, GPU) | A separate process |
 | You need Windows | Not Gusset — it will not compile |

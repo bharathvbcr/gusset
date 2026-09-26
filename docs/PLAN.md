@@ -10,7 +10,7 @@ In scope:
 
 - Panic firewall with a correct status/error protocol and free path
 - Bounded in-flight calls, deadlines enforced inside Rust, poisoned handles after a caught panic
-- Rust-owned worker threads; completion signalled to Go through a pipe the netpoller watches, never a blocked OS thread
+- Rust-owned worker threads; completions published into a Rust-owned ring the reader polls, with a pipe the netpoller watches when that reader parks, never a blocked OS thread
 - ABI version and struct-size verification at Go `init()`
 - Rust allocator stats fed into Go's memory limit
 - Trace/timeout header on every call (`trace_id`, `span_id`, relative `timeout_ns`); per-job cancel flag in Rust memory
@@ -34,7 +34,7 @@ flowchart TD
     CGO --> Header["C Header (gusset.h)\nABI v2: 4 #[repr(C)] struct layouts verified"]
     Header --> RustCrate["Rust Crate (crates/gusset)\nffi_guard, panic hook, 8 MiB workers, Counting allocator"]
     RustCrate --> RustEngine["Rust Engine\nadopter handler / dc-glob / tessl / sparsl"]
-    RustCrate -. "POSIX pipe completion (ticket ID)" .-> GoPkg
+    RustCrate -. "completion ring; pipe is the doorbell" .-> GoPkg
 ```
 
 The Go package never parks an OS thread on Rust work: a call submits to the Rust worker pool and returns a completion the Go side waits on through a channel.
@@ -42,7 +42,7 @@ The Go package never parks an OS thread on Rust work: a call submits to the Rust
 | Component | Language | Responsibilities | Public surface (v0.1) |
 | --- | --- | --- | --- |
 | Runtime crate | Rust | `ffi_guard`, `FfiStatus` (ptr+len, never NUL-terminated), `gusset_status_free`, panic hook with location, ABI layout export, named field offsets, worker pool with explicit 8 MiB stack size, allocator stats, timeout and cancel checks | 17 exported functions, 4 `#[repr(C)]` types (`CallHeader`, `FfiStatus`, `AbiLayout`, `AllocStats`) |
-| Runtime package | Go | `Handle` with semaphore, timeout, poison state; `init()` ABI check; completion channel over an `os.Pipe` whose write end Rust owns; `noescape` and `nocallback` on every export; allocator stats bridged to `debug.SetMemoryLimit` | `Open`, `Close`, `Call`, `CallBuffer`, `Submit`, `Wait` (and `WaitBuffer`), `NewBuffer` (with `Buffer.Free`), `Shutdown`, `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs` (12 public entry points; `WaitBuffer`, `CallBuffer`, and `Shutdown` logged in `DECISIONS.md`) |
+| Runtime package | Go | `Handle` with semaphore, timeout, poison state; `init()` ABI check including named field offsets; completion ring polled by the dispatch goroutine, with an `os.Pipe` whose write end Rust owns for wake tokens and overflow; `noescape` and `nocallback` on every export; allocator stats bridged to `debug.SetMemoryLimit` | `Open`, `Close`, `Call`, `CallBuffer`, `Submit`, `Wait` (and `WaitBuffer`), `NewBuffer` (with `Buffer.Free`), `Shutdown`, `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs` (12 public entry points; `WaitBuffer`, `CallBuffer`, and `Shutdown` logged in `DECISIONS.md`) |
 | Header | C | Hand-maintained `internal/ffi/gusset.h`; verified by `tests/header_match.rs` parameter and return types against Rust exports | one `.h` file |
 | Example engine | Rust + Go | Reference engine that exercises every failure mode: panic, NUL in message, deadline miss, large allocation, deep recursion | reference for adopters (`crates/gusset-example`) |
 

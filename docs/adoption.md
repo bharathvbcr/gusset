@@ -155,7 +155,7 @@ sequenceDiagram
         Engine->>RustGusset: ctx.check() (cooperative cancel & relative deadline)
         Engine->>Engine: Process domain logic
         Engine-->>RustGusset: Ok(Vec<u8>)
-        RustGusset-->>Go: Ticket completed via netpoller pipe
+        RustGusset-->>Go: Completion record in the ring (pipe wakes a parked reader)
     end
 ```
 
@@ -220,6 +220,14 @@ out, err := h.Call(ctx, payload)
 
 Things worth knowing before you hit them:
 
+- **Completions travel through a shared-memory ring.** `Open` calls
+  `gusset_handle_ring`. Workers publish each record into a 128-byte slot and
+  the reader polls it with atomic loads. The pipe wakes a reader that has
+  parked (one 8-byte token of zeros) and carries a record only when the ring
+  is full. A success of at most 48 bytes is inside that record, so a small
+  `Call` does not call `gusset_take`. A C host that never attaches the ring
+  keeps the pipe protocol. The ring stays valid until `gusset_ring_release`,
+  which the Go reader calls after `Close`.
 - **Pool size is bounded** at `gusset.MaxPoolSize` (1024). Each worker is an OS
   thread with an 8 MiB stack, so the request is refused rather than clamped: a
   caller who asked for 10,000 workers and silently got 1024 keeps the wrong

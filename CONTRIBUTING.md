@@ -14,7 +14,7 @@ Every contribution must preserve the six core runtime invariants:
 2. **(I2) Panic Firewall:** No Rust panic crosses the FFI boundary. A caught panic poisons the handle; subsequent calls fail fast with `ErrPoisoned`.
 3. **(I3) Deadline & Cancellation:** Deadlines and cancellations are enforced inside Rust between work units using relative `timeout_ns` and per-job `AtomicBool` flags.
 4. **(I4) Bounded Concurrency:** In-flight calls per handle never exceed the configured pool size. Callers park on the Go semaphore, never on an OS thread in cgo.
-5. **(I5) Rust-Owned Stacks:** Heavy Rust work runs on Rust-spawned threads with an explicit 8 MiB stack, never on the caller's g0 stack (musl's default is 128 KiB). Each worker installs a 64 KiB `sigaltstack`.
+5. **(I5) Rust-Owned Stacks:** Heavy Rust work runs on Rust-spawned threads with an explicit 8 MiB stack, never on the caller's g0 stack (musl's default is 128 KiB). Each worker installs a guard-paged `sigaltstack` of at least 64 KiB. A stack overflow is still fatal.
 6. **(I6) ABI Verification:** Go `init()` verifies ABI version, struct sizes, and alignments against Rust before the process starts serving.
 
 ---

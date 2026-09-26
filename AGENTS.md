@@ -40,18 +40,18 @@ The two runtimes disagree on lifetime, failure, threads, clocks, atomics and typ
 | --- | --- | --- | --- |
 | Object lifetime | GC-managed; `runtime.AddCleanup` (1.24+) runs later, on one goroutine, non-deterministically; an object whose last use is a cgo argument may be collected during the call | RAII: `Drop` runs deterministically at scope end | Explicit `Close` is the contract; `AddCleanup` is a leak backstop that logs and frees; `runtime.KeepAlive(h)` after every cgo call on the handle |
 | Heap movement and input ownership | Heap objects never move; stacks grow and shrink, but not while the goroutine is in a cgo call | Nothing moves | Go pointers valid for the call only; submit copies inputs up to 4 KiB, larger inputs live in Rust-owned `Buffer`s that Go fills through `unsafe.Slice` (R16); anything else retained means copy or `runtime.Pinner` unpinned in the same function (R6) |
-| Memory accounting | `GOMEMLIMIT` sees the Go heap only | Global allocator, no limit, no visibility | `Counting<A>` wrapper, `Stats()`, `AdviseMemoryLimit` |
+| Memory accounting | `GOMEMLIMIT` sees the Go heap only | Global allocator, no limit, no visibility | `Counting<A>` wrapper, `Stats()`, `AdviseMemoryLimit`. `RawBuffer` and `BufferAlloc` allocate from `System` and are counted by Gusset directly, so the count does not depend on whether `Counting` is the global allocator |
 | Failure model | `panic` recoverable per goroutine, no poisoning; runtime fatals (thread exhaustion, `cgocheck`) unrecoverable | Panic unwinds; escaping `extern "C"` aborts (1.81+); `Mutex` poisoning; `abort()` uncatchable | `catch_unwind` around each **work unit in the worker loop**, not only the submit call; the loop survives; a dead worker is respawned; a ticket whose result is `FFI_PANIC` poisons the handle; abort is out of scope (Phase 4 isolation) |
 | Threads | Goroutines are M:N, migrate between OS threads, preempted by signal; cgo runs on the g0 stack | 1:1 OS threads, stable TLS, own stack size | Rust-owned pool per handle with explicit stacks; no thread-identity assumptions (R7); `LockOSThread` only in adopter code that needs it |
-| Blocking | A cgo call is a syscall to the scheduler: M pinned, P handed off after ~20 µs, not counted in `GOMAXPROCS`, does not block STW; thread cap 10,000 | Blocking is just blocking | Submit-and-return keeps every call under the hand-off threshold; waits park on the netpoller via the completion pipe; semaphore bounds in-flight (R11) |
+| Blocking | A cgo call is a syscall to the scheduler: M pinned, P handed off after ~20 µs, not counted in `GOMAXPROCS`, does not block STW; thread cap 10,000 | Blocking is just blocking | Submit-and-return keeps every call under the hand-off threshold; the reader polls a Rust-owned completion ring and parks on the netpoller only when idle, woken by one pipe token; semaphore bounds in-flight (R11) |
 | Cancellation | `context.Context`, cooperative through channels | Dropped futures, or cooperative checks | Each job owns an `AtomicBool` cancel flag in Rust memory; Go sets it with `gusset_cancel(handle, ticket)` (one cgo call); `Close` sets all of them with `gusset_cancel_all`; Rust checks the flag between work units; Rust never reads Go-owned memory |
 | Clocks | `time.Now()` monotonic reading is process-internal; macOS and Linux sources differ from Rust's | `Instant` from `CLOCK_MONOTONIC` or `mach_absolute_time` | Header carries a **relative** `timeout_ns` computed at submit; Rust builds its own `Instant`; absolute monotonic values never cross; wall-clock only for trace timestamps |
-| Memory model and atomics | `sync/atomic` is sequentially consistent; 64-bit alignment rules on 32-bit targets | Acquire/Release orderings; no cross-language memory model exists | Nothing is shared by address except Rust-owned memory reached through exported functions; all cross-boundary values are copied into the header; the completion pipe is the only signal path |
+| Memory model and atomics | `sync/atomic` is sequentially consistent; 64-bit alignment rules on 32-bit targets | Acquire/Release orderings; no cross-language memory model exists | Nothing is shared by address except Rust-owned memory reached through exported functions (buffers, the completion ring, cancel flags). Header fields are copied. The pipe is the park signal and the overflow path |
 | Types | `int` is platform-sized; no unions; strings immutable and not validated UTF-8; `error` is an interface | Fixed-width ints; only `#[repr(C)]` is stable; `u128`, fat pointers, most `Option<T>` are not FFI-safe; `str` must be valid UTF-8 | Header and status use `i32`, `u32`, `u64`, `usize` and thin pointers only; `#![deny(improper_ctypes_definitions)]`; `str::from_utf8` with `FFI_BAD_ARG` on failure, never `_unchecked`; Go exposes `*gusset.Error{Code, Msg, File, Line}` for `errors.Is` |
 | Integer overflow | Wraps silently | Panics in `dev`, wraps in `release` | Explicit `wrapping_*` and `checked_*` in `ffi/`; panic zoo and pitfalls run in both profiles |
 | Zero values | Everything zero-initialized | Uninitialized until written | Out params written with `ptr::write` only on `FFI_OK`; Go reads `out` only on `FFI_OK` |
-| Async | Blocking-style goroutines | Poll-based Tokio | No runtime inside a cgo call; an async engine runs one Tokio runtime on a pool thread; submit = `spawn` + oneshot, completion through the same pipe |
-| Signals | Go owns every handler and requires `SA_ONSTACK` from foreign code; a thread without an alternate stack dies on stack overflow before any handler runs | `std` installs neither handlers nor `sigaltstack` in a `staticlib` | Rust never installs handlers; each worker installs a 64 KiB `sigaltstack` in its entry function; `EINTR` retried in `ffi/` |
+| Async | Blocking-style goroutines | Poll-based Tokio | No runtime inside a cgo call; an async engine runs one Tokio runtime on a pool thread; submit = `spawn` + oneshot, completion through the ring, with the pipe as the doorbell |
+| Signals | Go owns every handler and requires `SA_ONSTACK` from foreign code; a thread without an alternate stack dies on stack overflow before any handler runs | `std` installs neither handlers nor `sigaltstack` in a `staticlib` | Rust never installs handlers; each worker installs a guard-paged `sigaltstack` of at least 64 KiB, larger when `AT_MINSIGSTKSZ` requires it; workers block SIGPIPE; `EINTR` retried in `ffi/` |
 | Process exit | `os.Exit` skips defers and never runs Rust `Drop`; tests share one process | Statics never dropped; threads killed at exit | `gusset_shutdown(drain_ms)` from app shutdown and `TestMain`; nothing durable relies on `Drop` |
 | Logging | `slog`/`fmt` on Go's side; Rust cannot call back | `log`/`tracing` on Rust's side | Rust subscriber writes into a bounded ring; Go drains it with `gusset_drain_logs` into `slog`; stderr fallback |
 | Build profiles | One profile | `dev` has overflow checks and `debug_assertions` | CI runs the full pitfall suite in both `dev` and `release` |
@@ -133,7 +133,7 @@ Every row is a test name in `tests/pitfalls/`; the agent adds a row when it find
 | `WithPoolSize` truncated through `uint32` | `WithPoolSize(1<<40)` opened a 0-capacity semaphore (every `Call` hung); `WithPoolSize(1<<32+4)` silently became 4 workers | `uint32(n)` ran before the `MaxPoolSize` check, so values that do not fit in 32 bits never saw the ceiling | Refuse n outside 1..=MaxPoolSize before conversion; `TestPitfall_PoolSizeOverflowIsRefusedNotTruncated` |
 | `[]byte` over 4 KiB copied on the cgo thread | A 1 MiB `Call` memcpy'd inside `gusset_submit` and pinned an M for the copy | R16 was documented, not enforced; `Handle::submit` inlined every slice | Refuse inline input `> 4096`; larger payloads use `NewBuffer`; `TestPitfall_InlineSliceOver4KiBIsRefused` |
 | `NewBuffer` after a caught panic | Allocations still entered Rust on a poisoned handle | R10 covered Submit/Call; `buf_alloc` did not check the latch | `ErrPoisoned` on Go and in `gusset_buf_alloc`; `TestPitfall_NewBufferRefusesPoisonedHandle` |
-| Kernel blocking on full pipe write | A worker thread blocked indefinitely in `libc::write`, rendering `WRITE_TICKET_TIMEOUT` dead code | `pipe(2)` returns blocking descriptors by default; saturated completion pipes hung the worker pool | Enforce `O_NONBLOCK` on `pipe_write_fd` in `Handle::open` and Go `Open`; worker retries with exponential backoff up to 2.5s |
+| Kernel blocking on full pipe write | A worker thread blocked indefinitely in `libc::write`, rendering `WRITE_TICKET_TIMEOUT` dead code | `pipe(2)` returns blocking descriptors by default; saturated completion pipes hung the worker pool | Enforce `O_NONBLOCK` on `pipe_write_fd` in `Handle::open` and Go `Open`. `write_completion` retries until the write lands, the handle closes, or the pipe returns a hard error; a stall of 10 s is logged and the ticket is not dropped |
 | Submit/Close race on semaphore drain | Close released permits before an in-flight submit registered its ticket, leaking permits or deadlocking | Semaphore permit was acquired before `s.cgoMu.RLock()`, leaving a gap where Close drained tickets | Extended `s.cgoMu.RLock()` to cover `semTickets` insertion; post-semaphore poison fast-fail |
 | Buffer use-after-free during concurrent Close | `buf.Bytes()` indexed memory already released by Rust if `Close` ran concurrently | Go race detector cannot observe Rust-owned heap memory | `buf.Bytes()` checks handle closed state and returns nil; double `Buffer.Free` idempotent |
 | Diagnostic opcode 6 recursion overflow | Recursion depth read directly from payload (`[6, 0xFF, ...]`) panicked worker thread via stack overflow | Recursive probe frames were unbounded by user payload | Capped recursion depth at boundary; `TestPitfall_DeepRecursionOnWorkerStack` verifies safe limit |
@@ -148,6 +148,7 @@ Every row is a test name in `tests/pitfalls/`; the agent adds a row when it find
 | Opcode wider than `uint32` selects the diagnostic engine | `uint(1<<32)` stored as opcode 0, and payload byte 1 panics and poisons the handle | `uint32(v)` keeps the low bits | Refuse with `gusset: opcode does not fit in uint32`; `TestHardening_OversizedOpcodeDoesNotCollapseToDiagnostic` |
 | Engine returns a buffer Go still holds | The waiter's free releases a `NewBuffer` the caller is still viewing | The alias check covered the unit's own input and a buffer already claimed, not every buffer `gusset_buf_alloc` published | `caller_held` set on the published alloc; `claim_output` refuses it; `engine_returning_a_caller_held_buffer_is_refused` |
 | `Bytes` and `Free` race on the slice header | `-race` reports a concurrent read of `b.data` and the write that nils it | `freed` was atomic, so the flag was synchronized and the header was not | Both run under `Buffer.mu`; `Bytes` also holds `cgoMu` so it cannot observe a view `Close` is freeing; `TestPitfall_BytesAndFreeDoNotRace` |
+| Per-handle ticket counters collide | `Wait` on handle B with handle A's ticket returns B's result and a nil error, and B's real waiter gets `ErrUnknownTicket` | Each handle numbered tickets from 1, and Go keys waiters by ticket per handle | One process-wide counter (`NEXT_TICKET`); `TestInterop_ForeignTicketIsUnknownNotAnotherCallersResult` |
 
 ## Hardened runtime specifications
 
@@ -160,9 +161,9 @@ The core architecture guarantees and technical contracts enforced across the Rus
 - **Four `#[repr(C)]` struct layouts**: Statically asserted for size and alignment (`CallHeader` 40B, `FfiStatus` 48B, `AbiLayout` 36B for ABI v2, `AllocStats` 24B).
 - **FFI firewall (`ffi_guard`)**: Null-checks out pointers, uses `ptr::write` for outputs, wraps `Display` formatting in nested `catch_unwind`, maps `Ok(Err)` to `FFI_ERR` and `Err(payload)` to `FFI_PANIC`. Error messages allocated in boxed slices freed only via `gusset_status_free`.
 - **Panic hook & diagnostic tracking**: Installed once in `gusset_init`; records panic location into a 256-entry capacity-capped map with oldest-first eviction.
-- **Worker pool**: Fixed size per handle from `gusset_handle_open` (capped at 1024); threads spawned via `Builder::stack_size` (8 MiB explicit stack) named `gusset-w<N>`. Each thread installs a 64 KiB `sigaltstack` on entry and loops with `catch_unwind` around work units; dead workers are respawned on subsequent submissions.
+- **Worker pool**: Fixed size per handle from `gusset_handle_open` (capped at 1024); threads spawned via `Builder::stack_size` (8 MiB explicit stack) named `gusset-w<N>`. Each thread installs a guard-paged `sigaltstack` of at least 64 KiB on entry, blocks SIGPIPE, and loops with `catch_unwind` around work units; dead workers are respawned on subsequent submissions. Workers poll `pool::queue` briefly before parking.
 - **Cancellation & deadlines**: Monotonic relative `timeout_ns` translated into Rust `Instant` at submit; a non-zero value whose `checked_add` overflows expires immediately rather than becoming "no deadline". Cooperative checks between work units evaluate both deadline and per-job `AtomicBool` cancel flag (with `Ordering::Acquire`).
-- **Pipe completion**: Non-blocking `pipe_write_fd` writes 8-byte ticket IDs on job completion; retries on `EINTR`/`EAGAIN` with exponential backoff up to 2.5s.
+- **Completion transport**: `gusset_handle_ring` attaches a ring of `next_pow2(max(pool_size, 2))` 128-byte slots. Workers publish each completion record there. Go `Open` attaches the ring; a C host that does not keeps the pipe protocol. The reader polls the ring with atomic loads. Before parking it sets `waiting`; the next publisher writes one 8-byte wake token (ticket 0) and the netpoller wakes the reader. A full ring (Go's permits rule that out) spills the record to the pipe and increments an overflow counter. A success of at most 48 bytes rides in the record when `GUSSET_FLAG_INLINE_COMPLETION` is set, which Go always sets, and is not stored for `gusset_take`. Pipe writes stay `O_NONBLOCK`. `write_completion` retries until the write lands, the handle closes, or the pipe returns a hard error, and logs once after 10 s rather than dropping the ticket. `gusset_ring_release` drops the reader's reference, so the ring outlives `gusset_handle_close`.
 - **Memory accounting & buffers**: 64-byte aligned allocations via `gusset_buf_alloc`/`gusset_buf_free`, refused above 1 GiB. `Counting<A>` wrapper with relaxed atomics tracks live and peak allocations with zero allocations inside `gusset_alloc_stats`; it is a `GlobalAlloc`, and on Rust 1.100+ also an `Allocator` for per-collection accounting. `BufferAlloc` (Rust 1.100+) lets an engine build output in 64-byte aligned buffer memory that is adopted as the result without a copy (`JobOutput::Allocated`). Workers promote `JobResult::Ok` larger than 4 KiB onto a `Buffer` so `gusset_take` does not memcpy on the cgo thread.
 - **Build profile**: `panic = "unwind"` crate-wide enforced by `build.rs`; frame pointers enabled (`-C force-frame-pointers=yes`); hand-maintained `internal/ffi/gusset.h` verified against Rust signatures by parameter and return types in `tests/header_match.rs`.
 
@@ -170,10 +171,10 @@ The core architecture guarantees and technical contracts enforced across the Rus
 
 - **cgo boundary encapsulation**: All cgo confined to `internal/ffi`; public API in root package; `_test.go` files never import `C`. Every `#cgo` import carries `#cgo noescape` and `#cgo nocallback` (enforced by `tools/gussetvet`).
 - **12 public entry points**: `Open`, `Close`, `Call`, `CallBuffer`, `Submit`, `Wait` (and `WaitBuffer`), `NewBuffer` (with `Buffer.Free`), `Shutdown`, `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs`.
-- **Handle lifecycle & concurrency**: Bounded semaphore channel matching pool size; `poisoned` atomic bool; non-blocking completion pipe read by a dedicated dispatch goroutine; `AddCleanup` finalizers backstop forgotten handle and buffer closures.
+- **Handle lifecycle & concurrency**: Bounded semaphore channel matching pool size; `poisoned` atomic bool; a dispatch goroutine that polls the completion ring and parks on the pipe only when idle; `AddCleanup` finalizers backstop forgotten handle and buffer closures. `WithBufferBudget` is an opt-in cap on live `NewBuffer` bytes.
 - **Zero-copy egress & multi-engine routing**: `WaitBuffer` transfers take buffer directly into Go `*Buffer` without intermediate heap copies. Engine opcodes dispatched via `CallHeader.reserved` field (`WithOpcode`/`ContextWithOpcode`).
 - **Input validation & memory limits**: Submissions copy inputs up to 4 KiB; inputs above 4 KiB require `Buffer`. A single buffer is refused above 1 GiB (`MaxBufferBytes`). `AdviseMemoryLimit(total)` feeds Rust live memory usage back into Go runtime `debug.SetMemoryLimit`.
-- **ABI verification**: Go `init()` validates `gusset_abi_layout()` version, sizes, and alignments against compiled constants and panics on mismatch.
+- **ABI verification**: Go `init()` validates `gusset_abi_layout()` version, sizes, and alignments, and `gusset_abi_fields` offsets and sizes, against cgo's compiled structs and panics on mismatch.
 
 ### Build, link and platform targets
 
@@ -211,7 +212,8 @@ sequenceDiagram
     participant Handle as Go Handle (gusset)
     participant CGO as cgo Bridge (internal/ffi)
     participant Worker as Rust Worker Pool
-    participant Pipe as POSIX Pipe (O_NONBLOCK)
+    participant Ring as Completion Ring
+    participant Pipe as POSIX Pipe (doorbell)
     participant Reader as Dispatch Goroutine
 
     App->>Handle: Call(ctx, payload) / Submit(ctx, buf)
@@ -220,11 +222,17 @@ sequenceDiagram
     CGO->>Worker: Enqueue job + register AtomicBool cancel flag
     CGO-->>Handle: Return uint64 ticket ID
     Worker->>Worker: Execute work unit (check timeout & cancel flag)
-    Worker->>Pipe: write(ticket ID) [non-blocking]
-    Pipe->>Reader: Netpoller wakes reader goroutine
+    Worker->>Ring: Publish completion record
+    opt Reader has parked
+        Worker->>Pipe: write wake token
+        Pipe->>Reader: Netpoller wakes reader
+    end
+    Ring->>Reader: Atomic load of the record
     Reader->>Handle: Dispatch completion to pending channel
-    Handle->>CGO: gusset_take(ticket ID)
-    CGO-->>Handle: Move Rust result buffer
+    alt Result larger than 48 bytes, or an error
+        Handle->>CGO: gusset_take(ticket ID)
+        CGO-->>Handle: Move Rust result buffer
+    end
     Handle->>Handle: Release sem permit
     Handle-->>App: Return result ([]byte or *Buffer)
 ```
@@ -273,7 +281,7 @@ Property the whole suite proves: no test in this repo ever needs `GODEBUG=cgoche
 | Phase | Target | Status | Milestone evidence |
 | --- | --- | --- | --- |
 | 0 Seed | Repro firewall failure; baseline benchmarks | **SHIPPED** | `rs_guarded_doc` failed with `SIGABRT` under NUL byte; Gusset hardened firewall catches it safely; baseline benchmarks committed in `bench/results/` |
-| 1 v0.1 | Core runtime, 6 invariants, CI matrix | **SHIPPED** | R1–R16 enforcers in place; exports diffed via `llvm-nm` (15 as of the field-offset export); ABI layout v2 cross-checked, including named field offsets; full matrix green |
+| 1 v0.1 | Core runtime, 6 invariants, CI matrix | **SHIPPED** | R1–R16 enforcers in place; exports diffed via `llvm-nm` (17, including `gusset_handle_ring` and `gusset_ring_release`); ABI layout v2 cross-checked, including named field offsets; full matrix green |
 | 2 Second app | Adopter validation in second codebase | **SHIPPED** | Validated in DevCouncil (`go_orchestrator` driving `dc-glob`) and `crates/gusset-example` with zero public surface expansion |
 | 3 Public | Package publishing, generated docs, example engine | **READY** | `benchdoc` automation committed; `gusset.pc` pkg-config support; staticlink recipe in `docs/adoption.md` |
 | 4 IPC | Out-of-process daemon for GPU crash isolation | **SPECIFIED** | Shared memory transport architecture with upstream `iceoryx2` specified in `docs/ipc.md` |

@@ -23,21 +23,22 @@ flowchart TD
     subgraph GoPkg ["Gusset Go Package (github.com/bharathvbcr/gusset)"]
         Handle["gusset.Handle (Bounded Pool & Bulkhead State)"]
         Sem["Go Semaphore (Permits <= PoolSize <= 1024)"]
-        Netpoller["Netpoller Reader Goroutine (os.Pipe Read End)"]
+        Netpoller["Dispatch Goroutine (polls the ring; parks on os.Pipe)"]
         StatsBridge["AllocStats Bridge (gusset.Stats & AdviseMemoryLimit)"]
     end
 
     subgraph Boundary ["Hardened C ABI Boundary (internal/ffi/gusset.h)"]
         ABI["ABI Layout Verification v2 (4 #[repr(C)] structs checked at init)"]
         Directives["#cgo noescape / #cgo nocallback (0 Go heap escape allocations)"]
-        Exports["Strictly 15 C ABI Exports (nm verified in CI)"]
+        Exports["Strictly 17 C ABI Exports (nm verified in CI)"]
     end
 
     subgraph RustCrate ["Gusset Rust Runtime (crates/gusset)"]
         Guard["ffi_guard (Panic Catching & FfiStatus Formatting)"]
         Workers["Worker Pool with Explicit 8 MiB Stacks (gusset-w0 .. gusset-wN)"]
-        SigAlt["sigaltstack (64 KiB Alternate Stack per worker)"]
-        PipeWrite["POSIX Pipe Write End (Non-blocking ticket notification)"]
+        SigAlt["sigaltstack (at least 64 KiB per worker)"]
+        Ring["Completion Ring (Rust-owned, 128-byte slots)"]
+        PipeWrite["POSIX Pipe (wake token and overflow)"]
         Alloc["Counting Global Allocator Wrapper (Live & Peak Memory)"]
         LogRing["Bounded Log Ring Buffer (Oldest-line eviction & truncation)"]
     end
@@ -56,8 +57,10 @@ flowchart TD
     Workers --> Reg
     Reg --> Core
     Core -.-> Cancel
+    Workers --> Ring
+    Ring -. "completion record" .-> Netpoller
     Workers --> PipeWrite
-    PipeWrite -. "8-byte ticket" .-> Netpoller
+    PipeWrite -. "wake token if the reader parked" .-> Netpoller
     Netpoller --> Handle
     Alloc --> StatsBridge
     StatsBridge --> MemLimit
@@ -70,7 +73,7 @@ flowchart TD
 1. **(I1) Memory Ownership:** Memory is freed by the allocator that created it via exported `*_free` functions. Go never calls `C.free` on Rust memory.
 2. **(I2) Panic Firewall:** No Rust panic crosses the FFI boundary. A caught panic poisons the handle; subsequent calls fail fast with `ErrPoisoned`.
 3. **(I3) Deadline & Cancellation:** Deadlines and cancellations are enforced inside Rust between work units using relative `timeout_ns` and per-job `AtomicBool` flags.
-4. **(I4) Bounded Concurrency:** In-flight calls per handle never exceed the configured pool size. Callers park on the Go semaphore, never on an OS thread in cgo. Pool size is capped at `gusset.MaxPoolSize` (1024); a larger request is refused, not clamped. On Linux the completion pipe is grown to hold one ticket per worker, and `Open` is refused if it cannot be.
+4. **(I4) Bounded Concurrency:** In-flight calls per handle never exceed the configured pool size. Callers park on the Go semaphore, never on an OS thread in cgo. Pool size is capped at `gusset.MaxPoolSize` (1024); a larger request is refused, not clamped. On Linux the completion pipe is grown to hold one inline record per worker, or one 8-byte ticket per worker when it cannot, and `Open` is refused only when even the tickets will not fit. `Open` attaches a completion ring by default, so steady-state records live there and the pipe carries wake tokens and overflow.
 5. **(I5) Rust-Owned Stacks:** Heavy Rust work runs on Rust-spawned threads with an explicit 8 MiB stack, never on the caller's g0 stack (musl's default is 128 KiB). Each worker installs its own guard-paged `sigaltstack` (at least 64 KiB, larger where the kernel's signal frame needs it) so Go's signal handler can run on a Rust thread, and a failure to do so is logged rather than silently accepted. The alternate stack does not make a stack overflow survivable: the process still exits. Workers also block SIGPIPE, so a write to a closed pipe returns EPIPE instead of killing the process.
 6. **(I6) ABI Verification:** Go `init()` verifies ABI version, struct sizes, alignments, and the offset and size of every named field against Rust before the process starts serving — for all four `#[repr(C)]` types that cross the boundary, `AllocStats` included.
 
@@ -78,7 +81,7 @@ flowchart TD
 
 ## Execution & Completion Lifecycle
 
-Gusset decouples work submission from thread-blocking cgo calls: callers park on Go's netpoller and channel semaphores rather than pinning OS threads in cgo.
+Gusset decouples work submission from thread-blocking cgo calls. Callers wait on a Go channel. The dispatch goroutine polls the completion ring and parks on the netpoller only when it is idle.
 
 ```mermaid
 sequenceDiagram
@@ -88,15 +91,16 @@ sequenceDiagram
     participant Sem as Semaphore (Channel)
     participant CGO as C ABI (internal/ffi)
     participant Pool as Rust Worker Pool
+    participant Ring as Completion Ring
     participant Pipe as POSIX Pipe (os.Pipe)
-    participant Reader as Netpoller Reader
+    participant Reader as Dispatch Goroutine
 
     Caller->>Handle: Call(ctx, input)
     Handle->>Sem: Acquire permit (pool bounded)
     Note over Sem: Callers queue in Go runtime (never pin OS thread in cgo - I4)
     Handle->>CGO: gusset_submit(handle, header, input, &ticket)
     Note over CGO: 40-byte CallHeader (relative timeout_ns + trace/span IDs)
-    CGO->>Pool: Enqueue job to worker channel
+    CGO->>Pool: Enqueue job to worker queue
     CGO-->>Handle: Return ticket ID immediately
     Handle->>Handle: Register ticket channel in pending map
 
@@ -105,16 +109,27 @@ sequenceDiagram
         Note over Pool: Runs under catch_unwind (I2) with explicit 8 MiB stack (I5)
         Pool->>Pool: ctx.check() (timeout & cancel flag)
         Pool->>Pool: Execute registered engine
-        Pool->>Pipe: Write 8-byte ticket ID to write fd
-    and Netpoller Wakeup
+        Pool->>Ring: Publish completion record (inline when the success is ≤ 48 bytes)
+        opt Reader has parked
+            Pool->>Pipe: Write one wake token (8 zero bytes)
+        end
+    and Reader
         Handle->>Reader: Await ticket on Go channel or ctx.Done()
-        Pipe-->>Reader: Netpoller wakes reader on ticket arrival
+        alt Ring has a record
+            Ring-->>Reader: Atomic load; no system call
+        else Reader is idle
+            Pipe-->>Reader: Netpoller wakes reader on the token
+        end
         Reader->>Handle: Dispatch completion to ticket channel
     end
 
-    Handle->>CGO: gusset_take(handle, ticket, &out, &len)
-    Note over CGO: Result moved out exactly once
-    CGO-->>Handle: Return result bytes
+    alt Small inline success
+        Note over Handle: Bytes already in the record; no gusset_take
+    else Larger result, error, or panic
+        Handle->>CGO: gusset_take(handle, ticket, &out, &len)
+        Note over CGO: Result moved out exactly once
+        CGO-->>Handle: Return result bytes
+    end
     Handle->>Sem: Release semaphore permit
     Handle-->>Caller: Return ([]byte, nil)
 ```
@@ -186,14 +201,16 @@ By default, this installs into `~/.local` (or `/usr/local` if run with write per
 
 ## The Public Surface
 
-### 15 Exported Rust Functions
-Gusset exports strictly 15 C ABI functions from `libgusset.a` (enforced by `tests/exports_match.rs`):
+### 17 Exported Rust Functions
+Gusset exports strictly 17 C ABI functions from `libgusset.a` (enforced by `tests/exports_match.rs`):
 - `gusset_abi_layout(out)`: Layout and struct size/alignment verification.
 - `gusset_abi_fields(offsets, sizes, cap)`: Named-field offsets and sizes of all `#[repr(C)]` types.
 - `gusset_init()`: Global runtime initialization and panic hook installation.
 - `gusset_shutdown(drain_ms)`: Graceful shutdown and worker drain.
 - `gusset_handle_open(pool_size, pipe_write_fd, out_handle, status)`: Opens bounded worker pool.
 - `gusset_handle_close(handle, status)`: Closes handle, cancels tasks, and closes write fd.
+- `gusset_handle_ring(handle, out_ring, out_shared, out_slots, out_capacity, status)`: Attaches the completion ring. Optional for a C host; `Open` calls it. The ring outlives `gusset_handle_close`.
+- `gusset_ring_release(ring)`: Drops the reader's reference to that ring.
 - `gusset_submit(handle, header, input_ptr, input_len, buffer_id, out_ticket, status)`: Submits work unit.
 - `gusset_take(handle, ticket, out_buf_id, out_ptr, out_len, status)`: Moves result out once.
 - `gusset_cancel(handle, ticket, status)`: Cancels specific job ticket.
@@ -288,14 +305,17 @@ construction; the question an adopter actually has is where the curves meet.
 
 ![OS threads against in-flight requests](docs/img/threads.svg)
 
-The table and charts above come from the darwin-arm64 host, and they predate the
-spin-then-park completion path. That change removed two thread wake-ups per
-call. [`bench/results/linux-amd64-vm/`](bench/results/linux-amd64-vm/README.md)
-has a before/after comparison on one Linux VM, with raw data for every suite:
+The table and charts above come from the darwin-arm64 host. They predate the
+completion-path work recorded in
+[`bench/results/linux-amd64-vm/`](bench/results/linux-amd64-vm/README.md):
+spin-then-park, inline completion records, and the shared-memory ring. The
+figures below are the tables in that directory, not a new measurement:
 
-- **Serial no-op `Call`:** 90 µs → 10.6 µs.
-- **Against a blocking cgo call:** 1.1–2.2× for work of 10 µs and up, where it
-  had been as high as 8.6×.
+- **Serial no-op `Call`:** 90.3 µs on the old main, 10.6 µs after
+  spin-then-park (`main-*.txt`), then 3.73 µs with the ring (`ring-*.txt`,
+  against 7.46 µs on the commit just before it).
+- **Against a blocking cgo call:** after spin-then-park, 1.1–2.2× for work of
+  10 µs and up, where it had been as high as 8.6× (`transport-*.txt`).
 - **Threads:** 11 OS threads at every concurrency level from 32 to 2048
   in-flight requests, against raw cgo's 30–47.
 
@@ -341,7 +361,7 @@ Gusset is a boundary, not a service: it runs **your** Rust engine. Two things ar
 required before the snippet below returns a result, and both are easy to miss —
 [`docs/adoption.md`](docs/adoption.md) is the complete worked recipe.
 
-1. **Register an engine.** Gusset's 15 C exports do not include one, so your
+1. **Register an engine.** Gusset's 17 C exports do not include one, so your
    umbrella crate calls `gusset::set_engine_handler` and exports an entry point
    your Go code invokes at startup. Without it every submission is refused with
    `no engine handler registered` — deliberately, rather than falling back to a
