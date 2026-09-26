@@ -136,14 +136,28 @@ mod tests {
         }
     }
 
+    /// The completion ring's header and slot are repr(C) to pin their layout,
+    /// but C never declares them: it reads them through the GUSSET_RING_*
+    /// offsets, which tests/constants_match.rs checks. They must still exist,
+    /// so this list cannot outlive them.
+    const OFFSET_VERIFIED: [&str; 2] = ["RingShared", "Slot"];
+
     #[test]
     fn field_table_matches_the_structs_and_the_header() {
         let src = crate_src();
         let mut by_name = std::collections::BTreeMap::<String, Vec<String>>::new();
+        let mut offset_verified = OFFSET_VERIFIED.to_vec();
         for (name, fields) in repr_c_structs(&src) {
+            if let Some(i) = offset_verified.iter().position(|n| *n == name) {
+                offset_verified.remove(i);
+                continue;
+            }
             if by_name.insert(name.clone(), fields).is_some() {
                 panic!("duplicate repr(C) struct {name}");
             }
+        }
+        if !offset_verified.is_empty() {
+            panic!("offset-verified repr(C) structs not found: {offset_verified:?}");
         }
         let names: Vec<&str> = by_name.keys().map(String::as_str).collect();
         let expected = ["AbiLayout", "AllocStats", "CallHeader", "FfiStatus"];
@@ -309,7 +323,13 @@ mod tests {
                         if name.is_empty() {
                             panic!("repr(C) attribute not followed by a struct name");
                         }
-                        found.push((name, rust_fields(src, rest)));
+                        // Layout pinned, fields private: see OFFSET_VERIFIED.
+                        let fields = if OFFSET_VERIFIED.contains(&name.as_str()) {
+                            Vec::new()
+                        } else {
+                            rust_fields(src, rest)
+                        };
+                        found.push((name, fields));
                     }
                     break;
                 }

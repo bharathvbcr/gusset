@@ -118,7 +118,7 @@ impl Ring {
     /// Publishes `record` (at most `INLINE_RECORD_MAX` bytes, a multiple of
     /// 8), or returns false when the ring is full.
     pub fn try_publish(&self, record: &[u8]) -> bool {
-        debug_assert!(record.len() <= INLINE_RECORD_MAX && record.len() % 8 == 0);
+        debug_assert!(record.len() <= INLINE_RECORD_MAX && record.len().is_multiple_of(8));
         let mut pos = self.shared.tail.load(Ordering::Relaxed);
         loop {
             let slot = &self.slots[(pos & self.mask) as usize];
@@ -131,10 +131,9 @@ impl Ring {
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
-                        for (w, chunk) in slot.words.iter().zip(record.chunks_exact(8)) {
-                            let mut b = [0u8; 8];
-                            b.copy_from_slice(chunk);
-                            w.store(u64::from_ne_bytes(b), Ordering::Relaxed);
+                        let (words, _) = record.as_chunks::<8>();
+                        for (w, chunk) in slot.words.iter().zip(words) {
+                            w.store(u64::from_ne_bytes(*chunk), Ordering::Relaxed);
                         }
                         slot.seq.store(pos.wrapping_add(1), Ordering::Release);
                         return true;

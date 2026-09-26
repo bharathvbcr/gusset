@@ -203,3 +203,45 @@ func TestPipeOnlyAndRingTransportsAgree(t *testing.T) {
 		}
 	}
 }
+
+// A lone job's poll is twice the recent gap between completions, clamped to
+// [ticketReaderSpin, ticketReaderSpinBusy]; idle gaps do not count, and with
+// more than one job in flight the short window applies.
+func TestSpinBudgetFollowsRecentCompletionGaps(t *testing.T) {
+	lone := true
+	tr := &ticketReader{inFlight: func() bool { return lone }}
+	for _, c := range []struct {
+		ewma, want time.Duration
+	}{
+		{0, ticketReaderSpin},
+		{10 * time.Microsecond, ticketReaderSpin},
+		{60 * time.Microsecond, 120 * time.Microsecond},
+		{time.Millisecond, ticketReaderSpinBusy},
+	} {
+		tr.gapEWMA = c.ewma
+		if got := tr.spinBudget(); got != c.want {
+			t.Fatalf("gapEWMA %v: budget %v, want %v", c.ewma, got, c.want)
+		}
+	}
+	lone = false
+	if got := tr.spinBudget(); got != ticketReaderSpin {
+		t.Fatalf("parallel budget %v, want %v", got, ticketReaderSpin)
+	}
+
+	tr = &ticketReader{}
+	tr.completed() // first stamp: no gap yet
+	if tr.gapEWMA != 0 {
+		t.Fatal("the first completion has no gap to record")
+	}
+	tr.lastTicket = time.Now().Add(-80 * time.Microsecond)
+	tr.completed()
+	if tr.gapEWMA < 10*time.Microsecond || tr.gapEWMA > 20*time.Microsecond {
+		t.Fatalf("one 80 us gap moved the average to %v, want ~10 us", tr.gapEWMA)
+	}
+	before := tr.gapEWMA
+	tr.lastTicket = time.Now().Add(-time.Second)
+	tr.completed()
+	if tr.gapEWMA != before {
+		t.Fatal("an idle gap was counted as job length")
+	}
+}

@@ -384,6 +384,8 @@ const ticketReaderSpin = 50 * time.Microsecond
 // ~100 µs jobs outlasted the 50 µs window and paid the wake cost on every call
 // (~58 µs of overhead against raw cgo). Capped: a job longer than this parks
 // the reader as before, so a long-running engine never costs a busy core.
+//
+// It is the ceiling, not a fixed window: see ticketReader.gapEWMA.
 const ticketReaderSpinBusy = 200 * time.Microsecond
 
 // ticketReader reads completion records, several per system call.
@@ -399,6 +401,13 @@ type ticketReader struct {
 	end   int
 	// lastTicket is when the previous ticket was consumed.
 	lastTicket time.Time
+	// gapEWMA tracks the time between consecutive completions (1/8 weight
+	// per sample). A lone job's poll lasts twice this, between
+	// ticketReaderSpin and ticketReaderSpinBusy. A flat 200 us made the
+	// reader spin through every GC pause of a 33 us-per-call stream of 64 KiB
+	// results, keeping its P from the GC's idle mark workers (+10%), while
+	// ~115 us jobs need the full window to avoid a park per call.
+	gapEWMA time.Duration
 	// inFlight reports whether a completion is imminent enough to poll for.
 	inFlight func() bool
 	// State for readFn, which is built once: a closure created per read
@@ -473,7 +482,7 @@ func (tr *ticketReader) next() (ticket uint64, data []byte, inline bool, err err
 				continue
 			}
 			tr.overflowSeen++
-			tr.lastTicket = time.Now()
+			tr.completed()
 			return t, d, in, nil
 		}
 		// Bytes are in the pipe, or about to be: take what is there without
@@ -523,7 +532,7 @@ func (tr *ticketReader) popRing() (uint64, []byte, bool, error) {
 	}
 	atomic.StoreUint64((*uint64)(slot), tr.head+tr.ring.Capacity)
 	tr.head++
-	tr.lastTicket = time.Now()
+	tr.completed()
 	return w, data, inline, nil
 }
 
@@ -613,7 +622,7 @@ func (tr *ticketReader) nextPipe() (ticket uint64, data []byte, inline bool, err
 	w := binary.NativeEndian.Uint64(tr.buf[tr.start : tr.start+8])
 	if w&ffi.InlineRecordFlag == 0 {
 		tr.start += 8
-		tr.lastTicket = time.Now()
+		tr.completed()
 		return w, nil, false, nil
 	}
 	if err := tr.need(16); err != nil {
@@ -630,7 +639,7 @@ func (tr *ticketReader) nextPipe() (ticket uint64, data []byte, inline bool, err
 	}
 	data = tr.buf[tr.start+16 : tr.start+16+int(n)]
 	tr.start += size
-	tr.lastTicket = time.Now()
+	tr.completed()
 	return w &^ ffi.InlineRecordFlag, data, true, nil
 }
 
@@ -670,9 +679,22 @@ func (tr *ticketReader) fill(p []byte) (int, error) {
 
 func (tr *ticketReader) spinBudget() time.Duration {
 	if tr.inFlight != nil && tr.inFlight() {
-		return ticketReaderSpinBusy
+		return min(max(2*tr.gapEWMA, ticketReaderSpin), ticketReaderSpinBusy)
 	}
 	return ticketReaderSpin
+}
+
+// completed stamps a consumed completion and folds the gap since the last
+// one into gapEWMA. Gaps past the busy ceiling are idle time, not job
+// length, and are left out.
+func (tr *ticketReader) completed() {
+	now := time.Now()
+	if !tr.lastTicket.IsZero() {
+		if gap := now.Sub(tr.lastTicket); gap < 4*ticketReaderSpinBusy {
+			tr.gapEWMA += (gap - tr.gapEWMA) / 8
+		}
+	}
+	tr.lastTicket = now
 }
 
 // readOnce is the RawConn.Read callback: true when done, false to park.
