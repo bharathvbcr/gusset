@@ -1,0 +1,64 @@
+goos: linux
+goarch: amd64
+pkg: ffibench
+cpu: Intel(R) Xeon(R) Processor @ 2.10GHz
+BenchmarkCrossoverSerial/Gusset/noop-4         	  341768	      3324 ns/op	     168 B/op	       2 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-4   	  209185	      5301 ns/op	     167 B/op	       2 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-4 	   78334	     16519 ns/op	     167 B/op	       2 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-4         	    8745	    120263 ns/op	     168 B/op	       3 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-4       	     976	   1250751 ns/op	     168 B/op	       3 allocs/op
+BenchmarkCrossoverParallel/Gusset/noop-4                 	  461689	      2346 ns/op	         1.000 Δthreads	     165 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-4           	  452802	      2490 ns/op	         0 Δthreads	     167 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-4         	  233990	      4616 ns/op	         0 Δthreads	     167 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-4       	   27138	     44482 ns/op	         0 Δthreads	     168 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-4     	    3654	    313365 ns/op	         0 Δthreads	     168 B/op	       3 allocs/op
+PASS
+ok  	ffibench	12.633s
+goos: linux
+goarch: amd64
+pkg: ffibench
+cpu: Intel(R) Xeon(R) Processor @ 2.10GHz
+BenchmarkCrossoverSerial/Gusset/noop-4         	  358117	      3555 ns/op	     168 B/op	       2 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-4   	  228370	      5461 ns/op	     167 B/op	       2 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-4 	   75430	     16891 ns/op	     168 B/op	       3 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-4         	    9208	    123152 ns/op	     168 B/op	       3 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-4       	     968	   1250971 ns/op	     168 B/op	       3 allocs/op
+BenchmarkCrossoverParallel/Gusset/noop-4                 	  466932	      2469 ns/op	         2.000 Δthreads	     164 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-4           	  454010	      2473 ns/op	         0 Δthreads	     167 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-4         	  270320	      4790 ns/op	         0 Δthreads	     167 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-4       	   27375	     44460 ns/op	         0 Δthreads	     167 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-4     	    3583	    314493 ns/op	         0 Δthreads	     168 B/op	       3 allocs/op
+PASS
+ok  	ffibench	13.231s
+goos: linux
+goarch: amd64
+pkg: ffibench
+cpu: Intel(R) Xeon(R) Processor @ 2.10GHz
+BenchmarkCrossoverSerial/Gusset/noop-4         	  397321	      3498 ns/op	     168 B/op	       2 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-4   	  224131	      5568 ns/op	     167 B/op	       2 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-4 	   70698	     17557 ns/op	     168 B/op	       2 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-4         	    9102	    121952 ns/op	     168 B/op	       3 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-4       	     954	   1224335 ns/op	     168 B/op	       3 allocs/op
+BenchmarkCrossoverParallel/Gusset/noop-4                 	  510088	      2451 ns/op	         1.000 Δthreads	     164 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-4           	  541014	      2383 ns/op	         0 Δthreads	     167 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-4         	  230442	      4999 ns/op	         0 Δthreads	     167 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-4       	   26108	     45281 ns/op	         0 Δthreads	     167 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-4     	    3722	    318330 ns/op	         0 Δthreads	     168 B/op	       3 allocs/op
+PASS
+ok  	ffibench	14.393s
+goos: linux
+goarch: amd64
+pkg: ffibench
+cpu: Intel(R) Xeon(R) Processor @ 2.10GHz
+BenchmarkCrossoverSerial/Gusset/noop-4         	  345061	      3494 ns/op	     167 B/op	       2 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-4   	  203206	      5386 ns/op	     168 B/op	       2 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-4 	   73806	     16417 ns/op	     168 B/op	       3 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-4         	    9604	    118582 ns/op	     168 B/op	       3 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-4       	     975	   1207918 ns/op	     168 B/op	       3 allocs/op
+BenchmarkCrossoverParallel/Gusset/noop-4                 	  500122	      2225 ns/op	         1.000 Δthreads	     164 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-4           	  492192	      2334 ns/op	         1.000 Δthreads	     167 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-4         	  255663	      4627 ns/op	         0 Δthreads	     167 B/op	       2 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-4       	   28428	     45145 ns/op	         0 Δthreads	     168 B/op	       3 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-4     	    3296	    318913 ns/op	         0 Δthreads	     168 B/op	       3 allocs/op
+PASS
+ok  	ffibench	12.746s

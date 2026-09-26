@@ -614,3 +614,86 @@ mod tests {
         }
     }
 }
+
+/// Sum of the squares of up to 4096 bytes, which fits in a `u32`
+/// (4096 * 255^2 < 2^32), on the widest vector unit this CPU has.
+///
+/// Function multiversioning. The crate is built for the baseline target
+/// (x86-64 means SSE2, 128-bit vectors), so LLVM vectorizes the plain loop
+/// only that far, while Go's `simd` package picks AVX2 or AVX-512 at run
+/// time. The same loop compiled under `#[target_feature]` and chosen by
+/// `is_x86_feature_detected!` (one cached load per call) ran the diagnostic
+/// kernel's 1 MiB case in 57 us instead of 148 us on an AVX-512 host: the
+/// speed of a `-C target-cpu=native` build without giving up portability.
+/// `docs/adoption.md` shows the pattern for an engine's own kernels.
+pub fn sum_squares_chunk(chunk: &[u8]) -> u32 {
+    debug_assert!(chunk.len() <= 4096);
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx512bw") {
+            // SAFETY: the CPU reports AVX-512BW (and so AVX-512F).
+            return unsafe { sum_squares_avx512(chunk) };
+        }
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU reports AVX2.
+            return unsafe { sum_squares_avx2(chunk) };
+        }
+    }
+    sum_squares_portable(chunk)
+}
+
+#[inline(always)]
+fn sum_squares_portable(chunk: &[u8]) -> u32 {
+    chunk.iter().map(|&b| (b as u32) * (b as u32)).sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn sum_squares_avx2(chunk: &[u8]) -> u32 {
+    sum_squares_portable(chunk)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw")]
+fn sum_squares_avx512(chunk: &[u8]) -> u32 {
+    sum_squares_portable(chunk)
+}
+
+#[cfg(test)]
+mod kernel_tests {
+    use super::*;
+
+    #[test]
+    fn every_variant_matches_the_portable_loop() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for len in [0usize, 1, 15, 16, 31, 32, 63, 64, 65, 127, 1000, 4095, 4096] {
+            let data: Vec<u8> = (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    state as u8
+                })
+                .collect();
+            let want = sum_squares_portable(&data);
+            assert_eq!(sum_squares_chunk(&data), want, "dispatch, len {len}");
+            #[cfg(target_arch = "x86_64")]
+            {
+                if std::is_x86_feature_detected!("avx2") {
+                    // SAFETY: guarded by the detection above.
+                    assert_eq!(unsafe { sum_squares_avx2(&data) }, want, "avx2, len {len}");
+                }
+                if std::is_x86_feature_detected!("avx512bw") {
+                    // SAFETY: guarded by the detection above.
+                    assert_eq!(
+                        unsafe { sum_squares_avx512(&data) },
+                        want,
+                        "avx512, len {len}"
+                    );
+                }
+            }
+        }
+        // The u32 bound: 4096 bytes of 255.
+        assert_eq!(sum_squares_chunk(&[255u8; 4096]), 4096 * 255 * 255);
+    }
+}

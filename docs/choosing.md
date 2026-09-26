@@ -417,6 +417,27 @@ A no-op Gusset round trip costs about 10 µs on that VM:
   a fix: the original version called `ctx.check()` inside the hot loop, and
   that branch stopped LLVM from vectorizing it (about 1.4 GB/s). See
   [adoption](adoption.md#4-use-the-handle) for the chunked pattern.
+
+The table above was measured before the completion ring and before the Rust
+kernel picked its vector width at run time. Both changed the answer. On a
+later 4-vCPU container (Xeon with AVX-512BW and VBMI), the round trip is
+about 4 µs, and the kernel compiles to AVX-512 at run time
+(`bench/results/linux-amd64-vm/simd-ring-multiversion.txt`, median of 6):
+
+| Input | Go scalar | Go SIMD | Gusset → Rust (multiversioned) |
+| --- | --- | --- | --- |
+| 256 B | 0.13 µs | 0.03 µs | 4.5 µs |
+| 4 KB | 2.8 µs | 0.29 µs | 6.6 µs |
+| 64 KiB | 43 µs | 4.4 µs | 7.9 µs |
+| 1 MiB | 756 µs | 69 µs | 46 µs |
+
+Go SIMD ran about 15 GB/s on that host, and the Rust kernel about 23 GB/s.
+Go SIMD wins up to roughly `round trip / (1/15 − 1/23 GB/s)`, about 170 KB
+here, and Rust wins above it. Before the Rust kernel dispatched at run time,
+it was built for baseline x86-64 (SSE2) and ran 1 MiB in 148 µs, losing to
+Go SIMD at every size on this host. If your kernels matter at this level,
+see [adoption](adoption.md#4-use-the-handle) for the dispatch pattern.
+
 - **The experiment is an experiment.** Its API can change between releases, and
   its docs list known bugs: reflection calls and SIMD-dependent global
   initializers don't work. Keep SIMD kernels behind the `goexperiment.simd`

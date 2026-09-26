@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased] - 2026-09-26 · Completion ring: no system calls per round trip
+
+Measured on one Linux VM. The raw data and tables are in `bench/results/linux-amd64-vm/`
+(`ring-*.txt`).
+
+- **Completions travel through shared memory.** A worker publishes each completion record into a ring of 128-byte slots (`pool::ring`, a bounded multi-producer queue with a Vyukov-style sequence word per slot). The Go reader polls the ring with atomic loads. The pipe only wakes a reader that has parked: before parking, the reader sets a `waiting` flag, and the next worker to publish writes one 8-byte wake token (ticket 0). In steady state a round trip makes no system call.
+  - Serial `Call` 7.5 → 3.7 µs (−50%). Parallel 3.2 → 2.4 µs (−23%).
+  - Against the raw-cgo sweep: serial 1 µs jobs −39%, parallel 10 µs −18%, parallel 100 µs −10%. The 1 ms rows are unchanged.
+  - Allocations are unchanged. An idle handle costs no measurable CPU.
+- **Two new C exports, `gusset_handle_ring` and `gusset_ring_release` (17 in total).** The ring is opt-in. A C host that never attaches one keeps the pipe protocol unchanged. The layout and the reader's protocol are in `gusset.h` (`GUSSET_RING_*`). `constants_match` checks the offsets and `header_match` the signatures. The ring's memory outlives `gusset_handle_close` until the reader releases it. If the ring is ever full (Go's permits rule that out), a record goes through the pipe and an overflow counter tells the reader to look there.
+- **The reader's poll window for a lone job adapts.** It is twice a moving average of recent completion gaps, clamped to 50–200 µs. A flat 200 µs made the reader spin through GC pauses on 64 KiB results (+11%, through extra scavenger and page-fault work in the runtime). Adaptive, those results are at parity and ~115 µs jobs keep the full window.
+- **Work-queue pollers read an atomic length before taking the lock, and do not yield for their first 5 µs.** Measured alone: small parallel jobs −3 to −6%.
+- **The diagnostic SIMD kernel picks its vector width at run time.** It is the same loop compiled under `#[target_feature]` for AVX2 and AVX-512BW, dispatched with `is_x86_feature_detected!`. The crate is built for baseline x86-64 (SSE2), which capped it at 148 µs per MiB. It now runs 1 MiB in 46 µs, beating both a `target-cpu=native` build (57 µs) and Go SIMD on the same host (69 µs). `docs/adoption.md` shows the pattern for engine kernels, and `docs/choosing.md` has the new SIMD crossover (about 170 KB on that host).
+- **`crates/gusset/examples/rt_latency.rs` reports percentiles** and polls a non-blocking pipe, like the Go reader.
+
 ## [Unreleased] - 2026-09-25 · Performance and the last open gaps
 
 Measured before and after on one Linux VM; the raw data and tables are in

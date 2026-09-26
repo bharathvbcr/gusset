@@ -66,6 +66,77 @@ not through `bench/record.sh`, so they carry no provenance header.
 The serial rows are bound by thread wake-ups, which this does not change.
 Allocations stay at 2/op.
 
+## Shared-memory completion ring (`ring-*.txt`)
+
+Measured in the same later container as the inline-record round. "Before"
+is `907ecb1`, built in its own worktree, and "after" is the ring with the
+adaptive reader spin. The arms alternated four times. The crossover names
+carry each run's measured job time, which is stripped so the rows pair
+(`sed -E 's/(it)-[0-9]+us/\1/'`).
+
+Timing each phase of a serial call showed where the time went. The Rust
+work was about 1.6 µs in all: 1 µs submit, 0.2 µs pickup, 0.4 µs run. Most
+of the rest was the completion's trip back. That trip was a `write` by the
+worker, a `read` by the drain reader, and about two `read`s per call that
+returned `EAGAIN` while the reader polled. It is now a slot in a ring the
+reader polls with atomic loads. The pipe only wakes a reader that has parked.
+
+Gusset's suite (n=8):
+
+| Benchmark | 907ecb1 | ring | Δ |
+| --- | ---: | ---: | ---: |
+| Call no-op | 7.46 µs | 3.73 µs | −50% |
+| Call parallel | 3.18 µs | 2.44 µs | −23% |
+| Submit & Wait | 7.45 µs | 3.73 µs | −50% |
+| 64 KiB buffer, copy | 33.7 µs | 34.1 µs | ~ (p=0.96) |
+| 64 KiB buffer, zero-copy | 12.4 µs | 11.3 µs | −9% |
+
+Same work as raw cgo, Gusset arm only (n=4):
+
+| Sweep | Work | 907ecb1 | ring | Δ |
+| --- | --- | ---: | ---: | ---: |
+| serial | no-op | 7.97 µs | 3.50 µs | −56% |
+| serial | 1 µs | 8.92 µs | 5.42 µs | −39% |
+| serial | 10 µs | 19.1 µs | 16.7 µs | −12% |
+| serial | 100 µs | 124 µs | 121 µs | ~ |
+| serial | 1 ms | 1.23 ms | 1.24 ms | ~ |
+| parallel | no-op | 3.00 µs | 2.40 µs | −20% |
+| parallel | 1 µs | 3.38 µs | 2.43 µs | −28% |
+| parallel | 10 µs | 5.74 µs | 4.71 µs | −18% |
+| parallel | 100 µs | 49.8 µs | 44.8 µs | −10% |
+| parallel | 1 ms | 323 µs | 316 µs | −2% |
+
+Allocations are unchanged. The zero-copy row prints 4 or 5 allocs/op
+because testing rounds down. Counted exactly over 50,000 calls, it is
+4.998 before and 5.000 after.
+
+A same-binary A/B (`BenchmarkCompletionTransport` in the root package,
+ring against the unexported pipe-only mode) first showed the ring 11%
+slower on serial 64 KiB results. The profile pointed at the Go runtime.
+The scavenger and `madvise` ran about four times as much, and `memmove`
+doubled on pages it had to fault back in. `GODEBUG=madvdontneed=0` closed
+most of the gap. The cause was the reader's flat 200 µs spin for a lone
+job. Once polling no longer made system calls, the reader spun through
+every GC pause and kept its P from the GC's idle mark workers. Adding
+pacing between yields made this worse, not better. The lone-job window is
+now twice a moving average of recent completion gaps, clamped to
+50–200 µs. Serial, ring against pipe:
+
+| Work | pipe | ring, flat 200 µs | ring, adaptive |
+| --- | ---: | ---: | ---: |
+| 64 KiB copy | 33.9 µs | 37.3 µs | 33.4 µs |
+| no-op | 8.6 µs | 3.8 µs | 3.9 µs |
+| ~10 µs | 19.2 µs | — | 17.0 µs |
+| ~115 µs | 124 µs | 122 µs | 122 µs |
+
+The work-queue change in the same commit was measured on its own, on top
+of the ring. Pollers check an atomic length before taking the lock, and
+the first 5 µs of polling does not yield. Serial no-op −2.4%, parallel
+no-op −2.9%, parallel 10 µs −6.4%, and neutral elsewhere.
+
+An idle handle still costs no measurable CPU: about 130 µs of CPU time
+over one second.
+
 ## Against one blocking cgo call per request (`transport-*.txt`, median of 6)
 
 The same integer loop on both transports (`rs_spin` and diagnostic mode 11), so
@@ -139,6 +210,25 @@ cancellation once per 4 KiB chunk so that LLVM vectorizes the loop.
 Go SIMD wins below roughly 100 KB on this VM. Above that, the vectorized Rust
 kernel (about 7 GB/s) pays for the round trip.
 
+## Go SIMD against the multiversioned kernel (`simd-ring-multiversion.txt`)
+
+Recorded after the completion ring, in the later container, with diagnostic
+mode 10 dispatching at run time to an AVX-512BW build of its loop
+(`pool::sys::sum_squares_chunk`). Median of 6:
+
+| Input | Go scalar | Go SIMD | Gusset → Rust |
+| --- | ---: | ---: | ---: |
+| 256 B | 0.13 µs | 0.03 µs | 4.5 µs |
+| 4 KB | 2.8 µs | 0.29 µs | 6.6 µs |
+| 64 KiB | 43 µs | 4.4 µs | 7.9 µs |
+| 1 MiB | 756 µs | 69 µs | 46 µs |
+
+Go SIMD is about 3.4× faster here than in the table above, so the host
+differs in more than clock speed. For the Rust kernel at 1 MiB, the same
+build measured 148 µs compiled for baseline x86-64 (SSE2), 57 µs with
+`-C target-cpu=native`, and 46 µs multiversioned. The native build appears to
+prefer 256-bit vectors on this CPU.
+
 ## Reproduce
 
 ```sh
@@ -146,4 +236,5 @@ make build && cargo build --release --manifest-path bench/seed/rs/Cargo.toml
 RECORD_DIR=. RECORD_PKG=./bench bench/record.sh OUT.txt 1s 8 'GussetCallNoop$' …
 bench/record.sh OUT.txt 1s 6 CrossoverSerial/RawCgo CrossoverSerial/Gusset …
 GOEXPERIMENT=simd go test ./bench -run '^$' -bench SumSquares -count=6
+go test -run '^$' -bench CompletionTransport -count=6 .   # ring vs pipe, one binary
 ```

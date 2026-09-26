@@ -244,6 +244,46 @@ Things worth knowing before you hit them:
   Moving the check made the example engine's sum of squares about 4× faster
   (see [choosing](choosing.md)). Note that `gusset.Shutdown` will report an
   engine that never checks as still in flight when its drain budget expires.
+- **Pick the vector width at run time for hot kernels.** A Rust library is
+  built for the baseline target unless you say otherwise: on x86-64 that is
+  SSE2, 128-bit vectors, while Go's `simd` package uses AVX2 or AVX-512 when
+  the CPU has them. `-C target-cpu=native` fixes that only for the machine
+  that built it. Compile the same loop several times under
+  `#[target_feature]` and dispatch once per call instead:
+
+  ```rust
+  pub fn kernel(chunk: &[u8]) -> u32 {
+      #[cfg(target_arch = "x86_64")]
+      {
+          if std::is_x86_feature_detected!("avx512bw") {
+              // SAFETY: the CPU reports AVX-512BW.
+              return unsafe { kernel_avx512(chunk) };
+          }
+          if std::is_x86_feature_detected!("avx2") {
+              // SAFETY: the CPU reports AVX2.
+              return unsafe { kernel_avx2(chunk) };
+          }
+      }
+      kernel_portable(chunk)
+  }
+
+  #[inline(always)]
+  fn kernel_portable(chunk: &[u8]) -> u32 {
+      chunk.iter().map(|&b| (b as u32) * (b as u32)).sum()
+  }
+
+  #[cfg(target_arch = "x86_64")]
+  #[target_feature(enable = "avx2")]
+  fn kernel_avx2(chunk: &[u8]) -> u32 { kernel_portable(chunk) }
+
+  #[cfg(target_arch = "x86_64")]
+  #[target_feature(enable = "avx512f,avx512bw")]
+  fn kernel_avx512(chunk: &[u8]) -> u32 { kernel_portable(chunk) }
+  ```
+
+  The detection is one cached load. On an AVX-512 host this took Gusset's
+  diagnostic kernel from 148 µs to 46 µs per MiB, faster than a
+  `target-cpu=native` build (57 µs); see `pool::sys::sum_squares_chunk`.
 - **`Handle.Close` has no budget.** It cancels, then *joins* its worker threads,
   so its latency is whatever your engine still has left to do — detaching them
   would leave OS threads running against Rust memory `Close` is about to free.

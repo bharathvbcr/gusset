@@ -62,7 +62,7 @@ Each rule names the test or lint that enforces it. A PR that cannot point at the
 
 | # | Rule | Enforced by |
 | --- | --- | --- |
-| R1 | Every exported Rust function is `pub unsafe extern "C"` and is one of the 15 names in `ffi/exports.txt` | `tests/exports_match.rs` diffs `nm` output against the list |
+| R1 | Every exported Rust function is `pub unsafe extern "C"` and is one of the 17 names in `ffi/exports.txt` | `tests/exports_match.rs` diffs `nm` output against the list |
 | R2 | No panic crosses the boundary; the Cargo profile is `panic = "unwind"` for every profile including `test` and `bench` | `build.rs` reads `CARGO_CFG_PANIC` and fails the build on `abort`; panic zoo tests |
 | R3 | Strings and buffers cross as `(ptr, len)`; no `CString`, no NUL termination, no `unwrap` in any error path | `clippy.toml` disallowed-methods: `CString::new`, `Option::unwrap`, `Result::unwrap`, `expect` in `ffi/` |
 | R4 | Memory is freed by the side that allocated it, through an exported `*_free`; Go never calls `C.free` on Rust memory | `gussetvet` rejects the call outside `tests/cgoprobe` on every commit (comment-stripping, with an explicit allowlist — a blanket `grep` matched prose about the rule and fired on its own enforcer's source); `TestR4_CrossFreeIsDetectedUnderASan` in the nightly ASan job proves the mismatch is detected at runtime |

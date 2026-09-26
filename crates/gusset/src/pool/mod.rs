@@ -543,8 +543,9 @@ pub fn diagnostic_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, St
             for chunk in input[1..].chunks(4096) {
                 ctx.check().map_err(|e| format!("cancelled: {:?}", e))?;
                 // 4096 * 255^2 < 2^32: a chunk sums exactly in u32, which
-                // packs twice as many lanes per vector as u64.
-                let chunk_sum: u32 = chunk.iter().map(|&b| (b as u32) * (b as u32)).sum();
+                // packs twice as many lanes per vector as u64. The widest
+                // vector unit is chosen at run time (sys::sum_squares_chunk).
+                let chunk_sum = sys::sum_squares_chunk(chunk);
                 acc = acc.wrapping_add(chunk_sum as u64);
             }
             Ok(acc.to_le_bytes().to_vec())
