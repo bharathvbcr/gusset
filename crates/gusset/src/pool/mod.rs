@@ -1,6 +1,7 @@
 //! Worker pool and Handle lifecycle with bounded concurrency and signal protection (I4, I5).
 
 pub mod queue;
+pub mod ring;
 pub mod sys;
 
 use crate::ffi::guard::{
@@ -762,6 +763,10 @@ pub struct Handle {
     /// could only be sized for bare tickets, inline completions are off and
     /// every caller gets tickets, whatever it asked for.
     inline_ok: bool,
+    /// The shared-memory completion ring, once a reader attaches one
+    /// (`gusset_handle_ring`). Until then, and for any host that never does,
+    /// completions go through the pipe.
+    ring: std::sync::OnceLock<Arc<ring::Ring>>,
 }
 
 /// Default worker count when the caller passes 0.
@@ -1010,6 +1015,7 @@ impl Handle {
             self_weak: Mutex::new(Weak::new()),
             exited: Arc::new(AtomicUsize::new(0)),
             inline_ok,
+            ring: std::sync::OnceLock::new(),
         });
 
         // Store weak self reference for worker threads. If this were skipped the
@@ -1187,24 +1193,7 @@ impl Handle {
                         // Store result and wake netpoller if handle still alive
                         if let Some(h) = weak_clone.upgrade() {
                             let result = materialize_result(&h, result);
-                            let mut record = [0u8; INLINE_RECORD_MAX];
-                            match result {
-                                // Small success: the bytes ride in the record;
-                                // nothing is stored for a gusset_take.
-                                JobResult::Ok(ref data)
-                                    if wants_inline
-                                        && h.inline_ok
-                                        && data.len() <= INLINE_RESULT_MAX =>
-                                {
-                                    let n = inline_record(&mut record, ticket, data);
-                                    drop(result);
-                                    h.publish_completion(ticket, &record[..n]);
-                                }
-                                other => {
-                                    lock_recover(&h.results).insert(ticket, other);
-                                    h.publish_completion(ticket, &ticket.to_ne_bytes());
-                                }
-                            }
+                            h.complete(ticket, result, wants_inline);
                             // Only now is the unit out of flight: shutdown's drain
                             // counts cancel flags, and removing this one before the
                             // write let `gusset_shutdown` report a clean drain while
@@ -1601,6 +1590,66 @@ impl Handle {
         }
     }
 
+    /// Attaches the shared-memory completion ring (see [`ring`]). From here
+    /// on completions are published there, and the pipe carries only wake
+    /// tokens and overflow. Refused if a ring is already attached: there is
+    /// exactly one reader.
+    pub fn attach_ring(&self) -> Result<Arc<ring::Ring>, String> {
+        let r = Arc::new(ring::Ring::new(self.pool_size));
+        self.ring
+            .set(Arc::clone(&r))
+            .map_err(|_| "a completion ring is already attached".to_string())?;
+        Ok(r)
+    }
+
+    /// Hands a finished job's outcome to the reader: in the ring if one is
+    /// attached and has room, else through the pipe. A success small enough,
+    /// for a caller that asked for inline records, travels in the record and
+    /// is never stored; anything else is stored for `take` and announced by
+    /// a bare ticket.
+    fn complete(&self, ticket: u64, result: JobResult, wants_inline: bool) {
+        let ring = self.ring.get();
+        let mut record = [0u8; INLINE_RECORD_MAX];
+        let (len, stored) = match result {
+            // A ring slot holds a full record whatever the pipe could, so the
+            // ring does not depend on inline_ok; only its overflow does.
+            JobResult::Ok(ref data)
+                if wants_inline
+                    && (self.inline_ok || ring.is_some())
+                    && data.len() <= INLINE_RESULT_MAX =>
+            {
+                (inline_record(&mut record, ticket, data), Some(result))
+            }
+            other => {
+                lock_recover(&self.results).insert(ticket, other);
+                record[..8].copy_from_slice(&ticket.to_ne_bytes());
+                (8, None)
+            }
+        };
+        let Some(r) = ring else {
+            self.publish_completion(ticket, &record[..len]);
+            return;
+        };
+        if r.try_publish(&record[..len]) {
+            if r.take_waiter() {
+                // Ticket 0 is never issued: the reader drops it as a wake.
+                self.publish_completion(ticket, &0u64.to_ne_bytes());
+            }
+            return;
+        }
+        // Full, which the Go side's permits rule out: fall back to the pipe.
+        // An inline record the pipe was not sized for becomes a stored result.
+        if len > 8 && !self.inline_ok {
+            if let Some(res) = stored {
+                lock_recover(&self.results).insert(ticket, res);
+            }
+            self.publish_completion(ticket, &ticket.to_ne_bytes());
+        } else {
+            self.publish_completion(ticket, &record[..len]);
+        }
+        r.note_overflow();
+    }
+
     /// Writes a completion ticket (see [`write_completion`] for the retry rule).
     fn publish_completion(&self, ticket: u64, record: &[u8]) {
         if let Err(e) = write_completion(
@@ -1938,10 +1987,20 @@ mod tests {
     fn read_exact_fd(r: i32, n: usize) -> Vec<u8> {
         let mut buf = vec![0u8; n];
         let mut got = 0usize;
+        let start = std::time::Instant::now();
         while got < n {
             // SAFETY: reading into the unfilled tail of a valid buffer.
             let m =
                 unsafe { libc::read(r, buf.as_mut_ptr().add(got) as *mut libc::c_void, n - got) };
+            if m < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+                // A non-blocking read end: the write is on its way.
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(10),
+                    "timed out"
+                );
+                std::thread::yield_now();
+                continue;
+            }
             assert!(m > 0, "completion pipe read failed");
             got += m as usize;
         }
@@ -2019,6 +2078,114 @@ mod tests {
         assert!(matches!(handle.take(t), Ok(JobResult::Panic { .. })));
 
         handle.close();
+        // SAFETY: the read end is still owned by this test.
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// With a ring attached, completions land in its slots and the pipe stays
+    /// silent; a full ring spills into the pipe and counts the overflow; a
+    /// reader that announced it is parking gets exactly one wake token.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ring_carries_completions_spills_when_full_and_wakes_a_parked_reader() {
+        use crate::header::GUSSET_FLAG_INLINE_COMPLETION;
+        use std::sync::atomic::Ordering::SeqCst;
+        let (r, w) = make_pipe();
+        // SAFETY: fcntl on a descriptor this test owns.
+        unsafe { libc::fcntl(r, libc::F_SETFL, libc::O_NONBLOCK) };
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+        let ring = match handle.attach_ring() {
+            Ok(r) => r,
+            Err(e) => panic!("attach failed: {}", e),
+        };
+        assert!(handle.attach_ring().is_err(), "one reader, one ring");
+        assert_eq!(ring.shared().capacity, 2, "pool 1 rounds up to 2 slots");
+        let header = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE | GUSSET_FLAG_INLINE_COMPLETION,
+            ..Default::default()
+        };
+        let pipe_empty = || {
+            let mut b = [0u8; 8];
+            // SAFETY: non-blocking read into a valid stack buffer.
+            let n = unsafe { libc::read(r, b.as_mut_ptr() as *mut libc::c_void, 8) };
+            n < 0
+        };
+        let settle = |pred: &dyn Fn() -> bool| {
+            let start = std::time::Instant::now();
+            while !pred() {
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(10),
+                    "timed out"
+                );
+                std::thread::yield_now();
+            }
+        };
+
+        // Three completions, none consumed: two fill the ring, the third
+        // spills into the pipe.
+        // One at a time: the worker's queue holds only two units. A unit's
+        // cancel flag is removed once its completion is published.
+        let t: Vec<u64> = (0..3u8)
+            .map(|i| {
+                let t = match handle.submit(header, &[0, i], 0) {
+                    Ok(t) => t,
+                    Err(e) => panic!("submit failed: {}", e),
+                };
+                settle(&|| lock_recover(&handle.cancel_flags).is_empty());
+                t
+            })
+            .collect();
+        assert_eq!(ring.shared().overflow.load(SeqCst), 1);
+        let spilled = read_exact_fd(r, 24);
+        assert_eq!(word(&spilled) & !INLINE_RECORD_FLAG, t[2]);
+        let mut head = 0u64;
+        for (i, &ticket) in t[..2].iter().enumerate() {
+            let words = match ring.pop_for_test(&mut head) {
+                Some(w) => w,
+                None => panic!("ring slot {i} empty"),
+            };
+            assert_eq!(words[0], ticket | INLINE_RECORD_FLAG);
+            assert_eq!(words[1], 2, "two-byte echo");
+            assert_eq!(words[2].to_ne_bytes()[..2], [0, i as u8]);
+        }
+        assert!(pipe_empty(), "ring completions must not touch the pipe");
+
+        // A reader that is about to park gets one token for the next publish.
+        ring.shared().waiting.store(1, SeqCst);
+        let t4 = match handle.submit(header, &[0], 0) {
+            Ok(t) => t,
+            Err(e) => panic!("submit failed: {}", e),
+        };
+        assert_eq!(word(&read_exact_fd(r, 8)), 0, "wake token is ticket 0");
+        assert_eq!(ring.shared().waiting.load(SeqCst), 0);
+        let words = match ring.pop_for_test(&mut head) {
+            Some(w) => w,
+            None => panic!("woken reader found the ring empty"),
+        };
+        assert_eq!(words[0], t4 | INLINE_RECORD_FLAG);
+        assert!(pipe_empty(), "one park, one token");
+
+        // Bare tickets (a panic) use the ring too; the result is stored.
+        let t5 = match handle.submit(header, &[1], 0) {
+            Ok(t) => t,
+            Err(e) => panic!("submit failed: {}", e),
+        };
+        settle(&|| lock_recover(&handle.cancel_flags).is_empty());
+        let words = match ring.pop_for_test(&mut head) {
+            Some(w) => w,
+            None => panic!("ring empty"),
+        };
+        assert_eq!(words[0], t5, "a panic is a bare ticket");
+        assert!(matches!(handle.take(t5), Ok(JobResult::Panic { .. })));
+
+        handle.close();
+        // The ring outlives the handle for as long as the reader holds it.
+        assert_eq!(ring.shared().capacity, 2);
         // SAFETY: the read end is still owned by this test.
         unsafe {
             libc::close(r);

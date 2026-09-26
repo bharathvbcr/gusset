@@ -73,7 +73,7 @@ fn constants_agree_across_rust_c_and_go() {
     use gusset::ffi::status::{FFI_BAD_ARG, FFI_ERR, FFI_OK, FFI_PANIC, FFI_POISONED};
     use gusset::header::{GUSSET_FLAG_DIAGNOSTIC_ENGINE, GUSSET_FLAG_INLINE_COMPLETION};
     use gusset::pool::{
-        INLINE_RECORD_FLAG, INLINE_RECORD_MAX, INLINE_RESULT_MAX, MAX_BUFFER_BYTES,
+        ring, INLINE_RECORD_FLAG, INLINE_RECORD_MAX, INLINE_RESULT_MAX, MAX_BUFFER_BYTES,
         MAX_INLINE_INPUT, MAX_POOL_SIZE, TAKE_OWNED_FLAG,
     };
 
@@ -99,6 +99,18 @@ fn constants_agree_across_rust_c_and_go() {
         ("GUSSET_INLINE_RECORD_FLAG", INLINE_RECORD_FLAG),
         ("GUSSET_INLINE_RESULT_MAX", INLINE_RESULT_MAX as u64),
         ("GUSSET_INLINE_RECORD_MAX", INLINE_RECORD_MAX as u64),
+        ("GUSSET_RING_OFF_CAPACITY", ring::RING_OFF_CAPACITY as u64),
+        (
+            "GUSSET_RING_OFF_SLOT_BYTES",
+            ring::RING_OFF_SLOT_BYTES as u64,
+        ),
+        ("GUSSET_RING_OFF_WAITING", ring::RING_OFF_WAITING as u64),
+        ("GUSSET_RING_OFF_OVERFLOW", ring::RING_OFF_OVERFLOW as u64),
+        ("GUSSET_RING_SLOT_BYTES", ring::RING_SLOT_BYTES as u64),
+        (
+            "GUSSET_RING_SLOT_OFF_RECORD",
+            ring::RING_SLOT_OFF_RECORD as u64,
+        ),
     ];
     for &(name, want) in rust_c {
         assert_eq!(

@@ -79,6 +79,9 @@ fn rust_type_to_c(t: &str) -> String {
         // each side; this correspondence is exactly the kind of hand-maintained
         // mapping that needs pinning down.
         "Handle" => "GussetHandle",
+        // The completion ring is opaque the same way; C reads it through the
+        // pointers and GUSSET_RING_* offsets, never through this type.
+        "Ring" => "GussetRing",
         other => other,
     };
 

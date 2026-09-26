@@ -57,6 +57,10 @@ package ffi
 #cgo nocallback gusset_buf_alloc
 #cgo noescape gusset_buf_free
 #cgo nocallback gusset_buf_free
+#cgo noescape gusset_handle_ring
+#cgo nocallback gusset_handle_ring
+#cgo noescape gusset_ring_release
+#cgo nocallback gusset_ring_release
 #include "gusset.h"
 */
 import "C"
@@ -397,6 +401,50 @@ func HandleClose(h unsafe.Pointer) error {
 		return statusToError(&st)
 	}
 	return nil
+}
+
+// Ring is an attached completion ring (gusset_handle_ring). Every pointer is
+// Rust memory that stays valid until RingRelease(Owner), whatever happens to
+// the handle.
+type Ring struct {
+	Owner    unsafe.Pointer
+	Shared   unsafe.Pointer
+	Slots    unsafe.Pointer
+	Capacity uint64
+}
+
+// Completion ring layout (gusset.h).
+const (
+	RingOffCapacity   = uintptr(C.GUSSET_RING_OFF_CAPACITY)
+	RingOffSlotBytes  = uintptr(C.GUSSET_RING_OFF_SLOT_BYTES)
+	RingOffWaiting    = uintptr(C.GUSSET_RING_OFF_WAITING)
+	RingOffOverflow   = uintptr(C.GUSSET_RING_OFF_OVERFLOW)
+	RingSlotBytes     = uintptr(C.GUSSET_RING_SLOT_BYTES)
+	RingSlotOffRecord = uintptr(C.GUSSET_RING_SLOT_OFF_RECORD)
+)
+
+// HandleRing attaches a completion ring to the handle.
+func HandleRing(h unsafe.Pointer) (Ring, error) {
+	var st C.FfiStatus
+	var owner *C.GussetRing
+	var shared, slots *C.uint8_t
+	var capacity C.uint64_t
+	code := C.gusset_handle_ring((*C.GussetHandle)(h), &owner, &shared, &slots, &capacity, &st)
+	if code != C.FFI_OK {
+		return Ring{}, statusToError(&st)
+	}
+	return Ring{
+		Owner:    unsafe.Pointer(owner),
+		Shared:   unsafe.Pointer(shared),
+		Slots:    unsafe.Pointer(slots),
+		Capacity: uint64(capacity),
+	}, nil
+}
+
+// RingRelease drops the reference HandleRing returned. Nothing may read the
+// ring afterwards.
+func RingRelease(owner unsafe.Pointer) {
+	C.gusset_ring_release((*C.GussetRing)(owner))
 }
 
 // Submit submits a task.

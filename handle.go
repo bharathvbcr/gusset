@@ -36,8 +36,11 @@ type handleConfig struct {
 	poolSize        uint32
 	poolSizeInvalid bool
 	callFlags       uint32
-	defaultOpcode   uint32
-	bufferBudget    int64
+	// pipeOnly skips the shared-memory completion ring, so every completion
+	// crosses the pipe. Unexported: it exists for tests and A/B benchmarks.
+	pipeOnly      bool
+	defaultOpcode uint32
+	bufferBudget  int64
 }
 
 // MaxPoolSize mirrors gusset::pool::MAX_POOL_SIZE.
@@ -61,6 +64,11 @@ func WithPoolSize(n int) Option {
 		c.poolSizeInvalid = false
 		c.poolSize = uint32(n)
 	}
+}
+
+// withPipeOnly keeps every completion on the pipe (no completion ring).
+func withPipeOnly() Option {
+	return func(c *handleConfig) { c.pipeOnly = true }
 }
 
 // WithDiagnosticEngine routes this handle's calls to Gusset's built-in diagnostic
@@ -111,10 +119,13 @@ type handleState struct {
 	callFlags     uint32
 	defaultOpcode uint32
 	sem           chan struct{}
-	poisoned      atomic.Bool
-	closed        atomic.Bool
-	pipe          *os.File
-	drainDone     chan struct{}
+	// ring is the attached completion ring, if any (Owner nil when not).
+	// drainPipe releases it once it has stopped reading.
+	ring      ffi.Ring
+	poisoned  atomic.Bool
+	closed    atomic.Bool
+	pipe      *os.File
+	drainDone chan struct{}
 	// bufBudget caps live NewBuffer bytes (0 = unlimited); bufBytes is the
 	// current charge. See WithBufferBudget.
 	bufBudget int64
@@ -201,12 +212,26 @@ func Open(opts ...Option) (*Handle, error) {
 		return nil, err
 	}
 
+	// Completions go through shared memory; the pipe only wakes a parked
+	// reader. The ring reader needs non-blocking reads through the RawConn,
+	// so without one it stays on the pipe.
+	var ring ffi.Ring
+	if _, rcErr := r.SyscallConn(); rcErr == nil && !cfg.pipeOnly {
+		ring, err = ffi.HandleRing(hPtr)
+		if err != nil {
+			_ = ffi.HandleClose(hPtr) // owns and closes writeFD
+			_ = r.Close()
+			return nil, err
+		}
+	}
+
 	state := &handleState{
 		ptr:           hPtr,
 		callFlags:     cfg.callFlags | ffi.FlagInlineCompletion,
 		defaultOpcode: cfg.defaultOpcode,
 		bufBudget:     cfg.bufferBudget,
 		sem:           make(chan struct{}, cfg.poolSize),
+		ring:          ring,
 		pipe:          r,
 		drainDone:     make(chan struct{}),
 		closeDone:     make(chan struct{}),
@@ -243,6 +268,12 @@ func Open(opts ...Option) (*Handle, error) {
 func drainPipe(s *handleState) {
 	defer close(s.drainDone)
 	tr := newTicketReader(s.pipe)
+	if s.ring.Owner != nil {
+		tr.attachRing(s.ring)
+		// Runs before drainDone closes: close waits on drainDone, so by the
+		// time it returns nothing reads the ring any more.
+		defer ffi.RingRelease(s.ring.Owner)
+	}
 	// Only a lone in-flight job earns the longer poll: under parallel load a
 	// completion is always pending, and polling between them took a core the
 	// workers needed (1 ms parallel jobs +18% on 4 vCPUs).
@@ -377,6 +408,36 @@ type ticketReader struct {
 	n      int
 	rerr   error
 	readFn func(uintptr) bool
+	// readMode selects readOnce's behaviour on EAGAIN (see readSpin etc.).
+	readMode int
+
+	// Completion ring (gusset_handle_ring); ring.Owner is nil without one.
+	ring ffi.Ring
+	// head is the next ring position to consume; only this reader moves it.
+	head uint64
+	mask uint64
+	// ringData holds the last inline result taken from the ring: the slot
+	// is handed back to the producers before next returns.
+	ringData [ffi.InlineResultMax]byte
+	// overflowSeen counts records read from the pipe while a ring is attached,
+	// to compare with the ring's overflow counter.
+	overflowSeen uint64
+	// tokensOwed counts wake tokens a worker has written, or is about to
+	// write, and this reader has not read yet.
+	tokensOwed int
+}
+
+// readOnce behaviours on EAGAIN.
+const (
+	readSpin = iota // poll the pipe for the spin budget, then park (no ring)
+	readPark        // park at once: the ring was already polled
+	readNow         // return with nothing: never block
+)
+
+// attachRing switches the reader to the shared-memory ring.
+func (tr *ticketReader) attachRing(r ffi.Ring) {
+	tr.ring = r
+	tr.mask = r.Capacity - 1
 }
 
 func newTicketReader(f *os.File) *ticketReader {
@@ -389,10 +450,163 @@ func newTicketReader(f *os.File) *ticketReader {
 }
 
 // next returns the next completion: its ticket and, for an inline record
-// (GUSSET_FLAG_INLINE_COMPLETION), the result bytes, which alias the read
-// buffer and are valid only until the following call. inline is false for a
+// (GUSSET_FLAG_INLINE_COMPLETION), the result bytes, which alias the reader's
+// buffers and are valid only until the following call. inline is false for a
 // bare ticket, whose outcome is collected with gusset_take.
 func (tr *ticketReader) next() (ticket uint64, data []byte, inline bool, err error) {
+	if tr.ring.Owner == nil {
+		return tr.nextPipe()
+	}
+	for {
+		if tr.ringReady() {
+			return tr.popRing()
+		}
+		// Whole records already read from the pipe: overflow, or wake tokens.
+		if t, d, in, size, err := tr.parseBuffered(); err != nil {
+			return 0, nil, false, err
+		} else if size > 0 {
+			tr.start += size
+			if t == 0 && !in {
+				if tr.tokensOwed > 0 {
+					tr.tokensOwed--
+				}
+				continue
+			}
+			tr.overflowSeen++
+			tr.lastTicket = time.Now()
+			return t, d, in, nil
+		}
+		// Bytes are in the pipe, or about to be: take what is there without
+		// blocking. Tokens must not pile up unread, or the pipe would fill.
+		if tr.overflowPending() || tr.tokensOwed > 0 {
+			before := tr.end
+			if err := tr.fillMode(readNow); err != nil {
+				return 0, nil, false, err
+			}
+			if tr.end != before {
+				continue
+			}
+		}
+		if err := tr.waitRing(); err != nil {
+			return 0, nil, false, err
+		}
+	}
+}
+
+// ringSlot is the slot at the reader's position.
+func (tr *ticketReader) ringSlot() unsafe.Pointer {
+	return unsafe.Add(tr.ring.Slots, uintptr(tr.head&tr.mask)*ffi.RingSlotBytes)
+}
+
+// ringReady reports whether the slot at the reader's position is published.
+func (tr *ticketReader) ringReady() bool {
+	return atomic.LoadUint64((*uint64)(tr.ringSlot())) == tr.head+1
+}
+
+// popRing takes the published slot at the reader's position and hands it
+// back to the producers.
+func (tr *ticketReader) popRing() (uint64, []byte, bool, error) {
+	slot := tr.ringSlot()
+	rec := unsafe.Add(slot, ffi.RingSlotOffRecord)
+	w := atomic.LoadUint64((*uint64)(rec))
+	var data []byte
+	inline := w&ffi.InlineRecordFlag != 0
+	if inline {
+		n := atomic.LoadUint64((*uint64)(unsafe.Add(rec, 8)))
+		if n > uint64(ffi.InlineResultMax) {
+			return 0, nil, false, fmt.Errorf("gusset: corrupt ring record (length %d)", n)
+		}
+		// Ordered after the acquire load of the sequence in ringReady.
+		copy(tr.ringData[:n], unsafe.Slice((*byte)(unsafe.Add(rec, 16)), n))
+		data = tr.ringData[:n]
+		w &^= ffi.InlineRecordFlag
+	}
+	atomic.StoreUint64((*uint64)(slot), tr.head+tr.ring.Capacity)
+	tr.head++
+	tr.lastTicket = time.Now()
+	return w, data, inline, nil
+}
+
+// overflowPending reports records the workers sent through the pipe that
+// this reader has not read yet.
+func (tr *ticketReader) overflowPending() bool {
+	ov := atomic.LoadUint64((*uint64)(unsafe.Add(tr.ring.Shared, ffi.RingOffOverflow)))
+	return int64(ov-tr.overflowSeen) > 0
+}
+
+// waitRing polls the ring until something arrives or the spin budget runs
+// out, then parks on the pipe behind the waiting flag (gusset.h).
+func (tr *ticketReader) waitRing() error {
+	if !tr.lastTicket.IsZero() {
+		budget := tr.spinBudget()
+		for i := 0; ; i++ {
+			if tr.ringReady() || tr.overflowPending() {
+				return nil
+			}
+			if i&7 == 7 && time.Since(tr.lastTicket) >= budget {
+				break
+			}
+			// The caller that submitted is usually runnable on this P;
+			// yielding lets it run, and costs no system call.
+			runtime.Gosched()
+		}
+	}
+	waiting := (*uint32)(unsafe.Add(tr.ring.Shared, ffi.RingOffWaiting))
+	atomic.StoreUint32(waiting, 1)
+	var err error
+	if !tr.ringReady() && !tr.overflowPending() {
+		err = tr.fillMode(readPark)
+	}
+	// A 0 here means a worker took the flag and owes a token (possibly
+	// already read into the buffer, which then pays it off).
+	if atomic.SwapUint32(waiting, 0) == 0 {
+		tr.tokensOwed++
+	}
+	return err
+}
+
+// parseBuffered parses one whole record from bytes already read, without
+// reading more. size is 0 when no whole record is buffered.
+func (tr *ticketReader) parseBuffered() (ticket uint64, data []byte, inline bool, size int, err error) {
+	b := tr.buf[tr.start:tr.end]
+	if len(b) < 8 {
+		return 0, nil, false, 0, nil
+	}
+	w := binary.NativeEndian.Uint64(b)
+	if w&ffi.InlineRecordFlag == 0 {
+		return w, nil, false, 8, nil
+	}
+	if len(b) < 16 {
+		return 0, nil, false, 0, nil
+	}
+	n := binary.NativeEndian.Uint64(b[8:16])
+	if n > uint64(ffi.InlineResultMax) {
+		return 0, nil, false, 0, fmt.Errorf("gusset: corrupt completion record (length %d)", n)
+	}
+	size = 16 + (int(n)+7)&^7
+	if len(b) < size {
+		return 0, nil, false, 0, nil
+	}
+	return w &^ ffi.InlineRecordFlag, b[16 : 16+int(n)], true, size, nil
+}
+
+// fillMode reads more pipe bytes after the buffered ones, with the given
+// EAGAIN behaviour.
+func (tr *ticketReader) fillMode(mode int) error {
+	if tr.start > 0 {
+		copy(tr.buf[:], tr.buf[tr.start:tr.end])
+		tr.end -= tr.start
+		tr.start = 0
+	}
+	tr.readMode = mode
+	n, err := tr.fill(tr.buf[tr.end:])
+	tr.readMode = readSpin
+	tr.end += n
+	return err
+}
+
+// nextPipe is next without a ring: every completion comes through the pipe.
+func (tr *ticketReader) nextPipe() (ticket uint64, data []byte, inline bool, err error) {
 	if err := tr.need(8); err != nil {
 		return 0, nil, false, err
 	}
@@ -475,6 +689,12 @@ func (tr *ticketReader) readOnce(fd uintptr) bool {
 		case e == syscall.EINTR:
 			continue
 		case e == syscall.EAGAIN:
+			switch tr.readMode {
+			case readNow:
+				return true // tr.n stays 0
+			case readPark:
+				return false
+			}
 			if !tr.lastTicket.IsZero() && time.Since(tr.lastTicket) < tr.spinBudget() {
 				runtime.Gosched()
 				continue

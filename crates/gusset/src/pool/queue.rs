@@ -14,12 +14,22 @@
 //! then sleeps exactly as before, so it costs no CPU at rest.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// How long an idle worker polls before parking.
 pub const WORKER_SPIN: Duration = Duration::from_micros(50);
+
+/// The first part of [`WORKER_SPIN`], polled without yielding.
+///
+/// A request/response caller resubmits a few microseconds after its result
+/// lands. `sched_yield` in that window let a spinning Go thread take the
+/// worker's core, and the resubmitted unit then waited for the worker to be
+/// scheduled back: the 9-20 us tail at p90 of a serial call on 4 vCPUs.
+/// After this, polls yield as before, so a longer idle spin still gives up
+/// its core to threads that have work.
+pub const WORKER_SPIN_HOT: Duration = Duration::from_micros(5);
 
 struct State<T> {
     items: VecDeque<T>,
@@ -34,6 +44,18 @@ pub struct JobQueue<T> {
     cap: usize,
     /// Workers currently in their polling phase.
     spinning: AtomicUsize,
+    /// `items.len()`, readable without the lock.
+    ///
+    /// Pollers read this and take the lock only when it is nonzero
+    /// (test-and-test-and-set). Polling with `try_lock` was a CAS each time,
+    /// which pulls the mutex's cache line exclusive on every poll: the
+    /// submitter's `lock` then fought a spinning worker for that line, and a
+    /// Rust-only submit cost ~750 ns for ~600 instructions. A load keeps the
+    /// line shared until a push actually writes it.
+    queued: AtomicUsize,
+    /// `closed`, readable without the lock, so an empty closed queue ends
+    /// the poll at once instead of spinning out the window.
+    closed: AtomicBool,
 }
 
 /// Why a push was refused.
@@ -61,6 +83,8 @@ impl<T> JobQueue<T> {
             ready: Condvar::new(),
             cap: cap.max(1),
             spinning: AtomicUsize::new(0),
+            queued: AtomicUsize::new(0),
+            closed: AtomicBool::new(false),
         });
         (QueueSender(Arc::clone(&q)), q)
     }
@@ -75,6 +99,7 @@ impl<T> JobQueue<T> {
                 return Err(PushError::Full(item));
             }
             st.items.push_back(item);
+            self.queued.store(st.items.len(), Ordering::Release);
             // Wake a sleeper only for units the polling workers cannot take
             // right away: waking one for a unit a poller is about to grab
             // costs a syscall and a wake that finds nothing, while skipping
@@ -92,6 +117,7 @@ impl<T> JobQueue<T> {
 
     fn close(&self) {
         lock(&self.state).closed = true;
+        self.closed.store(true, Ordering::Release);
         self.ready.notify_all();
     }
 
@@ -101,33 +127,42 @@ impl<T> JobQueue<T> {
     /// channel drains its buffer before reporting the disconnect.
     pub fn pop(&self) -> Option<T> {
         self.spinning.fetch_add(1, Ordering::SeqCst);
-        let deadline = Instant::now() + WORKER_SPIN;
+        let start = Instant::now();
+        let mut hot = true;
         let mut polls = 0u32;
         loop {
-            // try_lock: another worker taking a unit right now is fine; poll
-            // again rather than queue behind it.
-            if let Ok(mut st) = self.state.try_lock() {
-                if let Some(item) = st.items.pop_front() {
-                    drop(st);
-                    self.spinning.fetch_sub(1, Ordering::SeqCst);
-                    return Some(item);
+            // Test, then test-and-set: the lock is touched only when a load
+            // says there is something to take (see `queued`). try_lock, since
+            // another worker taking a unit right now is fine: poll again
+            // rather than queue behind it.
+            if self.queued.load(Ordering::Acquire) > 0 {
+                if let Ok(mut st) = self.state.try_lock() {
+                    if let Some(item) = st.items.pop_front() {
+                        self.queued.store(st.items.len(), Ordering::Release);
+                        drop(st);
+                        self.spinning.fetch_sub(1, Ordering::SeqCst);
+                        return Some(item);
+                    }
                 }
-                if st.closed {
-                    drop(st);
-                    self.spinning.fetch_sub(1, Ordering::SeqCst);
-                    return None;
-                }
-            }
-            polls = polls.wrapping_add(1);
-            if polls.is_multiple_of(32) && Instant::now() >= deadline {
+            } else if self.closed.load(Ordering::Acquire) {
+                // Closed and (as far as the load shows) empty: confirm under
+                // the lock below, which also hands out a unit raced in.
                 break;
             }
-            // Yield rather than burn: under load, the core this poll would
-            // occupy belongs to a worker with a unit to run. Pure spinning
-            // cost ~6% on 1 ms parallel jobs on 4 vCPUs; sched_yield returns
-            // at once when nothing else is runnable, so an idle poll stays
-            // as fast as a spin.
-            if polls.is_multiple_of(4) {
+            polls = polls.wrapping_add(1);
+            if polls.is_multiple_of(32) {
+                let spent = start.elapsed();
+                if spent >= WORKER_SPIN {
+                    break;
+                }
+                hot = spent < WORKER_SPIN_HOT;
+            }
+            // Past the hot window, yield rather than burn: under load, the
+            // core this poll would occupy belongs to a worker with a unit to
+            // run. Pure spinning cost ~6% on 1 ms parallel jobs on 4 vCPUs;
+            // sched_yield returns at once when nothing else is runnable, so
+            // an idle poll stays as fast as a spin.
+            if !hot && polls.is_multiple_of(4) {
                 std::thread::yield_now();
             } else {
                 std::hint::spin_loop();
@@ -138,6 +173,7 @@ impl<T> JobQueue<T> {
         let mut st = lock(&self.state);
         loop {
             if let Some(item) = st.items.pop_front() {
+                self.queued.store(st.items.len(), Ordering::Release);
                 return Some(item);
             }
             if st.closed {

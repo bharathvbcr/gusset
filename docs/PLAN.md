@@ -41,7 +41,7 @@ The Go package never parks an OS thread on Rust work: a call submits to the Rust
 
 | Component | Language | Responsibilities | Public surface (v0.1) |
 | --- | --- | --- | --- |
-| Runtime crate | Rust | `ffi_guard`, `FfiStatus` (ptr+len, never NUL-terminated), `gusset_status_free`, panic hook with location, ABI layout export, named field offsets, worker pool with explicit 8 MiB stack size, allocator stats, timeout and cancel checks | 15 exported functions, 4 `#[repr(C)]` types (`CallHeader`, `FfiStatus`, `AbiLayout`, `AllocStats`) |
+| Runtime crate | Rust | `ffi_guard`, `FfiStatus` (ptr+len, never NUL-terminated), `gusset_status_free`, panic hook with location, ABI layout export, named field offsets, worker pool with explicit 8 MiB stack size, allocator stats, timeout and cancel checks | 17 exported functions, 4 `#[repr(C)]` types (`CallHeader`, `FfiStatus`, `AbiLayout`, `AllocStats`) |
 | Runtime package | Go | `Handle` with semaphore, timeout, poison state; `init()` ABI check; completion channel over an `os.Pipe` whose write end Rust owns; `noescape` and `nocallback` on every export; allocator stats bridged to `debug.SetMemoryLimit` | `Open`, `Close`, `Call`, `CallBuffer`, `Submit`, `Wait` (and `WaitBuffer`), `NewBuffer` (with `Buffer.Free`), `Shutdown`, `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs` (12 public entry points; `WaitBuffer`, `CallBuffer`, and `Shutdown` logged in `DECISIONS.md`) |
 | Header | C | Hand-maintained `internal/ffi/gusset.h`; verified by `tests/header_match.rs` parameter and return types against Rust exports | one `.h` file |
 | Example engine | Rust + Go | Reference engine that exercises every failure mode: panic, NUL in message, deadline miss, large allocation, deep recursion | reference for adopters (`crates/gusset-example`) |
@@ -146,7 +146,7 @@ Naming convention: crate `gusset`, Go module `github.com/bharathvbcr/gusset`, ou
 | Go runtime changes break the completion path or `noescape` semantics | Medium | CI runs against Go tip weekly; blocking fallback under the semaphore stays supported |
 | Rust `panic=abort` in a dependency's profile silently disables the firewall | Medium | Build script asserts `panic=unwind`; the panic zoo test fails otherwise |
 | Two Rust staticlibs in one Go binary (duplicate `std` symbols) | Medium for adopters | Document the umbrella-crate rule; example repo shows it |
-| Solo maintenance stalls after Phase 3 | Medium | Keep the surface at 15 exports; the matrix does the reviewing |
+| Solo maintenance stalls after Phase 3 | Medium | Keep the surface small (17 exports); the matrix does the reviewing |
 | iceoryx2 ships its own Go binding before Phase 4 | Low–medium | Good outcome: adopt it and drop Phase 4 |
 
 Open decisions from the first draft are all resolved in `DECISIONS.md`.

@@ -86,6 +86,38 @@ typedef struct {
 
 typedef struct GussetHandle GussetHandle;
 
+/* Shared-memory completion ring (gusset_handle_ring). Optional: a host that
+ * never attaches one reads every completion from the pipe as described under
+ * GUSSET_FLAG_INLINE_COMPLETION.
+ *
+ * Once attached, completions are published into slots instead of the pipe.
+ * Slot i (at slots + i * GUSSET_RING_SLOT_BYTES) starts with a native-endian
+ * u64 sequence number and is followed, at GUSSET_RING_SLOT_OFF_RECORD, by one
+ * completion record in the pipe format (a bare ticket, or an inline record).
+ * The single reader keeps a private position `head`, starting at 0:
+ *   slot = slots[head & (capacity - 1)]
+ *   if atomic_load_acquire(slot.seq) == head + 1:
+ *       read the record, then atomic_store_release(slot.seq, head + capacity)
+ *       and head += 1
+ *   otherwise the ring is empty.
+ * Before blocking on the pipe the reader must set `waiting` (u32 at
+ * shared + GUSSET_RING_OFF_WAITING) to 1 with a sequentially consistent
+ * store, re-check the ring, and only then block. The first worker to publish
+ * after that swaps it back to 0 and writes one wake token: 8 zero bytes
+ * ("ticket 0", never a real ticket), which the reader discards. If the reader
+ * clears `waiting` itself with an atomic swap that returns 0, a token for it
+ * is on its way and will still arrive. A record that finds the ring full goes
+ * through the pipe, after which the u64 at shared + GUSSET_RING_OFF_OVERFLOW
+ * is incremented. capacity is at least the pool size, so a host that holds at
+ * most pool_size unread completions never overflows. */
+typedef struct GussetRing GussetRing;
+#define GUSSET_RING_OFF_CAPACITY 0u
+#define GUSSET_RING_OFF_SLOT_BYTES 8u
+#define GUSSET_RING_OFF_WAITING 64u
+#define GUSSET_RING_OFF_OVERFLOW 128u
+#define GUSSET_RING_SLOT_BYTES 128u
+#define GUSSET_RING_SLOT_OFF_RECORD 8u
+
 void gusset_abi_layout(AbiLayout* out);
 /* Named-field offsets and sizes of the four structs above, in declaration
  * order: CallHeader, FfiStatus, AbiLayout, AllocStats. Writes min(cap, count)
@@ -98,6 +130,10 @@ int32_t gusset_handle_close(GussetHandle* handle, FfiStatus* status);
 int32_t gusset_submit(GussetHandle* handle, const CallHeader* header, const uint8_t* input_ptr, size_t input_len, uint64_t buffer_id, uint64_t* out_ticket, FfiStatus* status);
 int32_t gusset_take(GussetHandle* handle, uint64_t ticket, uint64_t* out_buf_id, uint8_t** out_ptr, size_t* out_len, FfiStatus* status);
 int32_t gusset_cancel(GussetHandle* handle, uint64_t ticket, FfiStatus* status);
+/* Attaches the completion ring. *out_ring owns the ring memory, which stays
+ * valid after gusset_handle_close until gusset_ring_release(*out_ring). */
+int32_t gusset_handle_ring(GussetHandle* handle, const GussetRing** out_ring, const uint8_t** out_shared, const uint8_t** out_slots, uint64_t* out_capacity, FfiStatus* status);
+void gusset_ring_release(const GussetRing* ring);
 int32_t gusset_cancel_all(GussetHandle* handle, FfiStatus* status);
 void gusset_status_free(FfiStatus* status);
 void gusset_alloc_stats(AllocStats* out);

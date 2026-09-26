@@ -110,8 +110,8 @@ fn test_exports_match_list() {
 
     assert_eq!(
         expected_exports.len(),
-        15,
-        "expected exactly 15 ABI functions"
+        17,
+        "expected exactly 17 ABI functions"
     );
 
     // Honour CARGO_TARGET_DIR: with a separate target dir, a hard-coded

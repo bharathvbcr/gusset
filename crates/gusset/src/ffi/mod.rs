@@ -7,6 +7,7 @@ pub mod guard;
 pub mod status;
 
 use crate::header::CallHeader;
+use crate::pool::ring::Ring;
 use crate::pool::{Handle, JobResult};
 use alloc::{get_alloc_stats, AllocStats};
 use guard::{ffi_guard, install_panic_hook, FfiError};
@@ -599,6 +600,82 @@ pub unsafe extern "C" fn gusset_cancel_all(handle: *mut Handle, status: *mut Ffi
     } else {
         FFI_BAD_ARG
     }
+}
+
+/// 9a. Attaches a shared-memory completion ring to the handle.
+///
+/// From this call on, completions are published into the ring and the pipe
+/// carries only wake tokens (8 zero bytes, "ticket 0") and overflow records.
+/// The layout and the reader's protocol are in `gusset.h` (`GUSSET_RING_*`).
+///
+/// On success `*out_ring` is an owning reference: the ring memory stays valid,
+/// even after `gusset_handle_close`, until it is passed to
+/// `gusset_ring_release`, which the reader calls once it has stopped
+/// reading. `*out_shared` and `*out_slots` point at the header and the first
+/// slot; `*out_capacity` is the slot count, a power of two at least the pool
+/// size. A second attach on the same handle is refused.
+///
+/// # Safety
+///
+/// `handle` must be a valid handle pointer, and every out pointer valid for a
+/// write.
+#[no_mangle]
+pub unsafe extern "C" fn gusset_handle_ring(
+    handle: *mut Handle,
+    out_ring: *mut *const Ring,
+    out_shared: *mut *const u8,
+    out_slots: *mut *const u8,
+    out_capacity: *mut u64,
+    status: *mut FfiStatus,
+) -> i32 {
+    if handle.is_null()
+        || out_ring.is_null()
+        || out_shared.is_null()
+        || out_slots.is_null()
+        || out_capacity.is_null()
+    {
+        if !status.is_null() {
+            unsafe {
+                ptr::write(status, FfiStatus::bad_arg("null handle or out pointer"));
+            }
+        }
+        return FFI_BAD_ARG;
+    }
+
+    let h = unsafe { &*handle };
+    let res = unsafe {
+        ffi_guard(status, || {
+            let ring = h.attach_ring()?;
+            ptr::write(out_shared, ring.shared() as *const _ as *const u8);
+            ptr::write(out_slots, ring.slots_ptr() as *const u8);
+            ptr::write(out_capacity, ring.shared().capacity);
+            ptr::write(out_ring, Arc::into_raw(ring));
+            Ok(())
+        })
+    };
+
+    if res.is_some() {
+        FFI_OK
+    } else if !status.is_null() {
+        unsafe { (*status).code }
+    } else {
+        FFI_BAD_ARG
+    }
+}
+
+/// 9b. Drops the reference `gusset_handle_ring` returned. NULL is a no-op.
+///
+/// # Safety
+///
+/// `ring` must be NULL or a pointer from `gusset_handle_ring` not yet
+/// released, and nothing may read the ring afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn gusset_ring_release(ring: *const Ring) {
+    if ring.is_null() {
+        return;
+    }
+    // Dropping never unwinds: the ring holds only atomics and two boxes.
+    drop(unsafe { Arc::from_raw(ring) });
 }
 
 /// 10. Frees a status message allocated by Rust (R4).
