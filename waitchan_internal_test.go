@@ -187,8 +187,10 @@ func fakeWaitState(ticket uint64) *handleState {
 // that each hands its channel back empty.
 func TestWaitDeadlineBranchesRecycleTheirChannel(t *testing.T) {
 	const ticket = 7
+	const rounds = 50
 	for _, raced := range []bool{true, false} {
-		for round := 0; round < 50; round++ {
+		racedHits := 0
+		for round := 0; round < rounds; round++ {
 			s := fakeWaitState(ticket)
 			ctx, cancel := context.WithCancel(context.Background())
 			type out struct {
@@ -220,14 +222,24 @@ func TestWaitDeadlineBranchesRecycleTheirChannel(t *testing.T) {
 			s.mu.Unlock()
 
 			got := <-done
-			if !errors.Is(got.err, context.Canceled) {
-				t.Fatalf("raced=%v: err %v, want the deadline", raced, got.err)
-			}
 			s.mu.Lock()
 			_, isAbandoned := s.abandoned[ticket]
 			free := len(s.waitChans)
 			reused := free == 1 && s.waitChans[0] == ch
 			s.mu.Unlock()
+			switch {
+			case raced && got.err == nil:
+				// A starved runner woke the waiter only after the send, with
+				// both cases ready, and select took the plain receive. Still
+				// correct: the result is the delivered one.
+				if string(got.res.data) != "late" {
+					t.Fatalf("plain receive returned %q", got.res.data)
+				}
+			case !errors.Is(got.err, context.Canceled):
+				t.Fatalf("raced=%v: err %v, want the deadline", raced, got.err)
+			case raced:
+				racedHits++
+			}
 			if raced == isAbandoned {
 				t.Fatalf("raced=%v: abandoned=%v", raced, isAbandoned)
 			}
@@ -240,6 +252,11 @@ func TestWaitDeadlineBranchesRecycleTheirChannel(t *testing.T) {
 			if !raced && len(s.sem) != 1 {
 				t.Fatal("the abandon branch must leave the permit with the running job")
 			}
+		}
+		// The raced branch is the point of the raced half. Holding mu across
+		// the cancel makes it the usual outcome; require most rounds to take it.
+		if raced && racedHits < rounds/2 {
+			t.Fatalf("the raced branch ran %d of %d rounds", racedHits, rounds)
 		}
 	}
 }
