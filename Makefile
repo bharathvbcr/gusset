@@ -169,10 +169,17 @@ cross:
 # usable locally; CI runs it longer.
 FUZZTIME ?= 30s
 FUZZ_TARGETS ?= FuzzCallRefusesWithoutEngine FuzzDiagnosticEngineNeverAborts FuzzBufferLifecycle
+# The completion-record parsers (pipe bytes and ring slots) are internal to the
+# root package, so they fuzz there.
+FUZZ_TARGETS_ROOT ?= FuzzTicketReaderPipeBytes FuzzRingSlotDecode
 fuzz:
 	@for t in $(FUZZ_TARGETS); do \
 		echo "== fuzzing $$t for $(FUZZTIME)"; \
 		go test -run '^$$' -fuzz $$t -fuzztime $(FUZZTIME) ./tests/pitfalls/ || exit 1; \
+	done
+	@for t in $(FUZZ_TARGETS_ROOT); do \
+		echo "== fuzzing $$t for $(FUZZTIME)"; \
+		go test -run '^$$' -fuzz $$t -fuzztime $(FUZZTIME) . || exit 1; \
 	done
 
 lint:
