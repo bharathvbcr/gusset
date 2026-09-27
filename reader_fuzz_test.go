@@ -37,10 +37,15 @@ func FuzzTicketReaderPipeBytes(f *testing.F) {
 		}()
 		tr := newTicketReader(r)
 		_ = r.SetReadDeadline(time.Now().Add(10 * time.Second))
-		for i := 0; i <= len(stream)/8; i++ {
+		records := 0
+		for {
 			_, data, inline, err := tr.next()
 			if err != nil {
-				return
+				break
+			}
+			records++
+			if records > len(stream)/8 {
+				t.Fatalf("%d records from %d bytes: a record is at least 8", records, len(stream))
 			}
 			if !inline && data != nil {
 				t.Fatal("a bare ticket carried data")
@@ -48,9 +53,6 @@ func FuzzTicketReaderPipeBytes(f *testing.F) {
 			if len(data) > ffi.InlineResultMax {
 				t.Fatalf("inline data of %d bytes passed the parser", len(data))
 			}
-		}
-		if _, _, _, err := tr.next(); err == nil {
-			t.Fatal("reader produced more records than the stream can hold")
 		}
 	})
 }

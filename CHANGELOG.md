@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased] - 2026-09-27 · Ring hardening, and where Gusset fits the other apps
+
+- **Both completion-record parsers are fuzzed.** `FuzzTicketReaderPipeBytes` feeds arbitrary bytes to the pipe reader. `FuzzRingSlotDecode` puts arbitrary words into a published ring slot. Both run in `make fuzz` and in the CI fuzz job, which grows from about 6 to about 10 minutes (5 targets × 120 s).
+- **Close while the reader is parked on the ring is tested.** `TestCloseWhileReaderIsParkedOnTheRing` runs 40 rounds, idle and with a job in flight. `Close` returns, the waiter gets an answer, and the drain goroutine exits.
+- **`docs/integrations.md`.** DevCouncil's existing integration (the dc-glob fnmatch engine) was checked against this Gusset: the umbrella carries all 17 exports, and `gusset-check` reports ok. The page measures `devmap` at 11–26 ms per query when each query starts a process, against 0.8–18 ms from a warm one. It recommends a pool of warm processes over an in-process Gusset engine, which DevCouncil's `CGO_ENABLED=0` requirement rules out anyway. GitPulse and Manvi could not be inspected in this session.
+
 ## [Unreleased] - 2026-09-26 · Completion ring: no system calls per round trip
 
 Measured on one Linux VM. The raw data and tables are in `bench/results/linux-amd64-vm/`
