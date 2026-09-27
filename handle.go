@@ -143,8 +143,16 @@ type handleState struct {
 	mu          sync.Mutex
 	cgoMu       sync.RWMutex
 	pending     map[uint64]chan callResult
-	completed   map[uint64]callResult
-	semTickets  map[uint64]struct{}
+	// waitChans holds empty result channels for reuse (guarded by mu). A
+	// buffered channel of callResult is two allocations, the header and the
+	// buffer, and they were the only two a Call made. A channel is recycled
+	// only once it is empty and out of pending: every send happens under mu
+	// and removes the channel from pending first, so nothing can send to one
+	// here. At most cap(sem) waiters exist at once (each holds a permit), so
+	// the list never outgrows that.
+	waitChans  []chan callResult
+	completed  map[uint64]callResult
+	semTickets map[uint64]struct{}
 	// abandoned holds tickets whose owner was released by its context before
 	// the engine finished. The permit stays in semTickets — the worker is still
 	// busy — and deliver reclaims both the result and the permit when the
@@ -236,6 +244,7 @@ func Open(opts ...Option) (*Handle, error) {
 		drainDone:     make(chan struct{}),
 		closeDone:     make(chan struct{}),
 		pending:       make(map[uint64]chan callResult),
+		waitChans:     make([]chan callResult, 0, cfg.poolSize),
 		completed:     make(map[uint64]callResult),
 		semTickets:    make(map[uint64]struct{}),
 		abandoned:     make(map[uint64]struct{}),
@@ -874,6 +883,27 @@ func (s *handleState) enterCgo() bool {
 	return true
 }
 
+// waitChanLocked returns an empty result channel, reused when one is free.
+func (s *handleState) waitChanLocked() chan callResult {
+	if n := len(s.waitChans); n > 0 {
+		ch := s.waitChans[n-1]
+		s.waitChans[n-1] = nil
+		s.waitChans = s.waitChans[:n-1]
+		return ch
+	}
+	return make(chan callResult, 1)
+}
+
+// recycleWaitChanLocked returns a channel for reuse. The caller has taken it
+// out of pending under mu, so no send can reach it any more; a channel that
+// still holds a value, which that rule excludes, is dropped rather than
+// reused, so a stale result can never reach the next waiter.
+func (s *handleState) recycleWaitChanLocked(ch chan callResult) {
+	if len(ch) == 0 && len(s.waitChans) < cap(s.sem) {
+		s.waitChans = append(s.waitChans, ch)
+	}
+}
+
 func (s *handleState) popTakeIDLocked(ticket uint64) uint64 {
 	id := s.takeIDs[ticket]
 	delete(s.takeIDs, ticket)
@@ -1267,13 +1297,14 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 		return callResult{}, 0, ErrTicketBusy
 	}
 
-	ticketCh := make(chan callResult, 1)
+	ticketCh := s.waitChanLocked()
 	s.pending[ticket] = ticketCh
 	s.mu.Unlock()
 
 	select {
 	case res := <-ticketCh:
 		s.mu.Lock()
+		s.recycleWaitChanLocked(ticketCh)
 		takeID := s.popTakeIDLocked(ticket)
 		s.mu.Unlock()
 		s.releaseSem(ticket)
@@ -1315,6 +1346,7 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 		case res := <-ticketCh:
 			// Raced: the completion landed between ctx firing and this lock, so
 			// there is nothing to abandon and the permit is free now.
+			s.recycleWaitChanLocked(ticketCh)
 			takeID := s.popTakeIDLocked(ticket)
 			s.mu.Unlock()
 			s.releaseSem(ticket)
@@ -1328,6 +1360,8 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 			}
 			return callResult{}, 0, ctx.Err()
 		default:
+			// Out of pending under mu with nothing sent: no send can reach it.
+			s.recycleWaitChanLocked(ticketCh)
 		}
 		s.abandoned[ticket] = struct{}{}
 		s.mu.Unlock()

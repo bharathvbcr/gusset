@@ -137,6 +137,22 @@ no-op −2.9%, parallel 10 µs −6.4%, and neutral elsewhere.
 An idle handle still costs no measurable CPU: about 130 µs of CPU time
 over one second.
 
+## Reused result channels (`waitchan-*.txt`, n=8)
+
+"Before" is `2b3b32c` and "after" reuses each handle's result channels. The
+arms alternated four times on this host, which measured slower overall than
+the ring round above: compare within this table only.
+
+| Benchmark | 2b3b32c | reused channels | Δ | allocs/op | B/op |
+| --- | ---: | ---: | ---: | --- | --- |
+| Call no-op | 4.76 µs | 4.40 µs | −7.6% | 2 → 1 | 160 → 1 |
+| Call parallel | 3.19 µs | 2.81 µs | −12% | 2 → 1 | 157 → 1 |
+| Submit & Wait | 4.77 µs | 4.44 µs | −6.9% | 2 → 1 | 160 → 1 |
+| 64 KiB buffer, copy | 44.3 µs | 46.7 µs | ~ (p=0.28) | 2 → 1 | 64.16 → 64.00 KiB |
+| 64 KiB buffer, zero-copy | 15.1 µs | 14.9 µs | ~ (p=0.80) | 4 → 3 | 295 → 136 |
+
+The allocation left on `Call` is the result slice returned to the caller.
+
 ## Against one blocking cgo call per request (`transport-*.txt`, median of 6)
 
 The same integer loop on both transports (`rs_spin` and diagnostic mode 11), so
