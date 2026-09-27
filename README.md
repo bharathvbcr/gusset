@@ -321,9 +321,10 @@ enterprise adopter each has to do differently, and the cases where the answer is
 "use raw cgo".
 
 **[Gusset in the other apps](docs/integrations.md)** records how DevCouncil
-uses it today, and why its `devmap` queries should run in a pool of warm
-processes rather than through Gusset. That comes down to the measured cost
-of a process per query against a warm one.
+uses it today, and what a `devmap` query costs as a new process against a warm
+one. It also records why neither a warm pool nor Gusset would speed up
+DevCouncil's own callers: every Go path there is one-shot, and agents already
+use the warm `devmap mcp`.
 
 ---
 
