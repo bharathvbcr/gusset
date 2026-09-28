@@ -340,6 +340,12 @@ decision: the two measurements that settle it, what an average, commercial or
 enterprise adopter each has to do differently, and the cases where the answer is
 "use raw cgo".
 
+**[Gusset in the other apps](docs/integrations.md)** records how DevCouncil
+uses it today, and what a `devmap` query costs as a new process against a warm
+one. It also records why neither a warm pool nor Gusset would speed up
+DevCouncil's own callers: every Go path there is one-shot, and agents already
+use the warm `devmap mcp`.
+
 ---
 
 ## Panic Zoo & Firewall Guarantees

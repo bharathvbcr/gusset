@@ -509,6 +509,18 @@ pub fn set_nonblocking(fd: i32) -> Result<()> {
         if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
             return Err(Error::last_os_error());
         }
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        ))]
+        {
+            const F_SETNOSIGPIPE: libc::c_int = 73;
+            if libc::fcntl(fd, F_SETNOSIGPIPE, 1) < 0 {
+                return Err(Error::last_os_error());
+            }
+        }
     }
     Ok(())
 }
