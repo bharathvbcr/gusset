@@ -62,6 +62,11 @@ typedef struct {
     uint32_t reserved;
 } CallHeader;
 
+/* Every FfiStatus* parameter may be NULL; the function returns the same code
+ * either way. A non-NULL status is overwritten on every call without freeing
+ * what it held, so pass each failed status to gusset_status_free before
+ * reusing it. msg is UTF-8, at most about 32 KiB, and may contain NUL bytes;
+ * file is static and never freed. */
 typedef struct {
     int32_t code;
     uint8_t* msg;
@@ -137,6 +142,9 @@ void gusset_ring_release(const GussetRing* ring);
 int32_t gusset_cancel_all(GussetHandle* handle, FfiStatus* status);
 void gusset_status_free(FfiStatus* status);
 void gusset_alloc_stats(AllocStats* out);
+/* Copies whole '\n'-terminated lines while they fit; a single line longer
+ * than len is split on a UTF-8 character boundary. A partial fill does not
+ * mean the ring is empty: drain until *out_written is 0. */
 void gusset_drain_logs(uint8_t* buf, size_t len, size_t* out_written);
 int32_t gusset_buf_alloc(GussetHandle* handle, size_t len, uint64_t* out_id, uint8_t** out_ptr, FfiStatus* status);
 int32_t gusset_buf_free(GussetHandle* handle, uint64_t id, FfiStatus* status);

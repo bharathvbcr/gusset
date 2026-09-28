@@ -217,7 +217,7 @@ Gusset exports strictly 17 C ABI functions from `libgusset.a` (enforced by `test
 - `gusset_cancel_all(handle, status)`: Cancels all pending jobs on handle.
 - `gusset_status_free(status)`: Frees Rust-allocated error message.
 - `gusset_alloc_stats(out)`: Non-allocating allocator accounting export.
-- `gusset_drain_logs(buf, len, out_written)`: Drains log ring buffer.
+- `gusset_drain_logs(buf, len, out_written)`: Drains the log ring in whole lines, never splitting a UTF-8 character; call until `out_written` is 0.
 - `gusset_buf_alloc(handle, len, out_id, out_ptr, status)`: Allocates 64-byte aligned Rust buffer.
 - `gusset_buf_free(handle, id, status)`: Frees Rust-owned buffer.
 

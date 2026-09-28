@@ -500,9 +500,13 @@ pub fn count_buffer_dealloc(size: usize) {
 
 /// Records a deallocation that bypassed the counting wrapper.
 ///
-/// Paired with [`record_alloc`]: both consult the same flag, and the flag cannot
-/// change between a buffer's allocation and its free, so the pair never goes
-/// asymmetric and drives `live_bytes` toward a phantom balance.
+/// Paired with [`record_alloc`]: both consult the same flag. The flag only
+/// ever turns on, but it can turn on between a recorded allocation and its
+/// free (a non-global `Counting` called through `GlobalAlloc` flips it; see
+/// `tests/rust_counting_flip.rs`). A record made before the flip is then never
+/// released and `live_bytes` stays high for the rest of the process. Memory
+/// that never passes through the global allocator should use
+/// [`count_buffer_alloc`]/[`count_buffer_dealloc`], which do not consult it.
 #[inline]
 pub fn record_dealloc(size: usize) {
     if counting_is_active() {

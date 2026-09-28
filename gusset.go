@@ -153,7 +153,12 @@ func Threads() int64 {
 	return -1
 }
 
-// DrainLogs drains logs from the internal Rust log ring into the provided buffer.
+// DrainLogs drains logs from the internal Rust log ring into the provided
+// buffer and returns the bytes written.
+//
+// It hands over whole lines when they fit and never splits a UTF-8
+// character, so a short return does not mean the ring is empty: call again
+// until it returns 0.
 func DrainLogs(buf []byte) int {
 	return ffi.DrainLogs(buf)
 }

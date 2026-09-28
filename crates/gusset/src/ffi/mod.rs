@@ -10,7 +10,7 @@ use crate::header::CallHeader;
 use crate::pool::ring::Ring;
 use crate::pool::{Handle, JobResult};
 use alloc::{get_alloc_stats, AllocStats};
-use guard::{ffi_guard, install_panic_hook, FfiError};
+use guard::{ffi_guard_code, install_panic_hook, FfiError};
 use static_assertions::{assert_eq_align, assert_eq_size};
 use status::{FfiStatus, FFI_BAD_ARG, FFI_ERR, FFI_OK, FFI_PANIC, FFI_POISONED};
 use std::mem::{align_of, size_of};
@@ -287,7 +287,7 @@ pub unsafe extern "C" fn gusset_handle_open(
     }
 
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
             let handle = Handle::open(pool_size, pipe_write_fd)?;
             let raw = Arc::into_raw(handle) as *mut Handle;
             ptr::write(out_handle, raw);
@@ -295,12 +295,9 @@ pub unsafe extern "C" fn gusset_handle_open(
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => code,
     }
 }
 
@@ -321,7 +318,7 @@ pub unsafe extern "C" fn gusset_handle_close(handle: *mut Handle, status: *mut F
     }
 
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
             let arc = Arc::from_raw(handle);
             arc.close();
             drop(arc);
@@ -329,12 +326,9 @@ pub unsafe extern "C" fn gusset_handle_close(handle: *mut Handle, status: *mut F
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => code,
     }
 }
 
@@ -410,28 +404,26 @@ pub unsafe extern "C" fn gusset_submit(
     let call_header = unsafe { *header };
 
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
             let ticket = h.submit(call_header, input_slice, buffer_id)?;
             ptr::write(out_ticket, ticket);
             Ok(())
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if h.is_poisoned() {
-        // submit() returns Err(String) for the poison latch, which ffi_guard
-        // maps to FFI_ERR. R10 is FFI_POISONED without a second reading.
-        if !status.is_null() {
-            unsafe {
-                FfiStatus::overwrite(status, FfiStatus::poisoned("handle is poisoned"));
+    match res {
+        Ok(()) => FFI_OK,
+        Err(_) if h.is_poisoned() => {
+            // submit() returns Err(String) for the poison latch, which ffi_guard
+            // maps to FFI_ERR. R10 is FFI_POISONED without a second reading.
+            if !status.is_null() {
+                unsafe {
+                    FfiStatus::overwrite(status, FfiStatus::poisoned("handle is poisoned"));
+                }
             }
+            FFI_POISONED
         }
-        FFI_POISONED
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+        Err(code) => code,
     }
 }
 
@@ -461,7 +453,7 @@ pub unsafe extern "C" fn gusset_take(
     let h = unsafe { &*handle };
 
     let res = unsafe {
-        ffi_guard(status, || -> Result<(), FfiError> {
+        ffi_guard_code(status, || -> Result<(), FfiError> {
             let job_result = h.take(ticket).map_err(FfiError::from)?;
             match job_result {
                 JobResult::Ok(data) => {
@@ -523,12 +515,9 @@ pub unsafe extern "C" fn gusset_take(
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => code,
     }
 }
 
@@ -554,18 +543,15 @@ pub unsafe extern "C" fn gusset_cancel(
 
     let h = unsafe { &*handle };
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
             h.cancel(ticket);
             Ok(())
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => code,
     }
 }
 
@@ -587,18 +573,15 @@ pub unsafe extern "C" fn gusset_cancel_all(handle: *mut Handle, status: *mut Ffi
 
     let h = unsafe { &*handle };
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
             h.cancel_all();
             Ok(())
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => code,
     }
 }
 
@@ -644,7 +627,7 @@ pub unsafe extern "C" fn gusset_handle_ring(
 
     let h = unsafe { &*handle };
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
             let ring = h.attach_ring()?;
             ptr::write(out_shared, ring.shared() as *const _ as *const u8);
             ptr::write(out_slots, ring.slots_ptr() as *const u8);
@@ -654,12 +637,9 @@ pub unsafe extern "C" fn gusset_handle_ring(
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => code,
     }
 }
 
@@ -714,6 +694,11 @@ pub unsafe extern "C" fn gusset_alloc_stats(out: *mut AllocStats) {
 
 /// 12. Drains pending log messages into a provided buffer.
 ///
+/// Hands over whole lines while they fit; a single line longer than `len` is
+/// split on a UTF-8 character boundary. A partial fill
+/// does not mean the ring is empty; a caller flushing it drains until
+/// `*out_written` is 0.
+///
 /// # Safety
 ///
 /// `buf` must point to at least `len` writable bytes. `out_written` must point to valid writable memory.
@@ -730,7 +715,7 @@ pub unsafe extern "C" fn gusset_drain_logs(buf: *mut u8, len: usize, out_written
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut log_buf = LOG_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
-        let count = log_buf.len().min(len);
+        let count = drain_cut(&log_buf, len);
         unsafe {
             ptr::copy_nonoverlapping(log_buf.as_ptr(), buf, count);
         }
@@ -739,6 +724,34 @@ pub unsafe extern "C" fn gusset_drain_logs(buf: *mut u8, len: usize, out_written
     }));
     unsafe {
         ptr::write(out_written, result.unwrap_or(0));
+    }
+}
+
+/// How many bytes of `ring` a drain into `cap` bytes hands over.
+///
+/// Everything, when it fits. Otherwise up to the last whole line that fits,
+/// or, for a single line longer than `cap`, up to the last character boundary.
+/// Cutting at `cap` split lines across drains and characters across chunks,
+/// breaking `append_line`'s promise that Go never sees a partial UTF-8
+/// sequence. A `cap` smaller than the first character still hands over `cap`
+/// raw bytes: returning 0 would read as "empty" and strand the ring.
+fn drain_cut(ring: &[u8], cap: usize) -> usize {
+    let count = ring.len().min(cap);
+    if count == ring.len() {
+        return count;
+    }
+    if let Some(nl) = ring[..count].iter().rposition(|&b| b == b'\n') {
+        return nl + 1;
+    }
+    let mut cut = count;
+    // `ring[cut]` exists: count < ring.len(). A UTF-8 continuation byte is 10xxxxxx.
+    while cut > 0 && ring[cut] & 0xC0 == 0x80 {
+        cut -= 1;
+    }
+    if cut == 0 {
+        count
+    } else {
+        cut
     }
 }
 
@@ -778,7 +791,7 @@ pub unsafe extern "C" fn gusset_buf_alloc(
     }
 
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
             let (id, p) = h.buf_alloc_published(len)?;
             ptr::write(out_id, id);
             ptr::write(out_ptr, p);
@@ -786,19 +799,17 @@ pub unsafe extern "C" fn gusset_buf_alloc(
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if h.is_poisoned() {
-        if !status.is_null() {
-            unsafe {
-                FfiStatus::overwrite(status, FfiStatus::poisoned("handle is poisoned"));
+    match res {
+        Ok(()) => FFI_OK,
+        Err(_) if h.is_poisoned() => {
+            if !status.is_null() {
+                unsafe {
+                    FfiStatus::overwrite(status, FfiStatus::poisoned("handle is poisoned"));
+                }
             }
+            FFI_POISONED
         }
-        FFI_POISONED
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+        Err(code) => code,
     }
 }
 
@@ -823,14 +834,11 @@ pub unsafe extern "C" fn gusset_buf_free(
     }
 
     let h = unsafe { &*handle };
-    let res = unsafe { ffi_guard(status, || h.buf_free(id).map_err(FfiError::from)) };
+    let res = unsafe { ffi_guard_code(status, || h.buf_free(id).map_err(FfiError::from)) };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => code,
     }
 }
 
@@ -893,5 +901,27 @@ mod abi_field_export_tests {
                 panic!("wrote past the field count at {at}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod drain_cut_tests {
+    use super::drain_cut;
+
+    #[test]
+    fn a_cut_prefers_lines_then_characters_and_always_progresses() {
+        let ring = "ab\n€€\n".as_bytes();
+        assert_eq!(drain_cut(ring, 64), ring.len(), "everything that fits");
+        assert_eq!(drain_cut(ring, 5), 3, "the last whole line that fits");
+        // "€€\n" alone, cap 4: no newline, and byte 4 is mid-character.
+        let tail = "€€\n".as_bytes();
+        assert_eq!(drain_cut(tail, 4), 3, "back to the character boundary");
+        assert_eq!(drain_cut(tail, 1), 1, "smaller than a character: raw bytes");
+        assert_eq!(
+            drain_cut(&tail[1..], 1),
+            1,
+            "starting mid-character still progresses"
+        );
+        assert_eq!(drain_cut(&[], 8), 0);
     }
 }
