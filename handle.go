@@ -142,9 +142,13 @@ type handleState struct {
 	drainExited atomic.Bool
 	mu          sync.Mutex
 	cgoMu       sync.RWMutex
-	pending     map[uint64]chan callResult
-	completed   map[uint64]callResult
-	semTickets  map[uint64]struct{}
+	// pending maps a ticket to its waiter's channel. deliver, and drainPipe's
+	// exit when it sends "handle closed", set the entry to nil as they send;
+	// the waiter deletes it once it has collected (see collectLocked), so a
+	// ticket being collected still reads as busy.
+	pending    map[uint64]chan callResult
+	completed  map[uint64]callResult
+	semTickets map[uint64]struct{}
 	// abandoned holds tickets whose owner was released by its context before
 	// the engine finished. The permit stays in semTickets — the worker is still
 	// busy — and deliver reclaims both the result and the permit when the
@@ -284,17 +288,14 @@ func drainPipe(s *handleState) {
 		if err != nil {
 			// Pipe closed on handle shutdown or EOF
 			s.mu.Lock()
-			for _, ch := range s.pending {
-				ch <- callResult{err: errors.New("gusset: handle closed")}
+			for t, ch := range s.pending {
+				if ch != nil { // nil: already delivered, its waiter is collecting
+					s.pending[t] = nil
+					ch <- callResult{err: errors.New("gusset: handle closed")}
+				}
 			}
-			toFree := make([]uint64, 0, len(s.takeIDs))
-			for _, id := range s.takeIDs {
-				toFree = append(toFree, id)
-			}
-			s.pending = make(map[uint64]chan callResult)
-			s.completed = make(map[uint64]callResult)
+			toFree := s.takeUnclaimedLocked()
 			s.drainExited.Store(true)
-			s.takeIDs = make(map[uint64]uint64)
 			// Permits held by abandoned tickets are returned by close, which
 			// drains every entry in semTickets. Clearing the set here only stops
 			// a late completion from being treated as abandoned after the drain
@@ -764,8 +765,12 @@ func (s *handleState) deliver(ticket uint64, res callResult, takeID uint64) {
 	if takeID != 0 {
 		s.takeIDs[ticket] = takeID
 	}
-	if ch, exists := s.pending[ticket]; exists {
-		delete(s.pending, ticket)
+	if ch := s.pending[ticket]; ch != nil {
+		// The entry stays, nil, until the waiter has collected: popped its take
+		// id and returned its permit (collectLocked). Deleting it here left the
+		// ticket live with no waiter in between, and a second Wait registered
+		// and parked on a completion that had already been handed out.
+		s.pending[ticket] = nil
 		ch <- res
 	} else {
 		s.completed[ticket] = res
@@ -823,12 +828,7 @@ func (s *handleState) close() error {
 	// semTickets covers abandoned tickets too: their permits were deliberately
 	// left with the work, and the work is over now that the pool has joined.
 	s.mu.Lock()
-	toFree := make([]uint64, 0, len(s.takeIDs))
-	for _, id := range s.takeIDs {
-		toFree = append(toFree, id)
-	}
-	s.completed = make(map[uint64]callResult)
-	s.takeIDs = make(map[uint64]uint64)
+	toFree := s.takeUnclaimedLocked()
 	s.abandoned = make(map[uint64]struct{})
 	for ticket := range s.semTickets {
 		delete(s.semTickets, ticket)
@@ -880,6 +880,41 @@ func (s *handleState) popTakeIDLocked(ticket uint64) uint64 {
 	return id
 }
 
+// takeUnclaimedLocked drops every result no waiter has claimed (the completed
+// map) and returns the take buffer ids among them for the caller to free.
+//
+// A result already handed to a waiter keeps its id. That waiter holds a view of
+// the buffer and pops the id itself; resetting takeIDs wholesale, as close and
+// drainPipe's exit both did, made it pop 0 and return the view as if it were Go
+// memory — read after Close freed it, or after this very path had freed it
+// through bufFree. The id is how wait knows to copy under cgoMu, and how it
+// learns the handle closed in between.
+func (s *handleState) takeUnclaimedLocked() []uint64 {
+	var ids []uint64
+	for ticket := range s.completed {
+		if id := s.popTakeIDLocked(ticket); id != 0 {
+			ids = append(ids, id)
+		}
+	}
+	s.completed = make(map[uint64]callResult)
+	return ids
+}
+
+// collectLocked ends a waiter's claim on a ticket whose outcome it holds: it
+// removes the waiter's pending entry, pops the take buffer id and returns the
+// permit, all in one critical section.
+//
+// These were separate steps under separate lock holds. Between them the
+// ticket was still live in semTickets with no pending entry and no completed
+// result, and a second Wait read that as "nobody is waiting": it registered and
+// parked, to its deadline or forever, on a completion already handed out.
+func (s *handleState) collectLocked(ticket uint64) uint64 {
+	delete(s.pending, ticket)
+	takeID := s.popTakeIDLocked(ticket)
+	s.releaseSemLocked(ticket)
+	return takeID
+}
+
 // discardTake releases a take() buffer nobody is going to consume.
 func (s *handleState) discardTake(takeID uint64) {
 	if takeID != 0 {
@@ -887,13 +922,11 @@ func (s *handleState) discardTake(takeID uint64) {
 	}
 }
 
-func (s *handleState) releaseSem(ticket uint64) {
-	s.mu.Lock()
+func (s *handleState) releaseSemLocked(ticket uint64) {
 	if _, ok := s.semTickets[ticket]; ok {
 		delete(s.semTickets, ticket)
-		<-s.sem
+		<-s.sem // never blocks: this ticket's permit is held by definition
 	}
-	s.mu.Unlock()
 }
 
 // Call executes a unit of work synchronously within the caller's context deadline.
@@ -1047,11 +1080,16 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 		}
 	}
 
-	// Acquire semaphore slot
+	// Acquire semaphore slot. drainDone closes when the reader stops for good;
+	// after that no completion can be delivered, and a submitter parked here
+	// on a full pool used to stay parked until Close — forever, with a
+	// context that has no deadline.
 	select {
 	case s.sem <- struct{}{}:
 	case <-ctx.Done():
 		return 0, ctx.Err()
+	case <-s.drainDone:
+		return 0, errors.New("gusset: handle is closed")
 	}
 
 	// In Go, select chooses pseudo-randomly when multiple channels are ready.
@@ -1061,7 +1099,10 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 		return 0, err
 	}
 
-	if s.closed.Load() {
+	// drainExited again: a permit returned by a waiter told "handle closed"
+	// wakes a parked submitter after the reader is gone, and admitting it ran
+	// a job whose completion nobody would ever read.
+	if s.closed.Load() || s.drainExited.Load() {
 		<-s.sem
 		return 0, errors.New("gusset: handle is closed")
 	}
@@ -1217,9 +1258,8 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 	s.mu.Lock()
 	if res, done := s.completed[ticket]; done {
 		delete(s.completed, ticket)
-		takeID := s.popTakeIDLocked(ticket)
+		takeID := s.collectLocked(ticket)
 		s.mu.Unlock()
-		s.releaseSem(ticket)
 		if res.err != nil {
 			s.discardTake(takeID)
 			return callResult{}, 0, res.err
@@ -1274,9 +1314,8 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 	select {
 	case res := <-ticketCh:
 		s.mu.Lock()
-		takeID := s.popTakeIDLocked(ticket)
+		takeID := s.collectLocked(ticket)
 		s.mu.Unlock()
-		s.releaseSem(ticket)
 		if res.err != nil {
 			s.discardTake(takeID)
 			return callResult{}, 0, res.err
@@ -1310,14 +1349,12 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 		// the OS-thread bound I4 sells. deliver returns the permit at the
 		// moment the work actually stops.
 		s.mu.Lock()
-		delete(s.pending, ticket)
 		select {
 		case res := <-ticketCh:
 			// Raced: the completion landed between ctx firing and this lock, so
 			// there is nothing to abandon and the permit is free now.
-			takeID := s.popTakeIDLocked(ticket)
+			takeID := s.collectLocked(ticket)
 			s.mu.Unlock()
-			s.releaseSem(ticket)
 			s.discardTake(takeID)
 			// A panic that arrived in the race window is reported as the panic,
 			// not as the deadline: the caller asked what happened to its work
@@ -1329,6 +1366,7 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 			return callResult{}, 0, ctx.Err()
 		default:
 		}
+		delete(s.pending, ticket)
 		s.abandoned[ticket] = struct{}{}
 		s.mu.Unlock()
 		return callResult{}, 0, ctx.Err()
