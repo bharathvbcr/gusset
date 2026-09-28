@@ -760,6 +760,12 @@ pub struct Handle {
     /// common case — every worker alive — costs one atomic load per submit
     /// instead of a mutex, a scan of every JoinHandle and two Vec allocations.
     exited: Arc<AtomicUsize>,
+    /// Set while the pool may hold fewer than `pool_size` workers for a reason
+    /// `exited` no longer records: a respawn that failed (thread limit) or
+    /// unwound partway. The reap consumes `exited` before it spawns, so without
+    /// this the fast path in `ensure_workers` saw 0 and never retried; with no
+    /// workers left, every later submission queued and never ran (I4).
+    respawn_pending: AtomicBool,
     /// Whether the completion pipe holds `pool_size` inline records. If it
     /// could only be sized for bare tickets, inline completions are off and
     /// every caller gets tickets, whatever it asked for.
@@ -1015,6 +1021,7 @@ impl Handle {
             receiver,
             self_weak: Mutex::new(Weak::new()),
             exited: Arc::new(AtomicUsize::new(0)),
+            respawn_pending: AtomicBool::new(false),
             inline_ok,
             ring: std::sync::OnceLock::new(),
         });
@@ -1163,6 +1170,8 @@ impl Handle {
                             None => break,
                         };
                         let ticket = unit.ticket;
+                        #[cfg(test)]
+                        let kill_me = unit.ctx.header().trace_id == tests::KILL_TRACE;
                         let wants_inline = unit.ctx.header().flags
                             & crate::header::GUSSET_FLAG_INLINE_COMPLETION
                             != 0;
@@ -1201,6 +1210,13 @@ impl Handle {
                             // a worker still sat in the up-to-10 s write backoff.
                             lock_recover(&h.cancel_flags).remove(&ticket);
                         }
+                        // Test-only worker death (see tests::KILL_TRACE):
+                        // the worker that ran a marked unit exits once it
+                        // has delivered the completion.
+                        #[cfg(test)]
+                        if kill_me {
+                            break;
+                        }
                     }
                 })
                 .map_err(|e| format!("failed to spawn worker thread: {}", e))?;
@@ -1213,8 +1229,10 @@ impl Handle {
 
     /// Verifies worker health and respawns replacement workers if any died (I5).
     fn ensure_workers(&self) -> Result<(), String> {
-        // Fast path: no worker has exited, so there is nothing to reap.
-        if self.exited.load(Ordering::Acquire) == 0 {
+        // Fast path: no worker has exited and no earlier respawn fell short,
+        // so there is nothing to reap or replace.
+        if self.exited.load(Ordering::Acquire) == 0 && !self.respawn_pending.load(Ordering::Acquire)
+        {
             return Ok(());
         }
         let mut workers = lock_recover(&self.workers);
@@ -1224,6 +1242,12 @@ impl Handle {
         if self.closed.load(Ordering::Acquire) {
             return Ok(());
         }
+        // Raised before `exited` is consumed and cleared only once the pool
+        // is whole again. A spawn that returns Err or unwinds partway leaves
+        // it set, so the next submit retries instead of trusting a fast path
+        // that reads `exited == 0`. Raised ahead of the fetch_sub (AcqRel), a
+        // concurrent fast path that sees the decremented count sees this too.
+        self.respawn_pending.store(true, Ordering::Release);
         // Join finished workers rather than dropping their JoinHandles. A
         // worker that died with a panic payload whose destructor panics would
         // otherwise hit std's "thread result panicked on drop" abort here, on
@@ -1244,6 +1268,7 @@ impl Handle {
             let needed = self.pool_size - workers.len();
             self.spawn_workers_locked(&mut workers, needed)?;
         }
+        self.respawn_pending.store(false, Ordering::Release);
 
         Ok(())
     }
@@ -2711,6 +2736,296 @@ mod tests {
         unsafe {
             libc::close(r);
         }
+    }
+
+    /// True once the pipe has a completion to read, within `ms`.
+    fn completion_ready_within(read_fd: i32, ms: i32) -> bool {
+        let mut pfd = libc::pollfd {
+            fd: read_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd on the stack.
+        let n = unsafe { libc::poll(&mut pfd, 1, ms) };
+        n == 1 && pfd.revents & libc::POLLIN != 0
+    }
+
+    /// Trace id that makes the worker running the unit exit after completing
+    /// it. Compiled only under `cfg(test)`, like the spawn injection.
+    pub(super) const KILL_TRACE: [u8; 16] = *b"gusset:kill-unit";
+
+    /// Kills `n` distinct workers: each runs one marked job, delivers its
+    /// completion and exits. Returns once all `n` are joinable.
+    ///
+    /// The jobs sleep 20 ms, so every submit lands before the first death:
+    /// a submit after a death would reap and respawn it, and the exits
+    /// counted here would no longer be the ones this call caused.
+    fn kill_workers(handle: &Handle, read_fd: i32, n: usize) {
+        let header = CallHeader {
+            trace_id: KILL_TRACE,
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..Default::default()
+        };
+        let before = handle.exited.load(Ordering::Acquire);
+        for _ in 0..n {
+            if let Err(e) = handle.submit(header, &[9, 2], 0) {
+                panic!("submit to kill a worker failed: {e}");
+            }
+        }
+        for _ in 0..n {
+            assert!(
+                completion_ready_within(read_fd, 5_000),
+                "kill job never completed"
+            );
+            drain_ticket(read_fd);
+        }
+        let start = std::time::Instant::now();
+        loop {
+            // Counted and joinable: `exited` rises in the worker's last drop,
+            // a moment before its JoinHandle reports finished, and a reap in
+            // between would find nothing to reap yet.
+            let (finished, len) = {
+                let w = lock_recover(&handle.workers);
+                (w.iter().filter(|h| h.is_finished()).count(), w.len())
+            };
+            let exited = handle.exited.load(Ordering::Acquire);
+            if exited >= before + n && finished >= n {
+                return;
+            }
+            if start.elapsed() > std::time::Duration::from_secs(5) {
+                panic!(
+                    "marked workers never exited: exited {exited} (from {before}), \
+                     {finished} of {len} finished, {n} expected"
+                );
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// A respawn that fails must be retried by the next submit (I4, I5).
+    ///
+    /// `ensure_workers` consumed the `exited` count before spawning the
+    /// replacements. When that spawn failed (the OS out of threads), the count
+    /// was already 0, so every later submit took the fast path and never
+    /// retried: the pool stayed shrunk for the handle's lifetime, and with no
+    /// worker left a submission was accepted, queued, and never run. Covers a
+    /// total failure (pool of 1) and a partial one (pool of 3, one of two
+    /// replacements spawned before the failure).
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn failed_respawn_is_retried_by_the_next_submit() {
+        let _serialise = lock_recover(&INJECT_LOCK);
+        let header = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..Default::default()
+        };
+        // (pool size, workers to kill, spawns allowed before the failure)
+        for (pool, kill, allow) in [(1usize, 1usize, 0i64), (3, 2, 1)] {
+            let (r, w) = make_pipe();
+            let handle = match Handle::open(pool as u32, w) {
+                Ok(h) => h,
+                Err(e) => panic!("open failed: {e}"),
+            };
+            kill_workers(&handle, r, kill);
+
+            arm_spawn_failure(allow);
+            let refused = handle.submit(header, &[0, 1], 0);
+            disarm_spawn_failure();
+            match refused {
+                Ok(_) => panic!("pool {pool}: injected respawn failure did not fail the submit"),
+                Err(e) => assert!(
+                    e.contains("injected spawn failure"),
+                    "unexpected error: {e}"
+                ),
+            }
+
+            // No further worker dies: the only thing that can bring the
+            // pool back is the next submit retrying the respawn. Pool 1 has
+            // no worker left at all, so its unit can only run on a retry.
+            let alive = lock_recover(&handle.workers).len();
+            assert_eq!(
+                alive,
+                pool - kill + allow as usize,
+                "pool {pool}: survivors"
+            );
+
+            if let Err(e) = handle.submit(header, &[0, 1], 0) {
+                panic!("pool {pool}: submit after the failed respawn refused: {e}");
+            }
+            assert!(
+                completion_ready_within(r, 5_000),
+                "pool {pool}: a submission after a failed respawn never ran; {} of {pool} \
+                 workers alive",
+                lock_recover(&handle.workers)
+                    .iter()
+                    .filter(|h| !h.is_finished())
+                    .count()
+            );
+            drain_ticket(r);
+            assert_eq!(
+                lock_recover(&handle.workers).len(),
+                pool,
+                "pool {pool}: the retry must restore the full pool"
+            );
+
+            handle.close();
+            // SAFETY: the read end is still owned by this test.
+            unsafe {
+                libc::close(r);
+            }
+        }
+    }
+
+    /// Respawns and failed opens release every thread, descriptor and mapping
+    /// they create (I4, I5): the dead worker's stack and `sigaltstack`, the
+    /// workers a partial open spawned, and nothing of the caller's pipe.
+    ///
+    /// Needs the test-only kill hook and spawn injection, so it lives here,
+    /// but the counts are process-wide (`/proc/self`) and every other unit
+    /// test runs in parallel. It therefore re-executes this test binary for
+    /// itself alone and measures there.
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[cfg_attr(miri, ignore)]
+    fn respawn_and_failed_open_release_threads_and_mappings() {
+        const CHILD: &str = "GUSSET_RESPAWN_HYGIENE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let exe = match std::env::current_exe() {
+                Ok(p) => p,
+                Err(e) => panic!("current_exe: {e}"),
+            };
+            let out = std::process::Command::new(exe)
+                .args([
+                    "--exact",
+                    "pool::tests::respawn_and_failed_open_release_threads_and_mappings",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .output();
+            let out = match out {
+                Ok(o) => o,
+                Err(e) => panic!("re-exec failed: {e}"),
+            };
+            let text = String::from_utf8_lossy(&out.stdout).into_owned()
+                + &String::from_utf8_lossy(&out.stderr);
+            eprintln!("{text}");
+            assert!(out.status.success(), "isolated run failed");
+            assert!(
+                text.contains("1 passed"),
+                "isolated run did not run the test"
+            );
+            return;
+        }
+
+        fn count(path: &str, lines: bool) -> usize {
+            if lines {
+                match std::fs::read_to_string(path) {
+                    Ok(s) => s.lines().count(),
+                    Err(e) => panic!("{path}: {e}"),
+                }
+            } else {
+                match std::fs::read_dir(path) {
+                    Ok(d) => d.count(),
+                    Err(e) => panic!("{path}: {e}"),
+                }
+            }
+        }
+        let usage = || {
+            (
+                count("/proc/self/fd", false),
+                count("/proc/self/task", false),
+                count("/proc/self/maps", true),
+            )
+        };
+        let settled = |base: (usize, usize, usize)| {
+            let mut now = usage();
+            for _ in 0..200 {
+                if now.0 <= base.0 && now.1 <= base.1 && now.2 <= base.2 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                now = usage();
+            }
+            now
+        };
+        let header = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..Default::default()
+        };
+        let rounds: usize = std::env::var("GUSSET_HYGIENE_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(250);
+
+        let lifetime = || {
+            let (r, w) = make_pipe();
+            let handle = match Handle::open(4, w) {
+                Ok(h) => h,
+                Err(e) => panic!("open failed: {e}"),
+            };
+            // Two workers die and are respawned by the next submit.
+            kill_workers(&handle, r, 2);
+            if let Err(e) = handle.submit(header, &[0, 1], 0) {
+                panic!("submit failed: {e}");
+            }
+            assert!(completion_ready_within(r, 5_000));
+            drain_ticket(r);
+            // One more dies; its respawn fails once, then succeeds.
+            kill_workers(&handle, r, 1);
+            arm_spawn_failure(0);
+            assert!(handle.submit(header, &[0, 1], 0).is_err());
+            disarm_spawn_failure();
+            if let Err(e) = handle.submit(header, &[0, 1], 0) {
+                panic!("submit after a failed respawn failed: {e}");
+            }
+            assert!(completion_ready_within(r, 5_000));
+            drain_ticket(r);
+            assert_eq!(lock_recover(&handle.workers).len(), 4);
+            handle.close();
+            // SAFETY: the read end is still this test's.
+            unsafe {
+                libc::close(r);
+            }
+        };
+        let failed_open = || {
+            let (r, w) = make_pipe();
+            arm_spawn_failure(2);
+            let res = Handle::open(4, w);
+            disarm_spawn_failure();
+            assert!(res.is_err(), "injected spawn failure did not fail the open");
+            assert!(
+                still_the_same_pipe(w, r),
+                "failed open closed the caller's fd"
+            );
+            // SAFETY: both ends are still this test's.
+            unsafe {
+                libc::close(w);
+                libc::close(r);
+            }
+        };
+
+        for _ in 0..50 {
+            lifetime();
+            failed_open();
+        }
+        let base = settled(usage());
+        for _ in 0..rounds {
+            lifetime();
+        }
+        let after_respawns = settled(base);
+        for _ in 0..rounds {
+            failed_open();
+        }
+        let after_failed_opens = settled(base);
+        eprintln!(
+            "respawn hygiene over {rounds} lifetimes (3 respawns each, 1 after a failed \
+             spawn) and {rounds} partially spawned opens: (fds, threads, maps) baseline \
+             {base:?}, after respawns {after_respawns:?}, after failed opens \
+             {after_failed_opens:?}"
+        );
+        assert_eq!(after_respawns, base, "respawned workers leaked resources");
+        assert_eq!(after_failed_opens, base, "partial opens leaked resources");
     }
 
     /// Drain one 8-byte ticket from the completion pipe.

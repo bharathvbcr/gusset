@@ -516,6 +516,13 @@ pub fn set_nonblocking(fd: i32) -> Result<()> {
             target_os = "tvos"
         ))]
         {
+            // Blocking SIGPIPE in each worker's mask is not enough on Darwin:
+            // the macOS "Unit & Pitfalls" job died of SIGPIPE in rust_sigpipe
+            // at b6f5200 and passed once this landed (in merge 24cd387,
+            // untested on Linux, where it compiles out). Asking the kernel
+            // not to raise it for this descriptor turns a write to a closed
+            // pipe into EPIPE whatever the thread's mask. 73 is XNU's
+            // F_SETNOSIGPIPE (sys/fcntl.h); libc exports only SO_NOSIGPIPE.
             const F_SETNOSIGPIPE: libc::c_int = 73;
             if libc::fcntl(fd, F_SETNOSIGPIPE, 1) < 0 {
                 return Err(Error::last_os_error());

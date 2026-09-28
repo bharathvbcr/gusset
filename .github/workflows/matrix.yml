@@ -344,8 +344,14 @@ jobs:
       # 8 MiB on glibc and darwin, so a deep-recursion test anywhere else passes
       # whether or not Gusset set the stack size — it proves the platform, not the
       # runtime. This job is the one place the difference is in play.
+      # Alpine's packaged rust is 1.96.1, below rust-version = "1.97", so
+      # cargo refused to build (exit 101) on every run. rustup installs the
+      # develop channel instead of lowering the floor.
       - name: Install toolchain
-        run: apk add --no-cache build-base rust cargo musl-dev
+        run: |
+          apk add --no-cache build-base musl-dev rustup
+          rustup-init -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Build Rust release
         run: cargo build --release
