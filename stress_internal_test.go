@@ -172,8 +172,9 @@ func expected(h *Handle, err error, shortDeadline, mayPanic bool) bool {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
 		return shortDeadline
-	case strings.Contains(msg, "handle is closed") || strings.Contains(msg, "handle closed") ||
-		strings.Contains(msg, "buffer is freed or closed"):
+	// Every closed-handle error is ErrClosed. Matching it by type rather than
+	// by the two texts proves that under every race the hammer reaches.
+	case errors.Is(err, ErrClosed) || strings.Contains(msg, "buffer is freed or closed"):
 		return s.closed.Load()
 	case errors.Is(err, ErrPanic):
 		return mayPanic

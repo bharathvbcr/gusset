@@ -29,7 +29,30 @@ var (
 	// expired with work still running (an engine that never checks its
 	// JobContext).
 	ErrShutdownIncomplete = ffi.ErrShutdownIncomplete
+
+	// ErrClosed matches every error caused by the handle being closed: a
+	// call made after Close, and a waiter released because Close (or the
+	// completion reader stopping for good) ended its ticket. Its text is the
+	// historical "gusset: handle is closed"; a waiter released by the reader
+	// sees "gusset: handle closed", which also matches with errors.Is.
+	ErrClosed = errors.New("gusset: handle is closed")
 )
+
+// errDrainClosed is the error a waiter gets when the completion reader ends
+// its ticket. It keeps the text those waiters always saw, so substring
+// matchers written against it still work, and unwraps to ErrClosed. One
+// value, not one per waiter: drainPipe builds it under mu.
+var errDrainClosed error = &closedError{msg: "gusset: handle closed"}
+
+// errBufferClosed is Submit's refusal of an input buffer whose handle — the
+// one being called — closed between the handle check and the buffer check.
+// The text is the one that site always returned.
+var errBufferClosed error = &closedError{msg: "gusset: buffer is freed or closed"}
+
+type closedError struct{ msg string }
+
+func (e *closedError) Error() string { return e.msg }
+func (e *closedError) Unwrap() error { return ErrClosed }
 
 // errHandlePoisoned is ErrPoisoned with a message; errors.Is matches by code.
 // The bare sentinel printed as "gusset error [3]: ".

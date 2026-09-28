@@ -102,7 +102,7 @@ func (s *handleState) allocBuffer(n int, budgeted bool) (*Buffer, error) {
 		return nil, fmt.Errorf("gusset: buffer size exceeds maximum %d bytes", MaxBufferBytes)
 	}
 	if s.closed.Load() {
-		return nil, errors.New("gusset: handle is closed")
+		return nil, ErrClosed
 	}
 	if s.poisoned.Load() {
 		return nil, errHandlePoisoned
@@ -117,7 +117,7 @@ func (s *handleState) allocBuffer(n int, budgeted bool) (*Buffer, error) {
 	}
 	if !s.enterCgo() {
 		s.releaseBudget(charge)
-		return nil, errors.New("gusset: handle is closed")
+		return nil, ErrClosed
 	}
 	if s.poisoned.Load() {
 		s.cgoMu.RUnlock()

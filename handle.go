@@ -300,7 +300,7 @@ func drainPipe(s *handleState) {
 			for t, ch := range s.pending {
 				if ch != nil { // nil: already delivered, its waiter is collecting
 					s.pending[t] = nil
-					ch <- callResult{err: errors.New("gusset: handle closed")}
+					ch <- callResult{err: errDrainClosed}
 				}
 			}
 			toFree := s.takeUnclaimedLocked()
@@ -339,7 +339,7 @@ func drainPipe(s *handleState) {
 		// Close took that long. During a close every result is discarded
 		// anyway, so keep reading and hand each waiter "closed".
 		if !s.enterCgo() {
-			s.deliver(ticket, callResult{err: errors.New("gusset: handle closed")}, 0)
+			s.deliver(ticket, callResult{err: errDrainClosed}, 0)
 			continue
 		}
 
@@ -1065,7 +1065,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 	// answer ErrPoisoned, sending a caller whose policy is "on poison, close
 	// and reopen" back to close a handle it had already closed.
 	if s.closed.Load() || s.drainExited.Load() {
-		return 0, errors.New("gusset: handle is closed")
+		return 0, ErrClosed
 	}
 	if s.poisoned.Load() {
 		return 0, errHandlePoisoned
@@ -1085,6 +1085,12 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 			return 0, errors.New("gusset: buffer is not initialized")
 		}
 		if v.freed.Load() || v.state.closed.Load() {
+			// This handle closed since the check above: that is ErrClosed. A
+			// freed buffer, or one from another closed handle, is not: the
+			// handle being called is still open.
+			if v.state == s && s.closed.Load() {
+				return 0, errBufferClosed
+			}
 			return 0, errors.New("gusset: buffer is freed or closed")
 		}
 		if v.state != s {
@@ -1126,7 +1132,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	case <-s.drainDone:
-		return 0, errors.New("gusset: handle is closed")
+		return 0, ErrClosed
 	}
 
 	// In Go, select chooses pseudo-randomly when multiple channels are ready.
@@ -1141,7 +1147,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 	// a job whose completion nobody would ever read.
 	if s.closed.Load() || s.drainExited.Load() {
 		<-s.sem
-		return 0, errors.New("gusset: handle is closed")
+		return 0, ErrClosed
 	}
 	if s.poisoned.Load() {
 		<-s.sem
@@ -1151,7 +1157,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 	stampTimeout(ctx, &header)
 	if !s.enterCgo() {
 		<-s.sem
-		return 0, errors.New("gusset: handle is closed")
+		return 0, ErrClosed
 	}
 	if s.poisoned.Load() {
 		s.cgoMu.RUnlock()
@@ -1229,7 +1235,7 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 		// the destination was filled from freed pages (GOGC=1
 		// TestStress_ConcurrentCallAndCloseRace).
 		if !s.enterCgo() {
-			return nil, errors.New("gusset: handle is closed")
+			return nil, ErrClosed
 		}
 		out := make([]byte, len(res.data))
 		copy(out, res.data)
@@ -1250,7 +1256,7 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 	// waitInternal returning the view and newBufferFromRaw installing it.
 	if !s.enterCgo() {
 		s.discardTake(takeID)
-		return nil, errors.New("gusset: handle is closed")
+		return nil, ErrClosed
 	}
 	if takeID != 0 {
 		buf := newBufferFromRaw(s, takeID, res.data)
@@ -1263,7 +1269,7 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 		buf, err := s.allocBuffer(len(res.data), false)
 		if err != nil {
 			if s.closed.Load() {
-				return nil, errors.New("gusset: handle is closed")
+				return nil, ErrClosed
 			}
 			// This result already exists and has left completed; any error
 			// here would lose it for good. Poison refuses new work only (I2),
@@ -1275,13 +1281,13 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 		b := buf.Bytes()
 		if b == nil {
 			_ = buf.Free()
-			return nil, errors.New("gusset: handle is closed")
+			return nil, ErrClosed
 		}
 		copy(b, res.data)
 		return buf, nil
 	}
 	if s.closed.Load() {
-		return nil, errors.New("gusset: handle is closed")
+		return nil, ErrClosed
 	}
 	// A job returning an empty output (0 bytes) produces a valid empty Buffer
 	return newBufferFromRaw(s, 0, nil), nil
@@ -1310,7 +1316,7 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 
 	if s.closed.Load() || s.drainExited.Load() {
 		s.mu.Unlock()
-		return callResult{}, 0, errors.New("gusset: handle is closed")
+		return callResult{}, 0, ErrClosed
 	}
 
 	// Refuse a ticket this handle is not holding.
