@@ -425,25 +425,45 @@ jobs:
       - name: README numbers are generated, not hand-written
         run: make docs-check
 
-      - name: Build Rust release
-        run: cargo build --release
-
-      - name: Benchmark this revision
-        run: go test -bench . -benchtime=1s -count=10 ./bench/... | tee new.txt
-
-      - name: Benchmark the merge base
+      # Old and new are built once and then run alternately, ten rounds each,
+      # so runner drift (thermal, noisy neighbours, cache state) lands on both
+      # sides instead of on whichever ran second. The base is the PR's base or,
+      # on a push, the commit the push replaced. It used to be
+      # origin/${base_ref || main}, which on a push to main is the pushed
+      # commit itself: the job measured identical code twice in a row and
+      # failed on "+137%" of noise.
+      - name: Build this revision and its base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
-          git stash --include-untracked || true
-          git checkout --detach origin/${{ github.base_ref || 'main' }}
+          set -euo pipefail
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BASE_SHA^{commit}"; then
+            echo "no base revision to compare against; the regression gate cannot run" >&2
+            echo "BENCH_BASE=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "BENCH_BASE=$BASE_SHA" >> "$GITHUB_ENV"
           cargo build --release
-          go test -bench . -benchtime=1s -count=10 ./bench/... | tee old.txt
-          git checkout -
-          git stash pop || true
+          go test -c -o "$RUNNER_TEMP/new.test" ./bench
+          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+          (cd "$RUNNER_TEMP/base" && cargo build --release && go test -c -o "$RUNNER_TEMP/old.test" ./bench)
+
+      - name: Benchmark both, interleaved
+        if: env.BENCH_BASE != ''
+        run: |
+          set -euo pipefail
+          : > old.txt
+          : > new.txt
+          for round in $(seq 10); do
+            (cd "$RUNNER_TEMP/base/bench" && "$RUNNER_TEMP/old.test" -test.run '^$' -test.bench . -test.benchtime=1s -test.count=1) >> old.txt
+            (cd bench && "$RUNNER_TEMP/new.test" -test.run '^$' -test.bench . -test.benchtime=1s -test.count=1) >> new.txt
+          done
 
       # benchstat exits non-zero only on error, so the threshold is applied here:
       # a row that regressed more than 10% fails the job rather than being printed
       # into a log nobody reads.
       - name: Compare and enforce the 10% threshold
+        if: env.BENCH_BASE != ''
         run: |
           benchstat old.txt new.txt | tee delta.txt
           if grep -qE '\+[1-9][0-9]{1,}\.[0-9]+%' delta.txt; then
@@ -451,6 +471,12 @@ jobs:
             exit 1
           fi
           echo "no regression beyond 10%"
+
+      - name: Benchmark this revision
+        if: env.BENCH_BASE == ''
+        run: |
+          cargo build --release
+          go test -bench . -benchtime=1s -count=10 ./bench/... | tee new.txt
 
       # R5's noescape claim is only worth something if the allocation count it
       # enables is actually held.
