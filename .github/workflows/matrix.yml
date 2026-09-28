@@ -451,6 +451,8 @@ jobs:
   fuzz:
     name: Fuzz the FFI boundary
     runs-on: ubuntu-latest
+    # 13 targets; a per-push smoke. The nightly go-fuzz job runs each longer.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -464,7 +466,7 @@ jobs:
       # existed. These use Go's native fuzzing: no dependency to add, and it points
       # straight at the boundary where untrusted bytes actually enter.
       - name: Fuzz
-        run: make fuzz FUZZTIME=120s
+        run: make fuzz FUZZTIME=45s
 
       # A crasher is written to testdata/, which would otherwise be lost with the
       # runner.

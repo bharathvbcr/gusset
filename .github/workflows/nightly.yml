@@ -161,3 +161,63 @@ jobs:
 
       - name: Hammer without the race detector (more operations)
         run: GUSSET_STRESS=5m GOGC=1 go test -run Hammer -count=1 -timeout 30m -v .
+
+  # libFuzzer targets over the Rust side of the boundary (fuzz/, its own
+  # workspace): the log ring and drain, panic-payload truncation, ring slot
+  # records, and arbitrary 40-byte call headers through a real job.
+  cargo-fuzz:
+    name: cargo-fuzz (Rust boundary)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz each target
+        working-directory: fuzz
+        run: |
+          set -euo pipefail
+          for t in log_ring truncate_payload ring_records call_header; do
+            echo "== $t"
+            cargo +nightly fuzz run -O "$t" -- -max_total_time=300 -max_len=4096
+          done
+
+  # The per-push matrix fuzzes each Go target for 45 s; this gives each one
+  # four minutes, where the timing-dependent reader targets find more.
+  go-fuzz:
+    name: Go fuzz (long)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Build Rust release
+        run: |
+          cargo build --release
+          go generate ./internal/ffi
+
+      - name: Fuzz every target
+        run: make fuzz FUZZTIME=240s
+
+      - name: Keep crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-fuzz-crashers
+          path: |
+            testdata/fuzz/
+            tests/pitfalls/testdata/fuzz/
+
