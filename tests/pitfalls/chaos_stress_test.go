@@ -51,7 +51,7 @@ func TestHardening_NilReceiverSafety(t *testing.T) {
 
 // TestPitfall_NilContextIsRejected pins the boundary against a nil context.
 //
-// Call/Submit/Wait pass ctx to select on ctx.Done() and to extractCallHeader.
+// Call/Submit/Wait pass ctx to select on ctx.Done() and to callHeaderIDs and stampTimeout.
 // A nil context panics there and takes the calling goroutine down, which is a
 // process-level failure for a library that exists to keep the Go process alive.
 func TestPitfall_NilContextIsRejected(t *testing.T) {

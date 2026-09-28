@@ -243,11 +243,18 @@ func ContextWithOpcode(ctx context.Context, opcode uint32) context.Context {
 	return context.WithValue(ctx, OpcodeContextKey, opcode)
 }
 
-// extractCallHeader extracts timeout, trace/span context, and opcode if present.
+// callHeaderIDs builds a submission header from the handle's flags and the
+// context's trace carrier and opcode. The timeout is left for stampTimeout.
+//
+// It runs before submit takes a pool permit, because the carrier is caller
+// code. A panic is recovered into an error (readTraceCarrier), but
+// runtime.Goexit — t.Fatal or t.FailNow in a test carrier — cannot be
+// recovered: it unwound through submit with the permit taken, and the permit
+// was gone for the life of the handle (I4). Out here nothing is held yet.
 //
 // An opcode that does not fit in the header's u32 is an error. Narrowing it
 // used to store the low 32 bits, and `1<<32` became 0 — the diagnostic engine.
-func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) (ffi.CallHeader, error) {
+func callHeaderIDs(ctx context.Context, flags uint32, defaultOpcode uint32) (ffi.CallHeader, error) {
 	header := ffi.CallHeader{
 		Flags:    flags,
 		Reserved: defaultOpcode,
@@ -255,17 +262,6 @@ func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) 
 
 	if ctx == nil {
 		return header, nil
-	}
-
-	if err := ctx.Err(); err != nil {
-		header.TimeoutNS = 1 // Already expired or cancelled
-	} else if deadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(deadline)
-		if remaining > 0 {
-			header.TimeoutNS = uint64(remaining.Nanoseconds())
-		} else {
-			header.TimeoutNS = 1 // Already expired
-		}
 	}
 
 	if sc, ok := ctx.Value(SpanContextKey).(TraceCarrier); ok && sc != nil {
@@ -283,6 +279,26 @@ func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) 
 	}
 
 	return header, nil
+}
+
+// stampTimeout sets the header's relative timeout from the context deadline.
+//
+// Submit calls it after the permit wait, so time spent queued on a full pool
+// is not handed to Rust as time the job may still run (R9, I3).
+func stampTimeout(ctx context.Context, header *ffi.CallHeader) {
+	if ctx == nil {
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		header.TimeoutNS = 1 // Already expired or cancelled
+	} else if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining > 0 {
+			header.TimeoutNS = uint64(remaining.Nanoseconds())
+		} else {
+			header.TimeoutNS = 1 // Already expired
+		}
+	}
 }
 
 // readTraceCarrier copies the carrier's ids into the header, turning a panic in

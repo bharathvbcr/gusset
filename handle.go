@@ -1110,6 +1110,13 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 		}
 	}
 
+	// Trace carrier and opcode before the permit: the carrier is caller code,
+	// and a Goexit inside it cannot be recovered (see callHeaderIDs).
+	header, err := callHeaderIDs(ctx, s.callFlags, s.defaultOpcode)
+	if err != nil {
+		return 0, err
+	}
+
 	// Acquire semaphore slot. drainDone closes when the reader stops for good;
 	// after that no completion can be delivered, and a submitter parked here
 	// on a full pool used to stay parked until Close — forever, with a
@@ -1141,11 +1148,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 		return 0, errHandlePoisoned
 	}
 
-	header, err := extractCallHeader(ctx, s.callFlags, s.defaultOpcode)
-	if err != nil {
-		<-s.sem
-		return 0, err
-	}
+	stampTimeout(ctx, &header)
 	if !s.enterCgo() {
 		<-s.sem
 		return 0, errors.New("gusset: handle is closed")
