@@ -1,8 +1,12 @@
 [advisories]
 version = 2
-# Schema v2 has no "warn" level for unmaintained crates. "workspace" makes an
-# unmaintained direct dependency an error; transitive ones are not checked.
-unmaintained = "workspace"
+# Schema v2 has no "warn" level for unmaintained crates. "all" makes any
+# unmaintained crate in the graph an error, transitive ones included: this
+# crate is linked into every host, so a dependency's dependency ships in
+# them too. The graph is six crates and passes; if one ever goes
+# unmaintained, the answer is an explicit, reasoned `ignore` entry, not a
+# narrower scope that stops looking.
+unmaintained = "all"
 
 [licenses]
 # v2 denies unlicensed crates by default (the old `unlicensed = "deny"`).

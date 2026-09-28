@@ -182,6 +182,23 @@ type Handle struct {
 	cleanup runtime.Cleanup
 }
 
+// backstopClosers bounds how many GC-backstop closes run at once.
+//
+// close blocks in cgo while Rust joins the handle's workers, and Go gives
+// every goroutine blocked in cgo its own M, which it keeps afterwards: Go
+// never returns idle Ms to the OS. One GC that found a burst of N dropped
+// handles started N closes and left N threads behind for the life of the
+// process. A close waiting here is a parked goroutine and holds no M, so a
+// burst of any size now costs at most cap(backstopClosers). Explicit Close is
+// not affected; this is only the leak backstop's path.
+var backstopClosers = make(chan struct{}, 4)
+
+func backstopClose(s *handleState) {
+	backstopClosers <- struct{}{}
+	defer func() { <-backstopClosers }()
+	_ = s.close()
+}
+
 // Open opens a new Gusset handle with bounded concurrency (I4).
 func Open(opts ...Option) (*Handle, error) {
 	cfg := handleConfig{poolSize: 4}
@@ -268,7 +285,7 @@ func Open(opts ...Option) (*Handle, error) {
 	// backstops included.
 	h.cleanup = runtime.AddCleanup(h, func(s *handleState) {
 		slog.Warn("gusset: handle was garbage collected without explicit Close()")
-		go func() { _ = s.close() }()
+		go backstopClose(s)
 	}, state)
 
 	// Start pipe reader goroutine (parks on netpoller)

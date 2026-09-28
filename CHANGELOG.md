@@ -14,7 +14,8 @@ Each fix below has a test that fails on the code before it; each commit names th
 - **ABI check:** `tests/header_field_types.rs` compares every struct field's C type with Rust's; a same-width signedness flip passed every earlier check.
 - **Evidence:** a chaos hammer (`stress_internal_test.go`, `GUSSET_STRESS`), a single-handle bookkeeping soak (`GUSSET_SOAK`), a 20k-handle churn test (`GUSSET_CHURN`) that returns goroutines, fds and Rust bytes to baseline, 13 boundary fuzz targets (Go native and `fuzz/` cargo-fuzz), and CI that runs them: the root package under `-race` and `GOGC=1`, a nightly long hammer and fuzz, Miri seed sweeps, ASan over the new tests, and `cargo test --release`.
 - **CI:** the Lint job passes (staticcheck's own suppression syntax; `deny.toml` on the cargo-deny v2 schema).
-- **Known, not changed:** handles collected by the GC in a burst each close on their own goroutine, and Go keeps the threads those joins used (bounded by the burst size). A bounded closer would bring back the cleanup-queue stall the goroutine was added to avoid.
+- **A burst of handles dropped to the GC backstop no longer keeps a thread per handle.** Each backstop close joined its workers in cgo on its own goroutine, and Go never returns the Ms those calls used: 48 handles dropped in one GC left 46 threads behind for the life of the process. Backstop closes now take one of four slots first. The cleanup callback still only spawns a goroutine, so Go's single cleanup queue never waits; the goroutine waits, parked, holding no M. Explicit `Close` is unchanged. `TestBackstop_ABurstOfDroppedHandlesRetainsBoundedThreads` fails against the unbounded closer (+46 threads, bound 16).
+- **`cargo deny` checks transitive crates for maintenance too** (`unmaintained = "all"`, was `"workspace"`): gusset is linked into every host, so a dependency's dependency ships in them.
 
 ## [Unreleased] - 2026-09-27 · One allocation per Call
 
