@@ -1683,6 +1683,11 @@ impl Handle {
         true
     }
 
+    /// Latches the poison flag: a panic was caught on this handle's behalf (I2).
+    pub(crate) fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+    }
+
     /// Checks whether the handle is currently poisoned.
     pub fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)

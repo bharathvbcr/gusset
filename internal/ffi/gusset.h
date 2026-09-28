@@ -10,6 +10,9 @@
 extern "C" {
 #endif
 
+/* FFI_PANIC from any call that takes a GussetHandle (a job's panic reported by
+ * gusset_take, or one caught in the call itself) poisons that handle: from then
+ * on gusset_submit and gusset_buf_alloc return FFI_POISONED. */
 #define FFI_OK 0
 #define FFI_ERR 1
 #define FFI_PANIC 2
