@@ -240,6 +240,11 @@ jobs:
           check 'asmcgocall'    'asmcgocall forbidden (R13)'
           check 'cgocheck=0'    'GODEBUG cgocheck=0 forbidden'
           check 'invalidptr=0'  'GODEBUG invalidptr=0 forbidden'
+          # //nolint is golangci-lint syntax; staticcheck ignores it, so the
+          # suppression silently does nothing and the lint job goes red (SA1012
+          # in tests/pitfalls). Use `//lint:ignore <CHECK> <reason>` on the line
+          # above instead.
+          check '//nolint'      '//nolint is not honored by staticcheck; use //lint:ignore <CHECK> <reason>'
           exit $fail
 
       - name: Cargo Deny (licenses and advisories)

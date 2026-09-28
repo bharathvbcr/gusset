@@ -67,15 +67,19 @@ func TestPitfall_NilContextIsRejected(t *testing.T) {
 		}
 	}()
 
+	//lint:ignore SA1012 a nil context is the input under test
 	if _, err := h.Call(nil, []byte{0}); err == nil {
 		t.Fatal("Call(nil, ...) must be rejected")
 	}
+	//lint:ignore SA1012 a nil context is the input under test
 	if _, err := h.Submit(nil, []byte{0}); err == nil {
 		t.Fatal("Submit(nil, ...) must be rejected")
 	}
+	//lint:ignore SA1012 a nil context is the input under test
 	if _, err := h.Wait(nil, 1); err == nil {
 		t.Fatal("Wait(nil, ...) must be rejected")
 	}
+	//lint:ignore SA1012 a nil context is the input under test
 	if _, err := h.WaitBuffer(nil, 1); err == nil {
 		t.Fatal("WaitBuffer(nil, ...) must be rejected")
 	}

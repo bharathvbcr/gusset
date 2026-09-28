@@ -1,9 +1,12 @@
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+version = 2
+# Schema v2 has no "warn" level for unmaintained crates. "workspace" makes an
+# unmaintained direct dependency an error; transitive ones are not checked.
+unmaintained = "workspace"
 
 [licenses]
-unlicensed = "deny"
+# v2 denies unlicensed crates by default (the old `unlicensed = "deny"`).
+version = 2
 allow = [
     "MIT",
     "Apache-2.0",
@@ -13,6 +16,9 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# gusset-example (publish = false) depends on gusset by path with no version.
+# Path wildcards stay denied for any crate that could be published.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
