@@ -3,7 +3,9 @@ package gusset
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -244,4 +246,63 @@ func TestSpinBudgetFollowsRecentCompletionGaps(t *testing.T) {
 	if tr.gapEWMA != before {
 		t.Fatal("an idle gap was counted as job length")
 	}
+}
+
+// Close while the drain reader is parked behind the ring's waiting flag,
+// idle and with a job still running: Close returns promptly, a waiter gets an
+// answer instead of hanging, and the reader goroutine is gone.
+func TestCloseWhileReaderIsParkedOnTheRing(t *testing.T) {
+	spin := []byte{11, 0, 0, 0, 0}
+	binary.LittleEndian.PutUint32(spin[1:], 2_000_000) // a few ms
+	base := runtime.NumGoroutine()
+	for round := 0; round < 40; round++ {
+		h, err := Open(WithPoolSize(2), WithDiagnosticEngine())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.state.ring.Owner == nil {
+			t.Fatal("no ring attached")
+		}
+		ctx := context.Background()
+		if _, err := h.Call(ctx, []byte{0}); err != nil {
+			t.Fatal(err)
+		}
+		waiting := (*uint32)(unsafe.Add(h.state.ring.Shared, ffi.RingOffWaiting))
+		eventually(t, "reader to park", func() bool { return atomic.LoadUint32(waiting) == 1 })
+
+		var waitErr chan error
+		if round%2 == 1 {
+			// A job in flight while the reader is parked: its completion
+			// races Close.
+			tk, err := h.Submit(ctx, spin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitErr = make(chan error, 1)
+			go func() {
+				_, err := h.Wait(ctx, tk)
+				waitErr <- err
+			}()
+		}
+		done := make(chan error, 1)
+		go func() { done <- h.Close() }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("round %d: Close hung with the reader parked", round)
+		}
+		select {
+		case <-h.state.drainDone:
+		default:
+			t.Fatalf("round %d: drain reader still running after Close", round)
+		}
+		if waitErr != nil {
+			select {
+			case <-waitErr: // a result or "closed"; either is an answer
+			case <-time.After(10 * time.Second):
+				t.Fatalf("round %d: Wait hung across Close", round)
+			}
+		}
+	}
+	eventually(t, "goroutines to wind down", func() bool { return runtime.NumGoroutine() <= base+2 })
 }

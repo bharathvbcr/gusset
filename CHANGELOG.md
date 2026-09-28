@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased] - 2026-09-27 · One allocation per Call
+
+- **Result channels are reused.** Each wait used to create a `chan callResult` with a buffer of one. Because `callResult` holds pointers, that is two allocations, the channel header and its buffer, and they were the only two a `Call` made. A per-handle free list, guarded by the mutex these paths already hold, hands them out again. A channel returns to the list only once it is empty and out of `pending`: every send happens under that mutex and removes the channel first, so no late send can reach a reused one. A channel that still holds a value is dropped rather than reused. The list never exceeds the pool size, because each waiter holds a permit.
+  - Allocations: `Call`, `Submit` + `Wait` and a 64 KiB copy go from 2 to 1 per op. The one left is the result slice handed to the caller. The zero-copy path goes from 4 to 3.
+  - Bytes per `Call`: 160 → 1.
+  - Time (interleaved, n=8): serial `Call` −7.6%, parallel −12%, `Submit` + `Wait` −6.9%. The buffer paths are unchanged within noise.
+  - Tests:
+    - `Call` allocates only its result.
+    - The free list refuses a channel that holds a value and never grows past the pool size.
+    - Both deadline branches (a completion racing the deadline, and abandonment) are driven deterministically and recycle an empty channel, with the correct permit handling.
+    - A 32-goroutine stress with deadlines firing mid-flight gets every caller its own result. Coverage confirms it reaches all three recycle sites.
+    - Two mutants (recycling a channel that holds a value, and skipping the recycle on abandon) are each caught.
+
+## [Unreleased] - 2026-09-27 · Ring hardening, and where Gusset fits the other apps
+
+- **Both completion-record parsers are fuzzed.** `FuzzTicketReaderPipeBytes` feeds arbitrary bytes to the pipe reader. `FuzzRingSlotDecode` puts arbitrary words into a published ring slot. Both run in `make fuzz` and in the CI fuzz job, which grows from about 6 to about 10 minutes (5 targets × 120 s).
+- **Close while the reader is parked on the ring is tested.** `TestCloseWhileReaderIsParkedOnTheRing` runs 40 rounds, idle and with a job in flight. `Close` returns, the waiter gets an answer, and the drain goroutine exits.
+- **`docs/integrations.md`.** DevCouncil's existing integration (the dc-glob fnmatch engine) was checked against this Gusset: the umbrella carries all 17 exports, and `gusset-check` reports ok. The page measures `devmap` at 11–26 ms per query when each query starts a process, against 0.8–18 ms from a warm one. Tracing every Go caller showed that none of them repeats queries: `dcmap` calls `status` once or twice, and the rest run once. Agents already use the warm `devmap mcp`. So neither a warm-process pool nor an in-process Gusset engine would speed anything up there. The first version of the page recommended a pool, and that has been corrected. GitPulse and Manvi could not be inspected in this session.
+
 ## [0.0.2] - 2026-09-26
 
 Release since v0.0.1. The C ABI is 17 exports. Go `Open` publishes completions into a shared-memory ring and uses the pipe as a doorbell; a success of at most 48 bytes is carried in the record. Rust 1.100+ engines can return `Vec<u8, BufferAlloc>` without a copy. On the recorded Linux VM, serial no-op `Call` is 3.73 µs with the ring (`bench/results/linux-amd64-vm/ring-*.txt`).
