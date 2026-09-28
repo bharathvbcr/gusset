@@ -56,6 +56,14 @@ pub struct JobQueue<T> {
     /// `closed`, readable without the lock, so an empty closed queue ends
     /// the poll at once instead of spinning out the window.
     closed: AtomicBool,
+    /// Test-only: how long a polling taker pauses after releasing the lock
+    /// with a unit in hand, and how many times it did. Widens the window
+    /// between the take and the return so the wake decision in `push` can be
+    /// checked deterministically.
+    #[cfg(test)]
+    pause_after_fast_take: Mutex<Option<Duration>>,
+    #[cfg(test)]
+    fast_take_pauses: AtomicUsize,
 }
 
 /// Why a push was refused.
@@ -85,6 +93,10 @@ impl<T> JobQueue<T> {
             spinning: AtomicUsize::new(0),
             queued: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
+            #[cfg(test)]
+            pause_after_fast_take: Mutex::new(None),
+            #[cfg(test)]
+            fast_take_pauses: AtomicUsize::new(0),
         });
         (QueueSender(Arc::clone(&q)), q)
     }
@@ -139,8 +151,16 @@ impl<T> JobQueue<T> {
                 if let Ok(mut st) = self.state.try_lock() {
                     if let Some(item) = st.items.pop_front() {
                         self.queued.store(st.items.len(), Ordering::Release);
-                        drop(st);
+                        // Stop counting as a poller before unlocking. `push`
+                        // reads `spinning` under this lock to decide whether a
+                        // sleeper must be woken; decremented after the unlock,
+                        // a push in between counted this worker as free to take
+                        // the new unit, skipped the wake, and the unit waited
+                        // out this worker's whole job beside an idle sleeper.
                         self.spinning.fetch_sub(1, Ordering::SeqCst);
+                        drop(st);
+                        #[cfg(test)]
+                        self.pause_after_fast_take();
                         return Some(item);
                     }
                 }
@@ -186,6 +206,17 @@ impl<T> JobQueue<T> {
     }
 }
 
+#[cfg(test)]
+impl<T> JobQueue<T> {
+    fn pause_after_fast_take(&self) {
+        let pause = *lock(&self.pause_after_fast_take);
+        if let Some(d) = pause {
+            self.fast_take_pauses.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(d);
+        }
+    }
+}
+
 /// The sending half. Dropping it closes the queue, like dropping the last
 /// `SyncSender`: workers drain what is queued, then see `None`.
 pub struct QueueSender<T>(Arc<JobQueue<T>>);
@@ -217,6 +248,112 @@ mod tests {
         drop(tx);
         assert_eq!(q.pop(), Some(2), "queued units survive close");
         assert_eq!(q.pop(), None);
+    }
+
+    /// A unit pushed while the only polling worker is returning with the
+    /// previous unit must wake a sleeping worker (I3, I4).
+    ///
+    /// `push` wakes a sleeper only for units the polling workers cannot take,
+    /// judged by `spinning`, which it reads under the state lock. A poller
+    /// that had already taken its unit and released the lock was still
+    /// counted until it decremented `spinning` afterwards. A push in that gap
+    /// saw one queued unit and one "spinner", skipped the wake, and the unit
+    /// then waited for the spinner's whole job (or for the next push) while
+    /// another worker slept. With a pool of two and two concurrent calls, the
+    /// second call ran after the first instead of beside it, and a deadline
+    /// shorter than the first job expired with a worker idle.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn push_during_a_fast_take_wakes_a_sleeping_worker() {
+        use std::sync::mpsc;
+        let pause = Duration::from_millis(600);
+        for attempt in 0..200 {
+            let (tx, q) = JobQueue::<u32>::new(8);
+            // The sleeper: parks in the slow path and reports what it gets.
+            let (got_tx, got_rx) = mpsc::channel();
+            let sleeper = {
+                let q = Arc::clone(&q);
+                std::thread::spawn(move || {
+                    while let Some(v) = q.pop() {
+                        if got_tx.send(v).is_err() {
+                            break;
+                        }
+                    }
+                })
+            };
+            let start = Instant::now();
+            while lock(&q.state).sleepers != 1 {
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "sleeper never parked"
+                );
+                std::thread::yield_now();
+            }
+            *lock(&q.pause_after_fast_take) = Some(pause);
+            // A fresh poller, as a worker that has just finished a unit.
+            let poller = {
+                let q = Arc::clone(&q);
+                std::thread::spawn(move || q.pop())
+            };
+            // Seen polling, or already parked (its 50 us window can pass
+            // before this thread looks): then retry the arrangement.
+            let polling = loop {
+                if q.spinning.load(Ordering::SeqCst) == 1 {
+                    break true;
+                }
+                if lock(&q.state).sleepers == 2 {
+                    break false;
+                }
+                std::thread::yield_now();
+            };
+            if !polling {
+                drop(tx);
+                let _ = poller.join();
+                let _ = sleeper.join();
+                continue;
+            }
+            if tx.try_send(1).is_err() {
+                panic!("push A refused");
+            }
+            // Wait for the poller to take A in its polling phase. If its
+            // 50 us window ran out first it took A from the slow path (or the
+            // sleeper did), and this arrangement proves nothing: retry.
+            let start = Instant::now();
+            let fast = loop {
+                if q.fast_take_pauses.load(Ordering::SeqCst) == 1 {
+                    break true;
+                }
+                if q.queued.load(Ordering::SeqCst) == 0
+                    && q.fast_take_pauses.load(Ordering::SeqCst) == 0
+                    && start.elapsed() > Duration::from_millis(50)
+                {
+                    break false;
+                }
+                std::thread::yield_now();
+            };
+            if !fast {
+                drop(tx);
+                let _ = poller.join();
+                let _ = sleeper.join();
+                continue;
+            }
+            // The poller holds A and is between its unlock and its return.
+            if tx.try_send(2).is_err() {
+                panic!("push B refused");
+            }
+            let woke = got_rx.recv_timeout(Duration::from_millis(300));
+            drop(tx);
+            let _ = poller.join();
+            let _ = sleeper.join();
+            assert_eq!(
+                woke.ok(),
+                Some(2),
+                "attempt {attempt}: unit B stayed queued behind a poller that already \
+                 held unit A while a worker slept"
+            );
+            return;
+        }
+        panic!("the poller never took a unit in its polling phase");
     }
 
     #[test]

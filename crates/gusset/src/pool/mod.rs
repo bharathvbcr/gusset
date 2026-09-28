@@ -1640,19 +1640,27 @@ impl Handle {
         }
         // Full, which the Go side's permits rule out: fall back to the pipe.
         // An inline record the pipe was not sized for becomes a stored result.
-        if len > 8 && !self.inline_ok {
+        let landed = if len > 8 && !self.inline_ok {
             if let Some(res) = stored {
                 lock_recover(&self.results).insert(ticket, res);
             }
-            self.publish_completion(ticket, &ticket.to_ne_bytes());
+            self.publish_completion(ticket, &ticket.to_ne_bytes())
         } else {
-            self.publish_completion(ticket, &record[..len]);
+            self.publish_completion(ticket, &record[..len])
+        };
+        // Counted only once the record is in the pipe. The reader polls,
+        // rather than parks, while the counter is ahead of what it has read,
+        // so a spill abandoned on close (or lost to a hard error) counted here
+        // kept it spinning until the descriptor was finally closed.
+        if landed {
+            r.note_overflow();
         }
-        r.note_overflow();
     }
 
     /// Writes a completion ticket (see [`write_completion`] for the retry rule).
-    fn publish_completion(&self, ticket: u64, record: &[u8]) {
+    ///
+    /// Returns whether the record reached the pipe.
+    fn publish_completion(&self, ticket: u64, record: &[u8]) -> bool {
         if let Err(e) = write_completion(
             &self.pipe_write_lock,
             &self.pipe_write_fd,
@@ -1661,7 +1669,7 @@ impl Handle {
             record,
         ) {
             if e.kind() == std::io::ErrorKind::NotConnected {
-                return; // closing: the waiter is told "closed" by Go
+                return false; // closing: the waiter is told "closed" by Go
             }
             crate::ffi::log_event(&format!(
                 "gusset: completion write failed for ticket {}: {}",
@@ -1670,7 +1678,9 @@ impl Handle {
             // EPIPE/EBADF: the reader is gone for good. Refuse new work
             // instead of accepting jobs whose completions cannot be delivered.
             self.poisoned.store(true, Ordering::Release);
+            return false;
         }
+        true
     }
 
     /// Checks whether the handle is currently poisoned.
@@ -2188,6 +2198,302 @@ mod tests {
         // The ring outlives the handle for as long as the reader holds it.
         assert_eq!(ring.shared().capacity, 2);
         // SAFETY: the read end is still owned by this test.
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// Stress: the whole completion path — queue, workers, ring, waiting flag
+    /// and wake tokens — against a reader that follows Go's `ticketReader`
+    /// (`next` / `waitRing` in handle.go): poll the ring, announce `waiting`,
+    /// re-check, park on the pipe, count owed tokens. Submitters hold one of
+    /// `pool_size` permits per job, returned when the reader delivers it, as
+    /// Go's semaphore does (I4). Every completion must arrive, and none may
+    /// sit unread behind a parked reader or wait in the queue beside idle
+    /// workers: the reader parks with a timeout, and a timeout with work
+    /// outstanding fails the test with the state it found.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn ring_reader_protocol_loses_and_strands_nothing_under_load() {
+        use crate::header::GUSSET_FLAG_INLINE_COMPLETION;
+        use std::sync::atomic::Ordering::SeqCst;
+        use std::sync::Condvar;
+        use std::time::{Duration, Instant};
+
+        for &(pool, jobs, submitters) in &[(1usize, 3000u64, 2usize), (2, 6000, 4), (4, 8000, 8)] {
+            let (r, w) = make_pipe();
+            // SAFETY: fcntl on a descriptor this test owns.
+            unsafe { libc::fcntl(r, libc::F_SETFL, libc::O_NONBLOCK) };
+            let handle = match Handle::open(pool as u32, w) {
+                Ok(h) => h,
+                Err(e) => panic!("open failed: {}", e),
+            };
+            let ring = match handle.attach_ring() {
+                Ok(r) => r,
+                Err(e) => panic!("attach failed: {}", e),
+            };
+            let permits = Arc::new((Mutex::new(pool), Condvar::new()));
+            let outstanding: Arc<Mutex<IdMap<u64, Instant>>> =
+                Arc::new(Mutex::new(IdMap::default()));
+            let submitted = Arc::new(AtomicU64::new(0));
+
+            let workers: Vec<_> = (0..submitters)
+                .map(|s| {
+                    let handle = Arc::clone(&handle);
+                    let permits = Arc::clone(&permits);
+                    let outstanding = Arc::clone(&outstanding);
+                    let submitted = Arc::clone(&submitted);
+                    thread::spawn(move || {
+                        let mut i = s as u64;
+                        loop {
+                            let n = submitted.fetch_add(1, SeqCst);
+                            if n >= jobs {
+                                return;
+                            }
+                            {
+                                let (m, cv) = &*permits;
+                                let mut p = lock_recover(m);
+                                while *p == 0 {
+                                    p = cv.wait(p).unwrap_or_else(|e| e.into_inner());
+                                }
+                                *p -= 1;
+                            }
+                            i = i
+                                .wrapping_mul(6364136223846793005)
+                                .wrapping_add(1442695040888963407);
+                            // Mostly instant echoes, some 10 ms sleeps, some
+                            // results that go through take (no inline flag).
+                            let (input, inline): (&[u8], bool) = match (i >> 33) % 20 {
+                                0 => (&[9, 1], true),
+                                1 => (&[0, 7, 7], false),
+                                _ => (&[0, 1], true),
+                            };
+                            let flags = GUSSET_FLAG_DIAGNOSTIC_ENGINE
+                                | if inline {
+                                    GUSSET_FLAG_INLINE_COMPLETION
+                                } else {
+                                    0
+                                };
+                            let header = CallHeader {
+                                flags,
+                                ..Default::default()
+                            };
+                            let mut out = lock_recover(&outstanding);
+                            match handle.submit(header, input, 0) {
+                                Ok(t) => {
+                                    out.insert(t, Instant::now());
+                                }
+                                Err(e) => panic!("submit failed: {}", e),
+                            }
+                        }
+                    })
+                })
+                .collect();
+
+            // The reader, as in handle.go.
+            let mut head = 0u64;
+            let mut buf: Vec<u8> = Vec::new();
+            let mut overflow_seen = 0u64;
+            let mut tokens_owed = 0i64;
+            let mut delivered = 0u64;
+            let shared = ring.shared();
+            let overflow_pending =
+                |seen: u64| (shared.overflow.load(SeqCst).wrapping_sub(seen) as i64) > 0;
+            let read_now = |buf: &mut Vec<u8>| {
+                let mut tmp = [0u8; 512];
+                // SAFETY: non-blocking read into a valid stack buffer.
+                let n = unsafe { libc::read(r, tmp.as_mut_ptr() as *mut libc::c_void, tmp.len()) };
+                if n > 0 {
+                    buf.extend_from_slice(&tmp[..n as usize]);
+                }
+            };
+            let deliver = |ticket: u64, delivered: &mut u64| {
+                if lock_recover(&outstanding).remove(&ticket).is_none() {
+                    // Taken results are stored; inline ones are not.
+                    panic!("completion for unknown or duplicate ticket {ticket}");
+                }
+                let _ = handle.take(ticket);
+                *delivered += 1;
+                let (m, cv) = &*permits;
+                *lock_recover(m) += 1;
+                cv.notify_one();
+            };
+            while delivered < jobs {
+                if let Some(words) = ring.pop_for_test(&mut head) {
+                    deliver(words[0] & !INLINE_RECORD_FLAG, &mut delivered);
+                    continue;
+                }
+                // Whole records already read from the pipe.
+                if buf.len() >= 8 {
+                    let w0 = word(&buf);
+                    let size = if w0 & INLINE_RECORD_FLAG == 0 {
+                        8
+                    } else if buf.len() >= 16 {
+                        16 + (word(&buf[8..]) as usize).div_ceil(8) * 8
+                    } else {
+                        usize::MAX
+                    };
+                    if buf.len() >= size {
+                        buf.drain(..size);
+                        if w0 == 0 {
+                            tokens_owed = (tokens_owed - 1).max(0);
+                        } else {
+                            overflow_seen += 1;
+                            deliver(w0 & !INLINE_RECORD_FLAG, &mut delivered);
+                        }
+                        continue;
+                    }
+                }
+                if overflow_pending(overflow_seen) || tokens_owed > 0 {
+                    let before = buf.len();
+                    read_now(&mut buf);
+                    if buf.len() != before {
+                        continue;
+                    }
+                }
+                // waitRing: announce, re-check, park.
+                shared.waiting.store(1, SeqCst);
+                let mut popped = None;
+                if let Some(words) = ring.pop_for_test(&mut head) {
+                    popped = Some(words);
+                } else if !overflow_pending(overflow_seen) {
+                    let mut pfd = libc::pollfd {
+                        fd: r,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: one valid pollfd.
+                    let rc = unsafe { libc::poll(&mut pfd, 1, 5000) };
+                    if rc == 0 {
+                        let out = lock_recover(&outstanding);
+                        let oldest = out.values().map(|t| t.elapsed()).max();
+                        panic!(
+                            "pool {pool}: reader parked 5 s with {} job(s) outstanding (oldest {:?}); \
+                             ring head ready: {}, waiting={}, overflow={} seen={}, in_flight={}",
+                            out.len(),
+                            oldest,
+                            ring.pop_for_test(&mut head.clone()).is_some(),
+                            shared.waiting.load(SeqCst),
+                            shared.overflow.load(SeqCst),
+                            overflow_seen,
+                            handle.in_flight(),
+                        );
+                    }
+                    read_now(&mut buf);
+                }
+                if shared.waiting.swap(0, SeqCst) == 0 {
+                    tokens_owed += 1;
+                }
+                if let Some(words) = popped {
+                    deliver(words[0] & !INLINE_RECORD_FLAG, &mut delivered);
+                }
+                // Nothing outstanding may be older than the slowest job by much.
+                if let Some(age) = lock_recover(&outstanding)
+                    .values()
+                    .map(|t| t.elapsed())
+                    .max()
+                {
+                    assert!(
+                        age < Duration::from_secs(5),
+                        "pool {pool}: a job has been outstanding for {age:?}"
+                    );
+                }
+            }
+            for s in workers {
+                if s.join().is_err() {
+                    panic!("submitter panicked");
+                }
+            }
+            assert!(lock_recover(&outstanding).is_empty());
+            handle.close();
+            // SAFETY: the read end is still owned by this test.
+            unsafe {
+                libc::close(r);
+            }
+        }
+    }
+
+    /// The ring's overflow counter tells the reader how many records are in
+    /// the pipe for it. A spill that never reached the pipe must not count.
+    ///
+    /// `complete` bumped the counter after every spill attempt, including one
+    /// abandoned because the handle closed while the pipe was full. Go's
+    /// reader then saw `overflowPending()` true with nothing to read: `next`
+    /// found no bytes, `waitRing` returned at once on the same check, and the
+    /// reader spun on non-blocking reads instead of parking, until `close`
+    /// finally closed the descriptor after joining every worker (unbounded
+    /// for an engine that never checks its cancel flag).
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn overflow_counts_only_spills_that_reached_the_pipe() {
+        use crate::header::GUSSET_FLAG_INLINE_COMPLETION;
+        use std::sync::atomic::Ordering::SeqCst;
+        let (r, w) = make_pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {}", e),
+        };
+        let ring = match handle.attach_ring() {
+            Ok(r) => r,
+            Err(e) => panic!("attach failed: {}", e),
+        };
+        let header = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE | GUSSET_FLAG_INLINE_COMPLETION,
+            ..Default::default()
+        };
+        let settle = |h: &Handle| {
+            let start = std::time::Instant::now();
+            while !lock_recover(&h.cancel_flags).is_empty() {
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(10),
+                    "timed out"
+                );
+                std::thread::yield_now();
+            }
+        };
+        // Fill the ring (two slots for a pool of one); nobody consumes it.
+        for i in 0..2u8 {
+            if let Err(e) = handle.submit(header, &[0, i], 0) {
+                panic!("submit failed: {}", e);
+            }
+            settle(&handle);
+        }
+        assert_eq!(ring.shared().overflow.load(SeqCst), 0);
+
+        // Fill the pipe so a spilled record cannot be written. The write end
+        // is non-blocking (open set it), so this stops at EAGAIN.
+        let junk = [0u8; 4096];
+        for chunk in [4096usize, 1] {
+            loop {
+                // SAFETY: writing from a valid buffer to a descriptor this
+                // test created; the handle has not closed it yet.
+                let n = unsafe { libc::write(w, junk.as_ptr() as *const libc::c_void, chunk) };
+                if n < 0 {
+                    break;
+                }
+            }
+        }
+
+        // The third completion finds the ring and the pipe full, and retries.
+        if let Err(e) = handle.submit(header, &[0, 2], 0) {
+            panic!("submit failed: {}", e);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            lock_recover(&handle.cancel_flags).len(),
+            1,
+            "the worker should still be retrying the spill"
+        );
+
+        // Closing abandons the spill: nothing reached the pipe.
+        handle.close();
+        assert_eq!(
+            ring.shared().overflow.load(SeqCst),
+            0,
+            "an abandoned spill was counted as a record in the pipe; the reader \
+             would poll for it instead of parking"
+        );
+        // SAFETY: the read end is still owned by this test; close() took the write end.
         unsafe {
             libc::close(r);
         }
