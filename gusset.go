@@ -264,8 +264,9 @@ func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) 
 	}
 
 	if sc, ok := ctx.Value(SpanContextKey).(TraceCarrier); ok && sc != nil {
-		header.TraceID = sc.TraceID()
-		header.SpanID = sc.SpanID()
+		if err := readTraceCarrier(sc, &header); err != nil {
+			return header, err
+		}
 	}
 
 	if opVal := ctx.Value(OpcodeContextKey); opVal != nil {
@@ -277,6 +278,27 @@ func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) 
 	}
 
 	return header, nil
+}
+
+// readTraceCarrier copies the carrier's ids into the header, turning a panic in
+// its methods into an error.
+//
+// `sc != nil` is true for an interface holding a typed-nil pointer, so a
+// (*T)(nil) stored under SpanContextKey reached TraceID() on a nil receiver and
+// panicked on the caller's goroutine — after submit had taken a pool permit,
+// which a caller that recovered then never got back (I4). A nil check through
+// reflect would refuse carriers whose methods are nil-safe; recovering keeps
+// those working and costs nothing unless a carrier is present. The defer is
+// open-coded, so the hot path stays allocation-free.
+func readTraceCarrier(sc TraceCarrier, header *ffi.CallHeader) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("gusset: trace carrier %T panicked: %v", sc, r)
+		}
+	}()
+	header.TraceID = sc.TraceID()
+	header.SpanID = sc.SpanID()
+	return nil
 }
 
 func opcodeFromContext(opVal any) (uint32, error) {
