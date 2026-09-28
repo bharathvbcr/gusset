@@ -144,7 +144,14 @@ func TestWaiterHandoff_DeliveredResultKeepsItsTakeBufferAcrossTeardown(t *testin
 			s := h.state
 			ticket, want := slowLargeEcho(t, h)
 			ch := registerWaiter(t, s, ticket)
-			res := <-ch
+			// Bounded: a completion that never arrives must fail here with a
+			// reason, not hang until the package's 10-minute timeout.
+			var res callResult
+			select {
+			case res = <-ch:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("no completion for ticket %d within 10 s", ticket)
+			}
 			if res.err != nil {
 				t.Fatal(res.err)
 			}

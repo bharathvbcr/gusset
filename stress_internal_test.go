@@ -207,7 +207,9 @@ func (hm *hammer) ctx(r *rand.Rand) (context.Context, context.CancelFunc, bool) 
 		timer := time.AfterFunc(d, cancel)
 		return ctx, func() { timer.Stop(); cancel() }, true
 	default:
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		// Long enough that only a hang trips it on a loaded CI runner under
+		// -race: every job here is at most 40 ms, so 60 s is not load.
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		return ctx, cancel, false
 	}
 }

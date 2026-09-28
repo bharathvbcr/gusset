@@ -39,6 +39,13 @@ jobs:
       - name: Run Rust tests
         run: cargo test --workspace
 
+      # AGENTS.md: the suite runs in both profiles. dev has overflow checks and
+      # debug_assertions; release is what adopters link. Only the nightly
+      # allocator-api job ran --release before, so the stable release path
+      # adopters on 1.97/1.98 build was never tested in release.
+      - name: Run Rust tests (release)
+        run: cargo test --workspace --release
+
       # 1.27 has the goroutineleak profile, so the leak gate must run here,
       # never skip.
       - name: Run Go test suite (Panic Zoo & Pitfalls)
@@ -310,13 +317,16 @@ jobs:
       - name: Build Rust release
         run: cargo build --release
 
+      # The root package is included: the chaos hammer and the waiter-handoff
+      # and drain-exit tests live there, and race plus GOGC=1 is what found the
+      # use-after-free and double-Wait park they guard (183b007).
       - name: Go Race Detector
-        run: go test -race -v -timeout 20m ./tests/pitfalls/... ./tests/panic_zoo/...
+        run: go test -race -v -timeout 20m . ./tests/pitfalls/... ./tests/panic_zoo/...
 
       # GOGC=1 marks far more aggressively, which is what shakes out a Buffer or
       # Handle being collected while Rust still holds the memory.
       - name: Aggressive GC Test
-        run: GOGC=1 go test -v -count=5 -timeout 20m ./tests/panic_zoo/... ./tests/pitfalls/...
+        run: GOGC=1 go test -v -count=5 -timeout 20m . ./tests/panic_zoo/... ./tests/pitfalls/...
 
   musl:
     name: musl (I5, R8)
