@@ -115,6 +115,15 @@ fn assert_bomb_completes(kind: u8) {
         ),
         other => panic!("expected a contained Panic result, got {:?}", other),
     }
+    // The worker clears the cancel flag just after it publishes the
+    // completion (the shutdown drain counts it until then), so the ticket can
+    // be read a moment before in_flight drops. Asserted once, this failed 13
+    // of 20 dev runs; waiting a bounded time still catches a flag that is
+    // never cleared.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while handle.in_flight() != 0 && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
     assert_eq!(
         handle.in_flight(),
         0,
