@@ -51,7 +51,7 @@ func TestHardening_NilReceiverSafety(t *testing.T) {
 
 // TestPitfall_NilContextIsRejected pins the boundary against a nil context.
 //
-// Call/Submit/Wait pass ctx to select on ctx.Done() and to extractCallHeader.
+// Call/Submit/Wait pass ctx to select on ctx.Done() and to callHeaderIDs and stampTimeout.
 // A nil context panics there and takes the calling goroutine down, which is a
 // process-level failure for a library that exists to keep the Go process alive.
 func TestPitfall_NilContextIsRejected(t *testing.T) {
@@ -67,15 +67,19 @@ func TestPitfall_NilContextIsRejected(t *testing.T) {
 		}
 	}()
 
+	//lint:ignore SA1012 a nil context is the input under test
 	if _, err := h.Call(nil, []byte{0}); err == nil {
 		t.Fatal("Call(nil, ...) must be rejected")
 	}
+	//lint:ignore SA1012 a nil context is the input under test
 	if _, err := h.Submit(nil, []byte{0}); err == nil {
 		t.Fatal("Submit(nil, ...) must be rejected")
 	}
+	//lint:ignore SA1012 a nil context is the input under test
 	if _, err := h.Wait(nil, 1); err == nil {
 		t.Fatal("Wait(nil, ...) must be rejected")
 	}
+	//lint:ignore SA1012 a nil context is the input under test
 	if _, err := h.WaitBuffer(nil, 1); err == nil {
 		t.Fatal("WaitBuffer(nil, ...) must be rejected")
 	}

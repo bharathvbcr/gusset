@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Run by hand on a branch, so a fix is verified before its PR exists.
+  workflow_dispatch:
 
 jobs:
   unit:
@@ -38,6 +40,13 @@ jobs:
       # drain, and the adopter-engine test in crates/gusset-example.
       - name: Run Rust tests
         run: cargo test --workspace
+
+      # AGENTS.md: the suite runs in both profiles. dev has overflow checks and
+      # debug_assertions; release is what adopters link. Only the nightly
+      # allocator-api job ran --release before, so the stable release path
+      # adopters on 1.97/1.98 build was never tested in release.
+      - name: Run Rust tests (release)
+        run: cargo test --workspace --release
 
       # 1.27 has the goroutineleak profile, so the leak gate must run here,
       # never skip.
@@ -233,6 +242,11 @@ jobs:
           check 'asmcgocall'    'asmcgocall forbidden (R13)'
           check 'cgocheck=0'    'GODEBUG cgocheck=0 forbidden'
           check 'invalidptr=0'  'GODEBUG invalidptr=0 forbidden'
+          # //nolint is golangci-lint syntax; staticcheck ignores it, so the
+          # suppression silently does nothing and the lint job goes red (SA1012
+          # in tests/pitfalls). Use `//lint:ignore <CHECK> <reason>` on the line
+          # above instead.
+          check '//nolint'      '//nolint is not honored by staticcheck; use //lint:ignore <CHECK> <reason>'
           exit $fail
 
       - name: Cargo Deny (licenses and advisories)
@@ -310,13 +324,16 @@ jobs:
       - name: Build Rust release
         run: cargo build --release
 
+      # The root package is included: the chaos hammer and the waiter-handoff
+      # and drain-exit tests live there, and race plus GOGC=1 is what found the
+      # use-after-free and double-Wait park they guard (183b007).
       - name: Go Race Detector
-        run: go test -race -v -timeout 20m ./tests/pitfalls/... ./tests/panic_zoo/...
+        run: go test -race -v -timeout 20m . ./tests/pitfalls/... ./tests/panic_zoo/...
 
       # GOGC=1 marks far more aggressively, which is what shakes out a Buffer or
       # Handle being collected while Rust still holds the memory.
       - name: Aggressive GC Test
-        run: GOGC=1 go test -v -count=5 -timeout 20m ./tests/panic_zoo/... ./tests/pitfalls/...
+        run: GOGC=1 go test -v -count=5 -timeout 20m . ./tests/panic_zoo/... ./tests/pitfalls/...
 
   musl:
     name: musl (I5, R8)
@@ -329,8 +346,14 @@ jobs:
       # 8 MiB on glibc and darwin, so a deep-recursion test anywhere else passes
       # whether or not Gusset set the stack size — it proves the platform, not the
       # runtime. This job is the one place the difference is in play.
+      # Alpine's packaged rust is 1.96.1, below rust-version = "1.97", so
+      # cargo refused to build (exit 101) on every run. rustup installs the
+      # develop channel instead of lowering the floor.
       - name: Install toolchain
-        run: apk add --no-cache build-base rust cargo musl-dev
+        run: |
+          apk add --no-cache build-base musl-dev rustup
+          rustup-init -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Build Rust release
         run: cargo build --release
@@ -404,25 +427,45 @@ jobs:
       - name: README numbers are generated, not hand-written
         run: make docs-check
 
-      - name: Build Rust release
-        run: cargo build --release
-
-      - name: Benchmark this revision
-        run: go test -bench . -benchtime=1s -count=10 ./bench/... | tee new.txt
-
-      - name: Benchmark the merge base
+      # Old and new are built once and then run alternately, ten rounds each,
+      # so runner drift (thermal, noisy neighbours, cache state) lands on both
+      # sides instead of on whichever ran second. The base is the PR's base or,
+      # on a push, the commit the push replaced. It used to be
+      # origin/${base_ref || main}, which on a push to main is the pushed
+      # commit itself: the job measured identical code twice in a row and
+      # failed on "+137%" of noise.
+      - name: Build this revision and its base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
-          git stash --include-untracked || true
-          git checkout --detach origin/${{ github.base_ref || 'main' }}
+          set -euo pipefail
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BASE_SHA^{commit}"; then
+            echo "no base revision to compare against; the regression gate cannot run" >&2
+            echo "BENCH_BASE=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "BENCH_BASE=$BASE_SHA" >> "$GITHUB_ENV"
           cargo build --release
-          go test -bench . -benchtime=1s -count=10 ./bench/... | tee old.txt
-          git checkout -
-          git stash pop || true
+          go test -c -o "$RUNNER_TEMP/new.test" ./bench
+          git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+          (cd "$RUNNER_TEMP/base" && cargo build --release && go test -c -o "$RUNNER_TEMP/old.test" ./bench)
+
+      - name: Benchmark both, interleaved
+        if: env.BENCH_BASE != ''
+        run: |
+          set -euo pipefail
+          : > old.txt
+          : > new.txt
+          for round in $(seq 10); do
+            (cd "$RUNNER_TEMP/base/bench" && "$RUNNER_TEMP/old.test" -test.run '^$' -test.bench . -test.benchtime=1s -test.count=1) >> old.txt
+            (cd bench && "$RUNNER_TEMP/new.test" -test.run '^$' -test.bench . -test.benchtime=1s -test.count=1) >> new.txt
+          done
 
       # benchstat exits non-zero only on error, so the threshold is applied here:
       # a row that regressed more than 10% fails the job rather than being printed
       # into a log nobody reads.
       - name: Compare and enforce the 10% threshold
+        if: env.BENCH_BASE != ''
         run: |
           benchstat old.txt new.txt | tee delta.txt
           if grep -qE '\+[1-9][0-9]{1,}\.[0-9]+%' delta.txt; then
@@ -430,6 +473,12 @@ jobs:
             exit 1
           fi
           echo "no regression beyond 10%"
+
+      - name: Benchmark this revision
+        if: env.BENCH_BASE == ''
+        run: |
+          cargo build --release
+          go test -bench . -benchtime=1s -count=10 ./bench/... | tee new.txt
 
       # R5's noescape claim is only worth something if the allocation count it
       # enables is actually held.
@@ -441,6 +490,8 @@ jobs:
   fuzz:
     name: Fuzz the FFI boundary
     runs-on: ubuntu-latest
+    # 13 targets; a per-push smoke. The nightly go-fuzz job runs each longer.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -454,7 +505,7 @@ jobs:
       # existed. These use Go's native fuzzing: no dependency to add, and it points
       # straight at the boundary where untrusted bytes actually enter.
       - name: Fuzz
-        run: make fuzz FUZZTIME=120s
+        run: make fuzz FUZZTIME=45s
 
       # A crasher is written to testdata/, which would otherwise be lost with the
       # runner.

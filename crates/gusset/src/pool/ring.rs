@@ -233,6 +233,43 @@ mod tests {
         assert!(!r.take_waiter(), "one park, one token");
     }
 
+    /// The park handshake is a Dekker pair: never may the reader decide to
+    /// park (it stored `waiting = 1`, then found the slot unpublished) while
+    /// the publisher skips the wake token (it published, then found
+    /// `waiting == 0`). The reader side is written as Go's `sync/atomic`
+    /// behaves: sequentially consistent store and load. Small enough for
+    /// Miri, whose weak-memory emulation is what can expose a missing fence:
+    /// `cargo +nightly miri test -p gusset --lib ring -- -Zmiri-many-seeds`.
+    #[test]
+    fn park_handshake_never_loses_a_wake() {
+        use std::sync::atomic::AtomicBool;
+        let rounds = if cfg!(miri) { 20 } else { 2000 };
+        for _ in 0..rounds {
+            let r = Arc::new(Ring::new(2));
+            let token = Arc::new(AtomicBool::new(false));
+            let producer = {
+                let r = Arc::clone(&r);
+                let token = Arc::clone(&token);
+                std::thread::spawn(move || {
+                    assert!(r.try_publish(&rec(7)));
+                    if r.take_waiter() {
+                        token.store(true, Ordering::SeqCst);
+                    }
+                })
+            };
+            // Reader (Go's waitRing): announce, then re-check the ring.
+            r.shared().waiting.store(1, Ordering::SeqCst);
+            let parks = r.slots[0].seq.load(Ordering::SeqCst) != 1;
+            if producer.join().is_err() {
+                panic!("producer panicked");
+            }
+            assert!(
+                !parks || token.load(Ordering::SeqCst),
+                "reader parked on an unpublished slot and no wake token was written"
+            );
+        }
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)]
     fn concurrent_producers_lose_and_duplicate_nothing() {

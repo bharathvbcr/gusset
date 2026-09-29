@@ -1,0 +1,51 @@
+# libFuzzer targets for the Rust side of the Go/Rust byte boundary.
+#
+# Not a workspace member: its own [workspace] keeps root `cargo build` and
+# `cargo test` untouched. Run with nightly:
+#   cargo +nightly fuzz run log_ring -- -max_total_time=300
+# The properties live in crates/gusset/tests/props/mod.rs and are shared
+# with the seeded tests there.
+[package]
+name = "gusset-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+libc = "0.2"
+gusset = { path = "../crates/gusset" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "log_ring"
+path = "fuzz_targets/log_ring.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "truncate_payload"
+path = "fuzz_targets/truncate_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ring_records"
+path = "fuzz_targets/ring_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "call_header"
+path = "fuzz_targets/call_header.rs"
+test = false
+doc = false
+bench = false

@@ -10,7 +10,7 @@ use crate::header::CallHeader;
 use crate::pool::ring::Ring;
 use crate::pool::{Handle, JobResult};
 use alloc::{get_alloc_stats, AllocStats};
-use guard::{ffi_guard, install_panic_hook, FfiError};
+use guard::{ffi_guard_code, install_panic_hook, FfiError};
 use static_assertions::{assert_eq_align, assert_eq_size};
 use status::{FfiStatus, FFI_BAD_ARG, FFI_ERR, FFI_OK, FFI_PANIC, FFI_POISONED};
 use std::mem::{align_of, size_of};
@@ -145,8 +145,24 @@ fn append_line(buf: &mut Vec<u8>, line: &str) {
     buf.push(b'\n');
 }
 
+/// Passes a handle-bound export's failure code through, poisoning the handle
+/// when it is `FFI_PANIC` (I2).
+///
+/// The engine's own firewall poisons in the worker, but a panic the export's
+/// guard catches — anything unwinding out of the handle's own code on the
+/// caller's thread — was reported as `FFI_PANIC` with the latch left clear, so
+/// the next submit entered Rust again. Only `gusset_take` could already see
+/// `FFI_PANIC` for an engine panic, whose handle is poisoned; storing again is
+/// idempotent.
+fn poison_on_panic(h: &Handle, code: i32) -> i32 {
+    if code == FFI_PANIC {
+        h.poison();
+    }
+    code
+}
+
 // ----------------------------------------------------------------------------
-// The 15 Exported C Functions (R1)
+// The 17 Exported C Functions (R1)
 // ----------------------------------------------------------------------------
 
 /// 1. Exports the ABI layout and sizes of all repr(C) types (R12).
@@ -287,7 +303,7 @@ pub unsafe extern "C" fn gusset_handle_open(
     }
 
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
             let handle = Handle::open(pool_size, pipe_write_fd)?;
             let raw = Arc::into_raw(handle) as *mut Handle;
             ptr::write(out_handle, raw);
@@ -295,12 +311,9 @@ pub unsafe extern "C" fn gusset_handle_open(
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => code,
     }
 }
 
@@ -321,7 +334,7 @@ pub unsafe extern "C" fn gusset_handle_close(handle: *mut Handle, status: *mut F
     }
 
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
             let arc = Arc::from_raw(handle);
             arc.close();
             drop(arc);
@@ -329,12 +342,9 @@ pub unsafe extern "C" fn gusset_handle_close(handle: *mut Handle, status: *mut F
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => code,
     }
 }
 
@@ -410,28 +420,30 @@ pub unsafe extern "C" fn gusset_submit(
     let call_header = unsafe { *header };
 
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
+            #[cfg(test)]
+            fault::trip();
             let ticket = h.submit(call_header, input_slice, buffer_id)?;
             ptr::write(out_ticket, ticket);
             Ok(())
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if h.is_poisoned() {
-        // submit() returns Err(String) for the poison latch, which ffi_guard
-        // maps to FFI_ERR. R10 is FFI_POISONED without a second reading.
-        if !status.is_null() {
-            unsafe {
-                FfiStatus::overwrite(status, FfiStatus::poisoned("handle is poisoned"));
+    match res {
+        Ok(()) => FFI_OK,
+        // The panic's own report comes first; later calls see FFI_POISONED.
+        Err(FFI_PANIC) => poison_on_panic(h, FFI_PANIC),
+        Err(_) if h.is_poisoned() => {
+            // submit() returns Err(String) for the poison latch, which ffi_guard
+            // maps to FFI_ERR. R10 is FFI_POISONED without a second reading.
+            if !status.is_null() {
+                unsafe {
+                    FfiStatus::overwrite(status, FfiStatus::poisoned("handle is poisoned"));
+                }
             }
+            FFI_POISONED
         }
-        FFI_POISONED
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+        Err(code) => code,
     }
 }
 
@@ -461,7 +473,9 @@ pub unsafe extern "C" fn gusset_take(
     let h = unsafe { &*handle };
 
     let res = unsafe {
-        ffi_guard(status, || -> Result<(), FfiError> {
+        ffi_guard_code(status, || -> Result<(), FfiError> {
+            #[cfg(test)]
+            fault::trip();
             let job_result = h.take(ticket).map_err(FfiError::from)?;
             match job_result {
                 JobResult::Ok(data) => {
@@ -523,12 +537,9 @@ pub unsafe extern "C" fn gusset_take(
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => poison_on_panic(h, code),
     }
 }
 
@@ -554,18 +565,17 @@ pub unsafe extern "C" fn gusset_cancel(
 
     let h = unsafe { &*handle };
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
+            #[cfg(test)]
+            fault::trip();
             h.cancel(ticket);
             Ok(())
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => poison_on_panic(h, code),
     }
 }
 
@@ -587,18 +597,17 @@ pub unsafe extern "C" fn gusset_cancel_all(handle: *mut Handle, status: *mut Ffi
 
     let h = unsafe { &*handle };
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
+            #[cfg(test)]
+            fault::trip();
             h.cancel_all();
             Ok(())
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => poison_on_panic(h, code),
     }
 }
 
@@ -644,7 +653,9 @@ pub unsafe extern "C" fn gusset_handle_ring(
 
     let h = unsafe { &*handle };
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
+            #[cfg(test)]
+            fault::trip();
             let ring = h.attach_ring()?;
             ptr::write(out_shared, ring.shared() as *const _ as *const u8);
             ptr::write(out_slots, ring.slots_ptr() as *const u8);
@@ -654,12 +665,9 @@ pub unsafe extern "C" fn gusset_handle_ring(
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => poison_on_panic(h, code),
     }
 }
 
@@ -714,6 +722,11 @@ pub unsafe extern "C" fn gusset_alloc_stats(out: *mut AllocStats) {
 
 /// 12. Drains pending log messages into a provided buffer.
 ///
+/// Hands over whole lines while they fit; a single line longer than `len` is
+/// split on a UTF-8 character boundary. A partial fill
+/// does not mean the ring is empty; a caller flushing it drains until
+/// `*out_written` is 0.
+///
 /// # Safety
 ///
 /// `buf` must point to at least `len` writable bytes. `out_written` must point to valid writable memory.
@@ -730,7 +743,7 @@ pub unsafe extern "C" fn gusset_drain_logs(buf: *mut u8, len: usize, out_written
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut log_buf = LOG_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
-        let count = log_buf.len().min(len);
+        let count = drain_cut(&log_buf, len);
         unsafe {
             ptr::copy_nonoverlapping(log_buf.as_ptr(), buf, count);
         }
@@ -739,6 +752,34 @@ pub unsafe extern "C" fn gusset_drain_logs(buf: *mut u8, len: usize, out_written
     }));
     unsafe {
         ptr::write(out_written, result.unwrap_or(0));
+    }
+}
+
+/// How many bytes of `ring` a drain into `cap` bytes hands over.
+///
+/// Everything, when it fits. Otherwise up to the last whole line that fits,
+/// or, for a single line longer than `cap`, up to the last character boundary.
+/// Cutting at `cap` split lines across drains and characters across chunks,
+/// breaking `append_line`'s promise that Go never sees a partial UTF-8
+/// sequence. A `cap` smaller than the first character still hands over `cap`
+/// raw bytes: returning 0 would read as "empty" and strand the ring.
+fn drain_cut(ring: &[u8], cap: usize) -> usize {
+    let count = ring.len().min(cap);
+    if count == ring.len() {
+        return count;
+    }
+    if let Some(nl) = ring[..count].iter().rposition(|&b| b == b'\n') {
+        return nl + 1;
+    }
+    let mut cut = count;
+    // `ring[cut]` exists: count < ring.len(). A UTF-8 continuation byte is 10xxxxxx.
+    while cut > 0 && ring[cut] & 0xC0 == 0x80 {
+        cut -= 1;
+    }
+    if cut == 0 {
+        count
+    } else {
+        cut
     }
 }
 
@@ -778,7 +819,9 @@ pub unsafe extern "C" fn gusset_buf_alloc(
     }
 
     let res = unsafe {
-        ffi_guard(status, || {
+        ffi_guard_code(status, || {
+            #[cfg(test)]
+            fault::trip();
             let (id, p) = h.buf_alloc_published(len)?;
             ptr::write(out_id, id);
             ptr::write(out_ptr, p);
@@ -786,19 +829,19 @@ pub unsafe extern "C" fn gusset_buf_alloc(
         })
     };
 
-    if res.is_some() {
-        FFI_OK
-    } else if h.is_poisoned() {
-        if !status.is_null() {
-            unsafe {
-                FfiStatus::overwrite(status, FfiStatus::poisoned("handle is poisoned"));
+    match res {
+        Ok(()) => FFI_OK,
+        // The panic's own report comes first; later calls see FFI_POISONED.
+        Err(FFI_PANIC) => poison_on_panic(h, FFI_PANIC),
+        Err(_) if h.is_poisoned() => {
+            if !status.is_null() {
+                unsafe {
+                    FfiStatus::overwrite(status, FfiStatus::poisoned("handle is poisoned"));
+                }
             }
+            FFI_POISONED
         }
-        FFI_POISONED
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+        Err(code) => code,
     }
 }
 
@@ -823,14 +866,17 @@ pub unsafe extern "C" fn gusset_buf_free(
     }
 
     let h = unsafe { &*handle };
-    let res = unsafe { ffi_guard(status, || h.buf_free(id).map_err(FfiError::from)) };
+    let res = unsafe {
+        ffi_guard_code(status, || {
+            #[cfg(test)]
+            fault::trip();
+            h.buf_free(id).map_err(FfiError::from)
+        })
+    };
 
-    if res.is_some() {
-        FFI_OK
-    } else if !status.is_null() {
-        unsafe { (*status).code }
-    } else {
-        FFI_BAD_ARG
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => poison_on_panic(h, code),
     }
 }
 
@@ -892,6 +938,178 @@ mod abi_field_export_tests {
             if offsets[at] != 0xFFFF_FFFF || sizes[at] != 0xFFFF_FFFF {
                 panic!("wrote past the field count at {at}");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod drain_cut_tests {
+    use super::drain_cut;
+
+    #[test]
+    fn a_cut_prefers_lines_then_characters_and_always_progresses() {
+        let ring = "ab\n€€\n".as_bytes();
+        assert_eq!(drain_cut(ring, 64), ring.len(), "everything that fits");
+        assert_eq!(drain_cut(ring, 5), 3, "the last whole line that fits");
+        // "€€\n" alone, cap 4: no newline, and byte 4 is mid-character.
+        let tail = "€€\n".as_bytes();
+        assert_eq!(drain_cut(tail, 4), 3, "back to the character boundary");
+        assert_eq!(drain_cut(tail, 1), 1, "smaller than a character: raw bytes");
+        assert_eq!(
+            drain_cut(&tail[1..], 1),
+            1,
+            "starting mid-character still progresses"
+        );
+        assert_eq!(drain_cut(&[], 8), 0);
+    }
+}
+
+/// Test-only fault point inside the guarded body of every handle-bound export.
+///
+/// Nothing Gusset itself does in those bodies panics on a stable toolchain, but
+/// adopter code can run there: a nightly `std::thread::add_spawn_hook` runs in
+/// the parent during `Builder::spawn`, which `submit` reaches when it respawns a
+/// dead worker. Without injection a regression test could only assert the
+/// success path. Armed per thread, so parallel tests cannot consume each
+/// other's fault.
+#[cfg(test)]
+mod fault {
+    use std::sync::Mutex;
+    use std::thread::{self, ThreadId};
+
+    /// The thread whose next guarded export body panics (R7 keeps this out of
+    /// `thread_local!`; the test calls the export on the arming thread).
+    static ARMED_BY: Mutex<Option<ThreadId>> = Mutex::new(None);
+
+    /// Makes the next guarded export body on this thread panic, once.
+    pub(super) fn arm() {
+        *ARMED_BY.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread::current().id());
+    }
+
+    pub(super) fn trip() {
+        let mut armed = ARMED_BY.lock().unwrap_or_else(|e| e.into_inner());
+        if *armed == Some(thread::current().id()) {
+            *armed = None;
+            drop(armed);
+            panic!("injected fault inside a guarded export");
+        }
+    }
+}
+
+/// I2: a panic the firewall catches inside a handle-bound export poisons the
+/// handle, exactly as a panic inside the engine does. The guard reported
+/// `FFI_PANIC` and left the latch clear, so the next `gusset_submit` and
+/// `gusset_buf_alloc` entered Rust again. A C host (and Go's `NewBuffer`,
+/// `Cancel` and `BufFree`, which do not latch on `ErrPanic`) had nothing
+/// else telling it to stop.
+#[cfg(test)]
+mod export_panic_poisons_tests {
+    use super::*;
+
+    fn open() -> (Arc<Handle>, i32) {
+        let mut fds = [0i32; 2];
+        // SAFETY: `fds` is a valid two-element array for pipe(2) to fill.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe() failed");
+        match Handle::open(1, fds[1]) {
+            Ok(h) => (h, fds[0]),
+            Err(e) => panic!("open failed: {e}"),
+        }
+    }
+
+    fn submit(raw: *mut Handle, st: &mut FfiStatus) -> i32 {
+        let header = CallHeader::default();
+        let mut ticket = 0u64;
+        let input = [0u8; 1];
+        // SAFETY: `raw` is live for the call; every pointer is local.
+        unsafe { gusset_submit(raw, &header, input.as_ptr(), 1, 0, &mut ticket, st) }
+    }
+
+    type Call = fn(*mut Handle, &mut FfiStatus) -> i32;
+
+    fn take(raw: *mut Handle, st: &mut FfiStatus) -> i32 {
+        let (mut id, mut p, mut n) = (0u64, ptr::null_mut(), 0usize);
+        // SAFETY: as in `submit`.
+        unsafe { gusset_take(raw, 1, &mut id, &mut p, &mut n, st) }
+    }
+
+    fn cancel(raw: *mut Handle, st: &mut FfiStatus) -> i32 {
+        // SAFETY: as in `submit`.
+        unsafe { gusset_cancel(raw, 1, st) }
+    }
+
+    fn cancel_all(raw: *mut Handle, st: &mut FfiStatus) -> i32 {
+        // SAFETY: as in `submit`.
+        unsafe { gusset_cancel_all(raw, st) }
+    }
+
+    fn buf_alloc(raw: *mut Handle, st: &mut FfiStatus) -> i32 {
+        let (mut id, mut p) = (0u64, ptr::null_mut());
+        // SAFETY: as in `submit`.
+        unsafe { gusset_buf_alloc(raw, 64, &mut id, &mut p, st) }
+    }
+
+    fn buf_free(raw: *mut Handle, st: &mut FfiStatus) -> i32 {
+        // SAFETY: as in `submit`.
+        unsafe { gusset_buf_free(raw, 1, st) }
+    }
+
+    fn handle_ring(raw: *mut Handle, st: &mut FfiStatus) -> i32 {
+        let mut ring: *const Ring = ptr::null();
+        let (mut sh, mut sl, mut cap) = (ptr::null(), ptr::null(), 0u64);
+        // SAFETY: as in `submit`. The ring is released only if handed out.
+        unsafe {
+            let rc = gusset_handle_ring(raw, &mut ring, &mut sh, &mut sl, &mut cap, st);
+            gusset_ring_release(ring);
+            rc
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_panic_caught_in_any_handle_export_poisons_the_handle() {
+        let calls: [(&str, Call); 7] = [
+            ("gusset_submit", submit),
+            ("gusset_take", take),
+            ("gusset_cancel", cancel),
+            ("gusset_cancel_all", cancel_all),
+            ("gusset_buf_alloc", buf_alloc),
+            ("gusset_buf_free", buf_free),
+            ("gusset_handle_ring", handle_ring),
+        ];
+
+        for (name, call) in calls {
+            let (handle, r) = open();
+            let raw = Arc::as_ptr(&handle) as *mut Handle;
+            let mut st = FfiStatus::ok();
+
+            fault::arm();
+            let rc = call(raw, &mut st);
+            let code = st.code;
+            // SAFETY: the export initialised `st`; every free below likewise.
+            unsafe { gusset_status_free(&mut st) };
+            assert_eq!(
+                rc, FFI_PANIC,
+                "{name}: an injected panic must report FFI_PANIC first"
+            );
+            assert_eq!(
+                code, FFI_PANIC,
+                "{name}: the status must carry the returned code"
+            );
+            assert!(
+                handle.is_poisoned(),
+                "{name}: a panic caught at the boundary left the handle unpoisoned (I2)"
+            );
+
+            let rc = submit(raw, &mut st);
+            unsafe { gusset_status_free(&mut st) };
+            assert_eq!(rc, FFI_POISONED, "{name}: a later submit must fail fast");
+            let rc = buf_alloc(raw, &mut st);
+            unsafe { gusset_status_free(&mut st) };
+            assert_eq!(rc, FFI_POISONED, "{name}: a later buf_alloc must fail fast");
+
+            handle.close();
+            // SAFETY: `r` is the read end this test opened.
+            unsafe { libc::close(r) };
         }
     }
 }

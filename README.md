@@ -217,7 +217,7 @@ Gusset exports strictly 17 C ABI functions from `libgusset.a` (enforced by `test
 - `gusset_cancel_all(handle, status)`: Cancels all pending jobs on handle.
 - `gusset_status_free(status)`: Frees Rust-allocated error message.
 - `gusset_alloc_stats(out)`: Non-allocating allocator accounting export.
-- `gusset_drain_logs(buf, len, out_written)`: Drains log ring buffer.
+- `gusset_drain_logs(buf, len, out_written)`: Drains the log ring in whole lines, never splitting a UTF-8 character; call until `out_written` is 0.
 - `gusset_buf_alloc(handle, len, out_id, out_ptr, status)`: Allocates 64-byte aligned Rust buffer.
 - `gusset_buf_free(handle, id, status)`: Frees Rust-owned buffer.
 
@@ -235,7 +235,7 @@ Gusset exports strictly 17 C ABI functions from `libgusset.a` (enforced by `test
 - `gusset.Threads() int64`
 - `gusset.DrainLogs(buf []byte) int`
 
-Options (not entry points): `WithPoolSize`, `WithDiagnosticEngine`, `WithOpcode` (or `ContextWithOpcode` per call; any integer kind is accepted), and `WithBufferBudget`, which caps live `NewBuffer` bytes per handle so a missing `Free` becomes `ErrBufferBudget` instead of an OOM the Go GC cannot see coming. Errors to match with `errors.Is`: `ErrPanic`, `ErrPoisoned`, `ErrUnknownTicket`, `ErrTicketBusy`, `ErrBufferBudget`, `ErrShutdown` (work cancelled by or refused after `Shutdown`, distinct from `context.Canceled`) and `ErrShutdownIncomplete` (drain budget expired).
+Options (not entry points): `WithPoolSize`, `WithDiagnosticEngine`, `WithOpcode` (or `ContextWithOpcode` per call; any integer kind is accepted), and `WithBufferBudget`, which caps live `NewBuffer` bytes per handle so a missing `Free` becomes `ErrBufferBudget` instead of an OOM the Go GC cannot see coming. Errors to match with `errors.Is`: `ErrClosed` (any call after `Close`, and a waiter whose ticket `Close` or the completion reader ended; the texts "gusset: handle is closed" and "gusset: handle closed" are unchanged), `ErrPanic`, `ErrPoisoned`, `ErrUnknownTicket`, `ErrTicketBusy`, `ErrBufferBudget`, `ErrShutdown` (work cancelled by or refused after `Shutdown`, distinct from `context.Canceled`) and `ErrShutdownIncomplete` (drain budget expired).
 
 A context deadline bounds **the caller**, not the work. `Call` and `Wait` return
 `ctx.Err()` when the context expires, whatever the engine is doing; the pool

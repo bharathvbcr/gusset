@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased] - 2026-09-28 · Four audits of the Go/Rust boundary
+
+Each fix below has a test that fails on the code before it; each commit names the invariant it protects.
+
+- **A waiter no longer reads freed Rust memory as its result (I1, I4).** `Close` and the completion reader's error exit reset the take-buffer map for every ticket, including results already handed to a waiter, which then returned a view of freed memory: right length, wrong bytes. Only unclaimed results are freed now.
+- **A second `Wait` no longer parks forever on a delivered ticket (I4).** Delivery and collection now happen in one critical section, so a second `Wait` gets `ErrTicketBusy`.
+- **No permit can be stranded.** A trace carrier that panics, or calls `runtime.Goexit` (a `t.Fatal` in a test carrier), used to run after the permit was taken; carriers are read before it. Submitters parked when the completion reader dies are refused instead of hanging or being admitted.
+- **Any panic caught at a handle export poisons the handle (I2),** not only an engine panic. With a NULL status, exports now return the guard's code rather than `FFI_BAD_ARG`.
+- **Rust pool:** a push during a worker's fast take now wakes a sleeper (a lost wake-up serialised work), and ring overflow is counted only when the spill reached the pipe (a phantom overflow kept the reader spinning).
+- **Boundary text:** engine error messages are capped on a character boundary like panic payloads; `gusset_drain_logs` hands over whole lines and never splits a UTF-8 character (call until it returns 0); a leaked destructor payload is freed.
+- **`ErrClosed` (new, exported).** Every closed-handle error matches `errors.Is(err, gusset.ErrClosed)`; the historical texts are unchanged, so substring matchers keep working.
+- **ABI check:** `tests/header_field_types.rs` compares every struct field's C type with Rust's; a same-width signedness flip passed every earlier check.
+- **Evidence:** a chaos hammer (`stress_internal_test.go`, `GUSSET_STRESS`), a single-handle bookkeeping soak (`GUSSET_SOAK`), a 20k-handle churn test (`GUSSET_CHURN`) that returns goroutines, fds and Rust bytes to baseline, 13 boundary fuzz targets (Go native and `fuzz/` cargo-fuzz), and CI that runs them: the root package under `-race` and `GOGC=1`, a nightly long hammer and fuzz, Miri seed sweeps, ASan over the new tests, and `cargo test --release`.
+- **CI:** the Lint job passes (staticcheck's own suppression syntax; `deny.toml` on the cargo-deny v2 schema).
+- **A burst of handles dropped to the GC backstop no longer keeps a thread per handle.** Each backstop close joined its workers in cgo on its own goroutine, and Go never returns the Ms those calls used: 48 handles dropped in one GC left 46 threads behind for the life of the process. Backstop closes now take one of four slots first. The cleanup callback still only spawns a goroutine, so Go's single cleanup queue never waits; the goroutine waits, parked, holding no M. Explicit `Close` is unchanged. `TestBackstop_ABurstOfDroppedHandlesRetainsBoundedThreads` fails against the unbounded closer (+46 threads, bound 16).
+- **`cargo deny` checks transitive crates for maintenance too** (`unmaintained = "all"`, was `"workspace"`): gusset is linked into every host, so a dependency's dependency ships in them.
+
 ## [Unreleased] - 2026-09-27 · One allocation per Call
 
 - **Result channels are reused.** Each wait used to create a `chan callResult` with a buffer of one. Because `callResult` holds pointers, that is two allocations, the channel header and its buffer, and they were the only two a `Call` made. A per-handle free list, guarded by the mutex these paths already hold, hands them out again. A channel returns to the list only once it is empty and out of `pending`: every send happens under that mutex and removes the channel first, so no late send can reach a reused one. A channel that still holds a value is dropped rather than reused. The list never exceeds the pool size, because each waiter holds a permit.

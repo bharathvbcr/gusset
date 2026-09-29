@@ -130,7 +130,13 @@ fn truncate_payload(mut s: String) -> String {
 /// it may be another bomb, and recursing into it has no bound.
 pub fn drop_panic_payload(payload: Box<dyn std::any::Any + Send>) {
     if let Err(second) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
-        std::mem::forget(second);
+        // The ordinary `panic!` payloads cannot panic when dropped. Forgetting
+        // them leaked a box on every panicking destructor (Miri flags it).
+        if second.is::<&'static str>() || second.is::<String>() {
+            drop(second);
+        } else {
+            std::mem::forget(second);
+        }
         // The destructor's panic recorded its own location for this thread.
         // Callers take the engine's location before disposing of the payload,
         // so this one is stale and must not be reported for the next panic.
@@ -212,6 +218,23 @@ pub unsafe fn ffi_guard<F, R>(status: *mut FfiStatus, f: F) -> Option<R>
 where
     F: FnOnce() -> Result<R, FfiError>,
 {
+    unsafe { ffi_guard_code(status, f) }.ok()
+}
+
+/// [`ffi_guard`] that also returns the failure code, whatever `status` is.
+///
+/// The status is optional in every export. Reading the code back out of it
+/// left a caller that passes NULL with no code at all, and every export then
+/// reported `FFI_BAD_ARG` for an engine error or a caught panic alike — a C
+/// host never learned its handle was poisoned (I2).
+///
+/// # Safety
+///
+/// Same as [`ffi_guard`].
+pub unsafe fn ffi_guard_code<F, R>(status: *mut FfiStatus, f: F) -> Result<R, i32>
+where
+    F: FnOnce() -> Result<R, FfiError>,
+{
     if !status.is_null() {
         unsafe {
             ptr::write(status, FfiStatus::ok());
@@ -230,11 +253,15 @@ where
                     (*status).code = FFI_OK;
                 }
             }
-            Some(val)
+            Ok(val)
         }
         Ok(Err(ffi_err)) => {
             if !status.is_null() {
-                let bytes = ffi_err.msg.as_bytes();
+                // Capped like a panic payload. An engine's Err(String) is as
+                // unbounded as its input, and Go reads at most 64 KiB of a
+                // status message, cutting wherever that lands.
+                let msg = truncate_payload(ffi_err.msg);
+                let bytes = msg.as_bytes();
                 let (file_ptr, file_len) = match ffi_err.file {
                     Some(f) => (f.as_ptr(), f.len()),
                     None => (c"unknown".as_ptr() as *const u8, 7),
@@ -246,7 +273,7 @@ where
                     );
                 }
             }
-            None
+            Err(ffi_err.code)
         }
         Err(panic_payload) => {
             // Location first: disposing of the payload can panic again and record
@@ -266,7 +293,100 @@ where
                     );
                 }
             }
-            None
+            Err(FFI_PANIC)
         }
+    }
+}
+
+/// Pointer-level tests of the firewall and of status message ownership. Pure
+/// and thread-free, so the nightly Miri job runs them.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffi::gusset_status_free;
+    use crate::ffi::status::FFI_BAD_ARG;
+
+    fn msg_of(st: &FfiStatus) -> String {
+        if st.msg.is_null() {
+            return String::new();
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(st.msg, st.msg_len) };
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    #[test]
+    fn the_code_survives_a_null_status() {
+        let r: Result<(), i32> = unsafe {
+            ffi_guard_code(ptr::null_mut(), || {
+                Err(FfiError {
+                    code: FFI_BAD_ARG,
+                    msg: "x".to_string(),
+                    file: None,
+                    line: 0,
+                })
+            })
+        };
+        assert_eq!(r, Err(FFI_BAD_ARG));
+        let r: Result<(), i32> =
+            unsafe { ffi_guard_code(ptr::null_mut(), || -> Result<(), FfiError> { panic!("p") }) };
+        assert_eq!(r, Err(FFI_PANIC));
+        let r = unsafe { ffi_guard_code(ptr::null_mut(), || Ok(7u8)) };
+        assert_eq!(r, Ok(7));
+    }
+
+    #[test]
+    fn a_status_message_is_freed_once_and_a_second_free_is_a_no_op() {
+        let mut st = FfiStatus::ok();
+        let r: Option<()> = unsafe { ffi_guard(&mut st, || Err(FfiError::from("engine said no"))) };
+        assert!(r.is_none());
+        assert_eq!(st.code, FFI_ERR);
+        assert_eq!(msg_of(&st), "engine said no");
+        unsafe { gusset_status_free(&mut st) };
+        assert!(st.msg.is_null());
+        assert_eq!(st.msg_len, 0);
+        // Miri reports a double free here if the first call left the pointer.
+        unsafe { gusset_status_free(&mut st) };
+        unsafe { gusset_status_free(ptr::null_mut()) };
+    }
+
+    #[test]
+    fn non_string_and_self_destructing_payloads_are_contained() {
+        let mut st = FfiStatus::ok();
+        let _: Option<()> = unsafe {
+            ffi_guard(&mut st, || -> Result<(), FfiError> {
+                std::panic::panic_any(7u8)
+            })
+        };
+        assert_eq!(st.code, FFI_PANIC);
+        assert_eq!(msg_of(&st), "Unknown Rust panic payload");
+        unsafe { gusset_status_free(&mut st) };
+
+        struct Bomb;
+        impl Drop for Bomb {
+            fn drop(&mut self) {
+                panic!("payload destructor");
+            }
+        }
+        let _: Option<()> = unsafe {
+            ffi_guard(&mut st, || -> Result<(), FfiError> {
+                std::panic::panic_any(Bomb)
+            })
+        };
+        assert_eq!(st.code, FFI_PANIC);
+        unsafe { gusset_status_free(&mut st) };
+    }
+
+    #[test]
+    fn an_error_message_is_capped_on_a_char_boundary() {
+        let mut st = FfiStatus::ok();
+        let _: Option<()> = unsafe {
+            ffi_guard(&mut st, || -> Result<(), FfiError> {
+                Err(FfiError::from("€".repeat(20_000)))
+            })
+        };
+        let bytes = unsafe { std::slice::from_raw_parts(st.msg, st.msg_len) };
+        assert!(bytes.len() <= MAX_PANIC_PAYLOAD_BYTES + "... [truncated]".len());
+        assert!(std::str::from_utf8(bytes).is_ok());
+        unsafe { gusset_status_free(&mut st) };
     }
 }

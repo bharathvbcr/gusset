@@ -29,7 +29,30 @@ var (
 	// expired with work still running (an engine that never checks its
 	// JobContext).
 	ErrShutdownIncomplete = ffi.ErrShutdownIncomplete
+
+	// ErrClosed matches every error caused by the handle being closed: a
+	// call made after Close, and a waiter released because Close (or the
+	// completion reader stopping for good) ended its ticket. Its text is the
+	// historical "gusset: handle is closed"; a waiter released by the reader
+	// sees "gusset: handle closed", which also matches with errors.Is.
+	ErrClosed = errors.New("gusset: handle is closed")
 )
+
+// errDrainClosed is the error a waiter gets when the completion reader ends
+// its ticket. It keeps the text those waiters always saw, so substring
+// matchers written against it still work, and unwraps to ErrClosed. One
+// value, not one per waiter: drainPipe builds it under mu.
+var errDrainClosed error = &closedError{msg: "gusset: handle closed"}
+
+// errBufferClosed is Submit's refusal of an input buffer whose handle — the
+// one being called — closed between the handle check and the buffer check.
+// The text is the one that site always returned.
+var errBufferClosed error = &closedError{msg: "gusset: buffer is freed or closed"}
+
+type closedError struct{ msg string }
+
+func (e *closedError) Error() string { return e.msg }
+func (e *closedError) Unwrap() error { return ErrClosed }
 
 // errHandlePoisoned is ErrPoisoned with a message; errors.Is matches by code.
 // The bare sentinel printed as "gusset error [3]: ".
@@ -153,7 +176,12 @@ func Threads() int64 {
 	return -1
 }
 
-// DrainLogs drains logs from the internal Rust log ring into the provided buffer.
+// DrainLogs drains logs from the internal Rust log ring into the provided
+// buffer and returns the bytes written.
+//
+// It hands over whole lines when they fit and never splits a UTF-8
+// character, so a short return does not mean the ring is empty: call again
+// until it returns 0.
 func DrainLogs(buf []byte) int {
 	return ffi.DrainLogs(buf)
 }
@@ -238,11 +266,18 @@ func ContextWithOpcode(ctx context.Context, opcode uint32) context.Context {
 	return context.WithValue(ctx, OpcodeContextKey, opcode)
 }
 
-// extractCallHeader extracts timeout, trace/span context, and opcode if present.
+// callHeaderIDs builds a submission header from the handle's flags and the
+// context's trace carrier and opcode. The timeout is left for stampTimeout.
+//
+// It runs before submit takes a pool permit, because the carrier is caller
+// code. A panic is recovered into an error (readTraceCarrier), but
+// runtime.Goexit — t.Fatal or t.FailNow in a test carrier — cannot be
+// recovered: it unwound through submit with the permit taken, and the permit
+// was gone for the life of the handle (I4). Out here nothing is held yet.
 //
 // An opcode that does not fit in the header's u32 is an error. Narrowing it
 // used to store the low 32 bits, and `1<<32` became 0 — the diagnostic engine.
-func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) (ffi.CallHeader, error) {
+func callHeaderIDs(ctx context.Context, flags uint32, defaultOpcode uint32) (ffi.CallHeader, error) {
 	header := ffi.CallHeader{
 		Flags:    flags,
 		Reserved: defaultOpcode,
@@ -252,20 +287,10 @@ func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) 
 		return header, nil
 	}
 
-	if err := ctx.Err(); err != nil {
-		header.TimeoutNS = 1 // Already expired or cancelled
-	} else if deadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(deadline)
-		if remaining > 0 {
-			header.TimeoutNS = uint64(remaining.Nanoseconds())
-		} else {
-			header.TimeoutNS = 1 // Already expired
-		}
-	}
-
 	if sc, ok := ctx.Value(SpanContextKey).(TraceCarrier); ok && sc != nil {
-		header.TraceID = sc.TraceID()
-		header.SpanID = sc.SpanID()
+		if err := readTraceCarrier(sc, &header); err != nil {
+			return header, err
+		}
 	}
 
 	if opVal := ctx.Value(OpcodeContextKey); opVal != nil {
@@ -277,6 +302,47 @@ func extractCallHeader(ctx context.Context, flags uint32, defaultOpcode uint32) 
 	}
 
 	return header, nil
+}
+
+// stampTimeout sets the header's relative timeout from the context deadline.
+//
+// Submit calls it after the permit wait, so time spent queued on a full pool
+// is not handed to Rust as time the job may still run (R9, I3).
+func stampTimeout(ctx context.Context, header *ffi.CallHeader) {
+	if ctx == nil {
+		return
+	}
+	if err := ctx.Err(); err != nil {
+		header.TimeoutNS = 1 // Already expired or cancelled
+	} else if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining > 0 {
+			header.TimeoutNS = uint64(remaining.Nanoseconds())
+		} else {
+			header.TimeoutNS = 1 // Already expired
+		}
+	}
+}
+
+// readTraceCarrier copies the carrier's ids into the header, turning a panic in
+// its methods into an error.
+//
+// `sc != nil` is true for an interface holding a typed-nil pointer, so a
+// (*T)(nil) stored under SpanContextKey reached TraceID() on a nil receiver and
+// panicked on the caller's goroutine — after submit had taken a pool permit,
+// which a caller that recovered then never got back (I4). A nil check through
+// reflect would refuse carriers whose methods are nil-safe; recovering keeps
+// those working and costs nothing unless a carrier is present. The defer is
+// open-coded, so the hot path stays allocation-free.
+func readTraceCarrier(sc TraceCarrier, header *ffi.CallHeader) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("gusset: trace carrier %T panicked: %v", sc, r)
+		}
+	}()
+	header.TraceID = sc.TraceID()
+	header.SpanID = sc.SpanID()
+	return nil
 }
 
 func opcodeFromContext(opVal any) (uint32, error) {

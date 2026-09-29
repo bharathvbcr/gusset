@@ -10,6 +10,9 @@
 extern "C" {
 #endif
 
+/* FFI_PANIC from any call that takes a GussetHandle (a job's panic reported by
+ * gusset_take, or one caught in the call itself) poisons that handle: from then
+ * on gusset_submit and gusset_buf_alloc return FFI_POISONED. */
 #define FFI_OK 0
 #define FFI_ERR 1
 #define FFI_PANIC 2
@@ -62,6 +65,11 @@ typedef struct {
     uint32_t reserved;
 } CallHeader;
 
+/* Every FfiStatus* parameter may be NULL; the function returns the same code
+ * either way. A non-NULL status is overwritten on every call without freeing
+ * what it held, so pass each failed status to gusset_status_free before
+ * reusing it. msg is UTF-8, at most about 32 KiB, and may contain NUL bytes;
+ * file is static and never freed. */
 typedef struct {
     int32_t code;
     uint8_t* msg;
@@ -137,6 +145,9 @@ void gusset_ring_release(const GussetRing* ring);
 int32_t gusset_cancel_all(GussetHandle* handle, FfiStatus* status);
 void gusset_status_free(FfiStatus* status);
 void gusset_alloc_stats(AllocStats* out);
+/* Copies whole '\n'-terminated lines while they fit; a single line longer
+ * than len is split on a UTF-8 character boundary. A partial fill does not
+ * mean the ring is empty: drain until *out_written is 0. */
 void gusset_drain_logs(uint8_t* buf, size_t len, size_t* out_written);
 int32_t gusset_buf_alloc(GussetHandle* handle, size_t len, uint64_t* out_id, uint8_t** out_ptr, FfiStatus* status);
 int32_t gusset_buf_free(GussetHandle* handle, uint64_t id, FfiStatus* status);

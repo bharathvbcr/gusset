@@ -1,9 +1,16 @@
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+version = 2
+# Schema v2 has no "warn" level for unmaintained crates. "all" makes any
+# unmaintained crate in the graph an error, transitive ones included: this
+# crate is linked into every host, so a dependency's dependency ships in
+# them too. The graph is six crates and passes; if one ever goes
+# unmaintained, the answer is an explicit, reasoned `ignore` entry, not a
+# narrower scope that stops looking.
+unmaintained = "all"
 
 [licenses]
-unlicensed = "deny"
+# v2 denies unlicensed crates by default (the old `unlicensed = "deny"`).
+version = 2
 allow = [
     "MIT",
     "Apache-2.0",
@@ -13,6 +20,9 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# gusset-example (publish = false) depends on gusset by path with no version.
+# Path wildcards stay denied for any crate that could be published.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

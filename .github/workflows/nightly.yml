@@ -51,6 +51,15 @@ jobs:
             exit 1
           fi
 
+      # The ring's reader/publisher handshake is a Dekker pair; one seed can
+      # schedule past a missing fence. park_handshake_never_loses_a_wake failed
+      # on several of 32 seeds with the fence weakened to Acquire, and passed
+      # all 32 on the real code — so the seed sweep is the check, not one run.
+      - name: Miri seed sweep over the ring handshake
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-many-seeds=0..32
+        run: cargo miri test -p gusset --lib pool::ring
+
   sanitizer:
     name: AddressSanitizer
     runs-on: ubuntu-latest
@@ -80,7 +89,9 @@ jobs:
         run: |
           cargo test -p gusset -Zbuild-std \
             --target x86_64-unknown-linux-gnu \
-            --test rust_runtime --test rust_shutdown
+            --test rust_runtime --test rust_shutdown \
+            --test ffi_null_status --test engine_error_bounded \
+            --test drain_logs_boundaries --test counting_global_buffers
 
       # BufferAlloc, Counting as an Allocator, and the adopted buffer's manual
       # dealloc(capacity, 64). Not under -Zbuild-std: the allocator probe cannot
@@ -121,3 +132,92 @@ jobs:
             echo "::error::the cross-free test skipped under -asan; the asan build tag is not set"
             exit 1
           fi
+
+  # The chaos hammer runs 2 s in every `go test`; that is a smoke test. Its
+  # value is duration: the use-after-free and double-Wait park it found
+  # (183b007) showed up a few times per minute, never in 2 s.
+  hammer:
+    name: Chaos hammer (long)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Build Rust release
+        run: |
+          cargo build --release
+          go generate ./internal/ffi
+
+      - name: Hammer under the race detector with GOGC=1
+        run: GUSSET_STRESS=5m GOGC=1 go test -race -run Hammer -count=1 -timeout 30m -v .
+
+      - name: Hammer without the race detector (more operations)
+        run: GUSSET_STRESS=5m GOGC=1 go test -run Hammer -count=1 -timeout 30m -v .
+
+  # libFuzzer targets over the Rust side of the boundary (fuzz/, its own
+  # workspace): the log ring and drain, panic-payload truncation, ring slot
+  # records, and arbitrary 40-byte call headers through a real job.
+  cargo-fuzz:
+    name: cargo-fuzz (Rust boundary)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz each target
+        working-directory: fuzz
+        run: |
+          set -euo pipefail
+          for t in log_ring truncate_payload ring_records call_header; do
+            echo "== $t"
+            cargo +nightly fuzz run -O "$t" -- -max_total_time=300 -max_len=4096
+          done
+
+  # The per-push matrix fuzzes each Go target for 45 s; this gives each one
+  # four minutes, where the timing-dependent reader targets find more.
+  go-fuzz:
+    name: Go fuzz (long)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+
+      - name: Build Rust release
+        run: |
+          cargo build --release
+          go generate ./internal/ffi
+
+      - name: Fuzz every target
+        run: make fuzz FUZZTIME=240s
+
+      - name: Keep crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-fuzz-crashers
+          path: |
+            testdata/fuzz/
+            tests/pitfalls/testdata/fuzz/
+

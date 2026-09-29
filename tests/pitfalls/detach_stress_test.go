@@ -380,7 +380,8 @@ func TestCallBuffer_ZeroCopyRoundTripAndArgumentChecks(t *testing.T) {
 	if _, err := h.CallBuffer(ctx, nil); err == nil {
 		t.Error("CallBuffer(nil) must be refused")
 	}
-	if _, err := h.CallBuffer(nil, in); err == nil { //nolint:staticcheck // nil ctx is the point
+	//lint:ignore SA1012 a nil context is the input under test
+	if _, err := h.CallBuffer(nil, in); err == nil {
 		t.Error("CallBuffer with a nil context must be refused")
 	}
 	if _, err := h.CallBuffer(ctx, in); err == nil {
