@@ -100,11 +100,13 @@ mod on {
             }
             LAST_PTR.store(out.as_ptr() as usize, Ordering::SeqCst);
             Ok(JobOutput::from(out))
-        });
+        })
+        .must("register_engine");
         register_engine(OP_EMPTY_WITH_CAPACITY, |_ctx, _input: &[u8]| {
             let out: Vec<u8, BufferAlloc> = Vec::with_capacity_in(1 << 20, BufferAlloc);
             Ok(JobOutput::from(out))
-        });
+        })
+        .must("register_engine");
     }
 
     fn header(opcode: u32) -> CallHeader {
@@ -378,7 +380,7 @@ mod on {
             h.submit(header(OP_ALLOCATED), &input(64 * 1024, 1), 0)
                 .must("submit");
         }
-        h.close();
+        h.close().must("close");
         drop(h);
         unsafe { libc::close(r) };
         assert_eq!(live(), base, "outputs of a closed handle must be freed");
@@ -395,7 +397,7 @@ mod on {
         let h = Handle::open(4, w).must("open");
         zero_copy_adoption(&h, r);
         stress(&h, r);
-        h.close();
+        h.close().must("close");
         drop(h);
         unsafe { libc::close(r) };
 

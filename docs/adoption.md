@@ -292,12 +292,22 @@ Things worth knowing before you hit them:
   The detection is one cached load. On an AVX-512 host this took Gusset's
   diagnostic kernel from 148 µs to 46 µs per MiB, faster than a
   `target-cpu=native` build (57 µs); see `pool::sys::sum_squares_chunk`.
-- **`Handle.Close` has no budget.** It cancels, then *joins* its worker threads,
-  so its latency is whatever your engine still has left to do — detaching them
-  would leave OS threads running against Rust memory `Close` is about to free.
-  For a bounded shutdown, call `gusset.Shutdown(budget)` first and then `Close`:
-  the cancel has already landed, so the join is short. `Shutdown` is process-wide
-  and one-way.
+- **`Handle.Close` waits at most 30 seconds.** It cancels, then *joins* its
+  worker threads. An engine that checks `JobContext::check` exits promptly and
+  `Close` returns `nil`. If a worker is still inside an engine call at the
+  deadline, `Close` returns an error rather than wedging the caller, and a
+  background thread holds the Rust pool until that worker exits. The error does
+  not mean the engine's memory is freed; do not unmap or reuse anything the
+  engine still references. For a tighter bound, call `gusset.Shutdown(budget)`
+  first and then `Close`: the cancel has already landed, so the join is short.
+  `Shutdown` is process-wide and one-way.
+- **Registering an engine can fail.** `gusset::register_engine` returns an
+  error when the opcode is already registered (the first handler stays) and
+  refuses opcode 0, which dispatch never looks up. Check the result at startup.
+  Handlers are process-global: a panic poisons the handle but leaves the hook,
+  and `clear_engine_handlers` removes it.
+- **A `Submit` nobody waits on does not hold a permit.** The permit returns when
+  the reader stores the result; the result stays until `Wait` or `Close`.
 - **A ticket has exactly one waiter.** `Wait` on an unknown ticket returns
   `ErrUnknownTicket`; a second concurrent `Wait` on the same ticket returns
   `ErrTicketBusy`. Both used to park the caller forever, ignoring its context.

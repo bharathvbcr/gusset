@@ -94,7 +94,12 @@ pub fn install_panic_hook() {
                     list.push((id, loc));
                 }
             }
-            previous(info);
+            if !thread::current()
+                .name()
+                .is_some_and(|n| n.starts_with("gusset-w"))
+            {
+                previous(info);
+            }
         }));
     }
 }

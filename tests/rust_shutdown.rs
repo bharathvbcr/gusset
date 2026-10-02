@@ -95,7 +95,7 @@ fn shutdown_drains_in_flight_work_and_then_refuses_submissions() {
         Err(e) => panic!("submit must work again after re-arming: {}", e),
     }
 
-    handle.close();
+    assert!(handle.close().is_ok());
     let _ = drainer.join();
     unsafe {
         libc::close(r);

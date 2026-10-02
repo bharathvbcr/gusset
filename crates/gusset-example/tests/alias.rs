@@ -23,6 +23,18 @@ use common::{make_pipe, read_ticket};
 const OPCODE_ALIAS_INPUT: u32 = 9101;
 const OPCODE_RETURN_ZERO: u32 = 9102;
 
+trait Must<T> {
+    fn must(self, msg: &str) -> T;
+}
+impl<T, E: std::fmt::Debug> Must<T> for Result<T, E> {
+    fn must(self, msg: &str) -> T {
+        match self {
+            Ok(v) => v,
+            Err(e) => panic!("{msg}: {e:?}"),
+        }
+    }
+}
+
 #[test]
 fn engine_returning_its_input_buffer_is_refused_not_freed_under_the_caller() {
     // The engine echoes whatever id it is told to, via the payload's first 8
@@ -33,7 +45,8 @@ fn engine_returning_its_input_buffer_is_refused_not_freed_under_the_caller() {
         let n = input.len().min(8);
         id[..n].copy_from_slice(&input[..n]);
         Ok::<_, String>(JobOutput::Buffer(u64::from_le_bytes(id)))
-    });
+    })
+    .must("register_engine");
 
     let (r, w) = make_pipe();
     let handle = match Handle::open(1, w) {
@@ -102,7 +115,7 @@ fn engine_returning_its_input_buffer_is_refused_not_freed_under_the_caller() {
     }
 
     let _ = handle.buf_free(input_id);
-    handle.close();
+    handle.close().must("close");
     // SAFETY: the read end is still owned by this test; close() took the write end.
     unsafe {
         libc::close(r);
@@ -115,7 +128,8 @@ fn engine_returning_its_input_buffer_is_refused_not_freed_under_the_caller() {
 fn engine_returning_buffer_id_zero_is_refused() {
     gusset::pool::register_engine(OPCODE_RETURN_ZERO, |_ctx, _input: &[u8]| {
         Ok::<_, String>(JobOutput::Buffer(0))
-    });
+    })
+    .must("register_engine");
 
     let (r, w) = make_pipe();
     let handle = match Handle::open(1, w) {
@@ -146,7 +160,7 @@ fn engine_returning_buffer_id_zero_is_refused() {
         Err(e) => panic!("take failed: {}", e),
     }
 
-    handle.close();
+    handle.close().must("close");
     // SAFETY: the read end is still owned by this test; close() took the write end.
     unsafe {
         libc::close(r);
@@ -178,7 +192,8 @@ fn one_buffer_is_returned_as_an_output_at_most_once() {
     };
     gusset::pool::register_engine(OPCODE_RETURN_CAPTURED, move |_ctx, _input: &[u8]| {
         Ok::<_, String>(JobOutput::Buffer(shared))
-    });
+    })
+    .must("register_engine");
 
     let header = CallHeader {
         reserved: OPCODE_RETURN_CAPTURED,
@@ -225,7 +240,7 @@ fn one_buffer_is_returned_as_an_output_at_most_once() {
     );
 
     let _ = handle.buf_free(shared);
-    handle.close();
+    handle.close().must("close");
     // SAFETY: the read end is still owned by this test; close() took the write end.
     unsafe {
         libc::close(r);
@@ -255,14 +270,16 @@ fn a_buffer_in_use_as_another_units_input_is_refused_as_an_output() {
                 std::thread::sleep(Duration::from_millis(1));
             }
             Ok::<_, String>(vec![input.len() as u8])
-        });
+        })
+        .must("register_engine");
     }
     gusset::pool::register_engine(OPCODE_RETURN_NAMED, |_ctx, input: &[u8]| {
         let mut id = [0u8; 8];
         let n = input.len().min(8);
         id[..n].copy_from_slice(&input[..n]);
         Ok::<_, String>(JobOutput::Buffer(u64::from_le_bytes(id)))
-    });
+    })
+    .must("register_engine");
 
     let (r, w) = make_pipe();
     let handle = match Handle::open(2, w) {
@@ -320,7 +337,7 @@ fn a_buffer_in_use_as_another_units_input_is_refused_as_an_output() {
     }
 
     let _ = handle.buf_free(held);
-    handle.close();
+    handle.close().must("close");
     // SAFETY: the read end is still owned by this test; close() took the write end.
     unsafe {
         libc::close(r);
@@ -341,7 +358,8 @@ fn engine_returning_a_caller_held_buffer_is_refused() {
         let n = input.len().min(8);
         id[..n].copy_from_slice(&input[..n]);
         Ok::<_, String>(JobOutput::Buffer(u64::from_le_bytes(id)))
-    });
+    })
+    .must("register_engine");
 
     let (r, w) = make_pipe();
     let handle = match Handle::open(1, w) {
@@ -393,7 +411,7 @@ fn engine_returning_a_caller_held_buffer_is_refused() {
     }
 
     let _ = handle.buf_free(published);
-    handle.close();
+    handle.close().must("close");
     // SAFETY: the read end is still owned by this test; close() took the write end.
     unsafe {
         libc::close(r);

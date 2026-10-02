@@ -275,17 +275,40 @@ where
 /// Registers an engine execution handler for a specific opcode (R9).
 ///
 /// Dispatches calls matching `ctx.opcode() == opcode` directly to this handler.
-pub fn register_engine<F, R>(opcode: u32, f: F)
+///
+/// Opcode 0 is refused. Dispatch never consults the registry for it: that
+/// opcode is the global handler installed by [`set_engine_handler`], then the
+/// diagnostic engine. Inserting opcode 0 here would report a registration
+/// that no submission can reach.
+///
+/// A second registration of the same opcode is refused and the first handler
+/// stays. Call [`clear_engine_handlers`] before replacing one. The registry
+/// is process-global, shared by every handle.
+pub fn register_engine<F, R>(opcode: u32, f: F) -> Result<(), String>
 where
     F: Fn(&JobContext, &[u8]) -> Result<R, String> + Send + Sync + 'static,
     R: Into<JobOutput> + 'static,
 {
+    if opcode == 0 {
+        return Err(
+            "opcode 0 is the global engine; call set_engine_handler, not register_engine \
+             (a registry entry for opcode 0 is never dispatched)"
+                .to_string(),
+        );
+    }
     let mut w = ENGINE_REGISTRY.write().unwrap_or_else(|e| e.into_inner());
     let map = w.get_or_insert_with(IdMap::default);
+    if map.contains_key(&opcode) {
+        return Err(format!(
+            "opcode {opcode} is already registered; call clear_engine_handlers before \
+             installing a replacement (the existing handler was left in place)"
+        ));
+    }
     map.insert(
         opcode,
         Arc::new(move |ctx, input| f(ctx, input).map(Into::into)),
     );
+    Ok(())
 }
 
 /// Clears all registered engine handlers (global and opcode-specific). Diagnostic/test use.
@@ -1569,51 +1592,164 @@ impl Handle {
         Ok(())
     }
 
-    /// Closes the handle, disconnects workers, joins worker threads, and closes write fd.
-    pub fn close(&self) {
-        if !self.closed.swap(true, Ordering::SeqCst) {
-            // 1. Disconnect sender so workers unblock from recv(). Skipping this
-            // would leave every worker parked forever and hang step 3.
-            lock_recover(&self.sender).take();
+    /// Joins worker threads for at most this long, then returns.
+    ///
+    /// Longer than any diagnostic work unit (mode 9 sleeps at most 2.55 s) so an
+    /// ordinary `Close` still waits the job out. A worker that never returns —
+    /// an engine that ignores `JobContext::check` and does not finish — stops
+    /// blocking the caller here instead of joining forever.
+    pub const CLOSE_JOIN_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
-            // 2. Signal cooperative cancellation to all active jobs
-            self.cancel_all();
+    /// Closes the handle, disconnects workers, joins them, and closes the write fd.
+    ///
+    /// `Ok(())` means every worker this call had to join has exited and the
+    /// completion pipe is closed. `Err` means one was still inside an engine
+    /// call when [`CLOSE_JOIN_BUDGET`] expired. In that case a background
+    /// thread keeps the `Arc` and the `JoinHandle`s until the workers exit, so
+    /// dropping the caller's `Arc` does not free the pool under them. The
+    /// error is the signal that the join did not finish; a second `close` on
+    /// an already-closed handle returns `Ok` and does not repeat it.
+    ///
+    /// `Drop` of a handle that was never closed joins on the dropping thread.
+    /// That path has no strong `Arc` left to hand to a background joiner, so
+    /// it cannot return early without freeing memory a worker is still using.
+    /// Go's `Close` always goes through an explicit close while the `Arc` is
+    /// alive, which is the bounded path.
+    pub fn close(&self) -> Result<(), String> {
+        self.close_within(Self::CLOSE_JOIN_BUDGET)
+    }
 
-            // 3. Join all worker threads to guarantee zero leaked threads.
-            // The workers mutex stays held across join so ensure_workers cannot
-            // spawn replacements onto a handle that is already shutting down.
+    /// [`close`] with an explicit join budget. Tests use a short one.
+    fn close_within(&self, budget: std::time::Duration) -> Result<(), String> {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        // 1. Disconnect sender so workers unblock from pop(). Skipping this
+        // would leave every worker parked forever and hang the join.
+        lock_recover(&self.sender).take();
+
+        // 2. Signal cooperative cancellation to all active jobs.
+        self.cancel_all();
+
+        // 3. Take the worker threads. `closed` is already set, and
+        // `ensure_workers` re-checks it under this same mutex, so the lock
+        // does not have to be held for the whole join: a spawn that arrives
+        // after the drain sees `closed` and returns.
+        let handles: Vec<_> = {
             let mut workers = lock_recover(&self.workers);
-            let handles: Vec<_> = workers.drain(..).collect();
-            let me = thread::current().id();
-            for handle in handles {
-                // A worker can run this close itself: it upgrades its Weak to
-                // publish a completion, and if every other Arc was dropped
-                // meanwhile, its upgrade is the last one and Drop runs here, on
-                // that worker. Joining our own thread fails with EDEADLK and
-                // std panics outside any firewall, detaching the rest of the
-                // pool and leaking the pipe. The sender is already gone, so this
-                // worker exits on its next recv; the others are still joined.
-                if handle.thread().id() == me {
-                    continue;
-                }
-                // A worker that died hands back its panic payload here, and
-                // `close` runs under ffi_guard inside an extern "C" export:
-                // a payload whose destructor panics must not unwind from it.
+            workers.drain(..).collect()
+        };
+        self.join_workers(handles, budget)
+    }
+
+    /// Joins `handles`, skipping this thread, within `budget` when a strong
+    /// `Arc` can outlive the call.
+    fn join_workers(
+        &self,
+        handles: Vec<thread::JoinHandle<()>>,
+        budget: std::time::Duration,
+    ) -> Result<(), String> {
+        let me = thread::current().id();
+        let mut foreign = Vec::with_capacity(handles.len());
+        for handle in handles {
+            // A worker can run this close itself: it upgrades its Weak to
+            // publish a completion, and if every other Arc was dropped
+            // meanwhile, Drop runs here, on that worker. Joining our own
+            // thread fails with EDEADLK and std panics outside any firewall.
+            // Dropping the JoinHandle detaches it. The sender is already
+            // gone, so it exits on its next pop.
+            if handle.thread().id() == me {
+                continue;
+            }
+            foreign.push(handle);
+        }
+        if foreign.is_empty() {
+            self.release_pipe();
+            return Ok(());
+        }
+
+        // Inside Drop the strong count is already zero, so nothing can keep
+        // the allocation alive on another thread. Join here. Go's Close
+        // never arrives through Drop: it holds the Arc across the call.
+        let Some(keeper) = lock_recover(&self.self_weak).upgrade() else {
+            for handle in foreign {
                 if let Err(payload) = handle.join() {
                     drop_panic_payload(payload);
                 }
             }
-            drop(workers);
+            self.release_pipe();
+            return Ok(());
+        };
 
-            // 4. Release the completion pipe now that every worker has finished.
-            // The swap makes this a once-only transfer: a second close, or a Drop
-            // following an explicit close, finds -1 and closes nothing.
-            // Under pipe_write_lock, so no writer holds a loaded copy of the
-            // number while it is closed and possibly reused.
-            let _w = lock_recover(&self.pipe_write_lock);
-            let fd = self.pipe_write_fd.swap(-1, Ordering::AcqRel);
-            sys::close_fd(fd);
+        // The JoinHandles live in an Arc so a failed `spawn` — which drops the
+        // closure — cannot detach them. The joiner takes them out; this thread
+        // only takes them if the joiner never started.
+        let slots = Arc::new(Mutex::new(foreign));
+        let slots_for_joiner = Arc::clone(&slots);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let spawned = thread::Builder::new()
+            .name("gusset-close".to_string())
+            .spawn(move || {
+                let handles = std::mem::take(&mut *lock_recover(&slots_for_joiner));
+                for handle in handles {
+                    // A worker that died hands back its panic payload here, and
+                    // close runs under ffi_guard inside an extern "C" export: a
+                    // payload whose destructor panics must not unwind out of the
+                    // joiner into the process.
+                    if let Err(payload) = handle.join() {
+                        drop_panic_payload(payload);
+                    }
+                }
+                keeper.release_pipe();
+                let _ = tx.send(());
+            });
+        let joiner = match spawned {
+            Ok(j) => j,
+            Err(_) => {
+                // `keeper` died with the closure. The caller's Arc is still
+                // alive, and the JoinHandles are still in `slots`.
+                let handles = std::mem::take(&mut *lock_recover(&slots));
+                for handle in handles {
+                    if let Err(payload) = handle.join() {
+                        drop_panic_payload(payload);
+                    }
+                }
+                self.release_pipe();
+                return Ok(());
+            }
+        };
+        match rx.recv_timeout(budget) {
+            Ok(()) => {
+                // The joiner already released the pipe and dropped `keeper`.
+                let _ = joiner.join();
+                Ok(())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Detach the joiner. It still owns `keeper` and the
+                // JoinHandles, so the pool is not freed under a live worker
+                // and the threads are not detached from their results.
+                drop(joiner);
+                Err(format!(
+                    "close: workers still running after {budget:?}; the pool stays \
+                     alive until they exit and its memory is not freed under them"
+                ))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = joiner.join();
+                Err("close: joiner exited before the workers were joined".to_string())
+            }
         }
+    }
+
+    /// Closes the completion-pipe write end once. A second call finds -1.
+    ///
+    /// Under `pipe_write_lock`, so no writer holds a loaded copy of the number
+    /// while it is closed and possibly reused.
+    fn release_pipe(&self) {
+        let _w = lock_recover(&self.pipe_write_lock);
+        let fd = self.pipe_write_fd.swap(-1, Ordering::AcqRel);
+        sys::close_fd(fd);
     }
 
     /// Attaches the shared-memory completion ring (see [`ring`]). From here
@@ -1748,7 +1884,10 @@ fn materialize_result(handle: &Handle, result: JobResult) -> JobResult {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        self.close();
+        // Already closed when a timed-out close parked an Arc on the joiner.
+        // A handle dropped without an explicit close joins on this thread:
+        // the strong count is zero, so close_within cannot park a clone.
+        let _ = self.close();
     }
 }
 
@@ -1760,6 +1899,27 @@ impl Drop for Handle {
 #[allow(unsafe_code)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    trait Must<T> {
+        fn must(self, msg: &str) -> T;
+    }
+    impl<T, E: std::fmt::Debug> Must<T> for Result<T, E> {
+        fn must(self, msg: &str) -> T {
+            match self {
+                Ok(v) => v,
+                Err(e) => panic!("{msg}: {e:?}"),
+            }
+        }
+    }
+    impl<T> Must<T> for Option<T> {
+        fn must(self, msg: &str) -> T {
+            match self {
+                Some(v) => v,
+                None => panic!("{msg}: None"),
+            }
+        }
+    }
 
     /// Number of further worker spawns to allow before failing, or -1 to disable.
     ///
@@ -1780,6 +1940,13 @@ mod tests {
 
     /// Serialises the tests that arm the injector.
     static INJECT_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Serialises tests that install or clear the process-global engine registry.
+    ///
+    /// `cargo test` runs this module's tests in parallel, and the registry is
+    /// one map for the process. A test that calls `clear_engine_handlers`
+    /// would otherwise delete an opcode another test is still dispatching.
+    static REGISTRY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn arm_spawn_failure(after: i64) {
         *lock_recover(&ARMED_BY) = Some(thread::current().id());
@@ -1947,7 +2114,7 @@ mod tests {
             WORKER_STACK_SIZE
         );
 
-        handle.close();
+        handle.close().must("close");
         // SAFETY: the read end is still owned by this test; close() took the write end.
         unsafe {
             libc::close(r);
@@ -2017,7 +2184,7 @@ mod tests {
             assert_eq!(word(&read_exact_fd(r, 8)), ticket, "expected a bare ticket");
             assert!(matches!(handle.take(ticket), Ok(JobResult::Ok(ref v)) if v == input));
         }
-        handle.close();
+        handle.close().must("close");
         // SAFETY: the read end is still owned by this test.
         unsafe {
             libc::close(r);
@@ -2118,7 +2285,7 @@ mod tests {
         bare(t);
         assert!(matches!(handle.take(t), Ok(JobResult::Panic { .. })));
 
-        handle.close();
+        handle.close().must("close");
         // SAFETY: the read end is still owned by this test.
         unsafe {
             libc::close(r);
@@ -2224,7 +2391,7 @@ mod tests {
         assert_eq!(words[0], t5, "a panic is a bare ticket");
         assert!(matches!(handle.take(t5), Ok(JobResult::Panic { .. })));
 
-        handle.close();
+        handle.close().must("close");
         // The ring outlives the handle for as long as the reader holds it.
         assert_eq!(ring.shared().capacity, 2);
         // SAFETY: the read end is still owned by this test.
@@ -2435,7 +2602,7 @@ mod tests {
                 }
             }
             assert!(lock_recover(&outstanding).is_empty());
-            handle.close();
+            handle.close().must("close");
             // SAFETY: the read end is still owned by this test.
             unsafe {
                 libc::close(r);
@@ -2516,7 +2683,7 @@ mod tests {
         );
 
         // Closing abandons the spill: nothing reached the pipe.
-        handle.close();
+        handle.close().must("close");
         assert_eq!(
             ring.shared().overflow.load(SeqCst),
             0,
@@ -2564,7 +2731,7 @@ mod tests {
             "a failed submit must not leak a cancel flag; shutdown drain waits on in_flight"
         );
 
-        handle.close();
+        handle.close().must("close");
         // SAFETY: the read end is still owned by this test; close() took the write end.
         unsafe {
             libc::close(r);
@@ -2604,7 +2771,7 @@ mod tests {
             "the live buffer must still be the one issued before the ceiling"
         );
 
-        handle.close();
+        handle.close().must("close");
         unsafe {
             libc::close(r);
         }
@@ -2664,8 +2831,8 @@ mod tests {
                 assert!(seen.insert(t), "ticket {t} was issued by two handles");
             }
         }
-        a.close();
-        b.close();
+        a.close().must("close");
+        b.close().must("close");
         unsafe {
             libc::close(ra);
             libc::close(rb);
@@ -2732,7 +2899,7 @@ mod tests {
         }
         assert!(accepted > 0, "the queue should accept at least one job");
 
-        handle.close();
+        handle.close().must("close");
         unsafe {
             libc::close(r);
         }
@@ -2868,7 +3035,7 @@ mod tests {
                 "pool {pool}: the retry must restore the full pool"
             );
 
-            handle.close();
+            handle.close().must("close");
             // SAFETY: the read end is still owned by this test.
             unsafe {
                 libc::close(r);
@@ -2982,7 +3149,7 @@ mod tests {
             assert!(completion_ready_within(r, 5_000));
             drain_ticket(r);
             assert_eq!(lock_recover(&handle.workers).len(), 4);
-            handle.close();
+            handle.close().must("close");
             // SAFETY: the read end is still this test's.
             unsafe {
                 libc::close(r);
@@ -3111,7 +3278,7 @@ mod tests {
         }
 
         let _ = handle.buf_free(buf_id);
-        handle.close();
+        handle.close().must("close");
         unsafe {
             libc::close(r);
         }
@@ -3128,12 +3295,14 @@ mod tests {
         use crate::ffi::status::{FfiStatus, FFI_OK};
 
         const OPCODE_RETURN_EXPORTED: u32 = 9201;
+        let _registry = lock_recover(&REGISTRY_TEST_LOCK);
         register_engine(OPCODE_RETURN_EXPORTED, |_ctx, input: &[u8]| {
             let mut raw = [0u8; 8];
             let n = input.len().min(8);
             raw[..n].copy_from_slice(&input[..n]);
             Ok::<_, String>(JobOutput::Buffer(u64::from_le_bytes(raw)))
-        });
+        })
+        .must("register opcode");
 
         let (r, w) = make_pipe();
         let handle = match Handle::open(1, w) {
@@ -3192,7 +3361,7 @@ mod tests {
         }
 
         let _ = handle.buf_free(id);
-        handle.close();
+        handle.close().must("close");
         unsafe {
             libc::close(r);
         }
@@ -3229,8 +3398,237 @@ mod tests {
             ),
         }
 
-        handle.close();
+        handle.close().must("close");
         // SAFETY: the read end is still owned by this test; close() took the write end.
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// Opcode 0 never reaches the registry. Registering it must fail, and the
+    /// handler must not become the one opcode 0 actually runs.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn register_engine_rejects_opcode_zero() {
+        let _registry = lock_recover(&REGISTRY_TEST_LOCK);
+        let marker = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&marker);
+        let err = match register_engine(0, move |_ctx, _input: &[u8]| {
+            seen.store(true, Ordering::Release);
+            Ok(Vec::<u8>::new())
+        }) {
+            Ok(()) => panic!("opcode 0 was reported as registered"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("opcode 0"),
+            "refusal must name opcode 0, got: {err}"
+        );
+
+        let (r, w) = make_pipe();
+        let handle = Handle::open(1, w).must("open");
+        let header = CallHeader::default();
+        let ticket = handle.submit(header, b"nope", 0).must("submit");
+        assert_eq!(drain_ticket(r), ticket);
+        match handle.take(ticket).must("take") {
+            JobResult::Err(msg) => assert!(
+                msg.contains("no engine handler registered"),
+                "opcode 0 must not run the refused handler, got: {msg}"
+            ),
+            other => panic!("opcode 0 ran a handler: {other:?}"),
+        }
+        assert!(
+            !marker.load(Ordering::Acquire),
+            "the refused opcode-0 handler ran"
+        );
+        handle.close().must("close");
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// A second `register_engine` for the same opcode must not replace the first.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn register_engine_does_not_overwrite_an_opcode() {
+        let _registry = lock_recover(&REGISTRY_TEST_LOCK);
+        const OPCODE: u32 = 9301;
+        // A previous run of this test in the same process (no process-per-test)
+        // already holds the opcode. `clear_engine_handlers` is the documented
+        // replacement, and this lock keeps that from racing other tests.
+        clear_engine_handlers();
+        register_engine(OPCODE, |_ctx, _input: &[u8]| Ok(vec![1u8])).must("first");
+        let second = register_engine(OPCODE, |_ctx, _input: &[u8]| Ok(vec![2u8]));
+        match second {
+            Ok(()) => panic!("the second registration replaced the first"),
+            Err(e) => assert!(e.contains("already registered"), "got: {e}"),
+        }
+
+        let (r, w) = make_pipe();
+        let handle = Handle::open(1, w).must("open");
+        let header = CallHeader {
+            reserved: OPCODE,
+            ..Default::default()
+        };
+        let ticket = handle.submit(header, b"x", 0).must("submit");
+        assert_eq!(drain_ticket(r), ticket);
+        match handle.take(ticket).must("take") {
+            JobResult::Ok(bytes) => assert_eq!(bytes, vec![1], "the first handler must still run"),
+            other => panic!("unexpected result: {other:?}"),
+        }
+        handle.close().must("close");
+        unsafe {
+            libc::close(r);
+        }
+    }
+
+    /// Poison is per handle. The engine hook is process-global and stays
+    /// installed; a second handle still runs it. Clearing the hook (the
+    /// existing API) drops that state, and the next handle does not work
+    /// until the adopter registers again. The poisoned handle stays poisoned.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_panic_poisons_one_handle_and_leaves_the_global_engine() {
+        let _registry = lock_recover(&REGISTRY_TEST_LOCK);
+        const OPCODE: u32 = 9303;
+        clear_engine_handlers();
+        register_engine(OPCODE, |_ctx, input: &[u8]| {
+            if input == b"poison-this-handle" {
+                panic!("adopter engine fault");
+            }
+            Ok(input.to_vec())
+        })
+        .must("register");
+
+        let (r1, w1) = make_pipe();
+        let poisoned = Handle::open(1, w1).must("open poisoned");
+        let header = CallHeader {
+            reserved: OPCODE,
+            ..Default::default()
+        };
+        let ticket = poisoned
+            .submit(header, b"poison-this-handle", 0)
+            .must("submit");
+        assert_eq!(drain_ticket(r1), ticket);
+        assert!(
+            matches!(poisoned.take(ticket).must("take"), JobResult::Panic { .. }),
+            "the engine panic must come back as a panic result"
+        );
+        assert!(
+            poisoned.is_poisoned(),
+            "the panicking handle must be poisoned"
+        );
+        assert!(
+            has_engine_handler(),
+            "the process-global engine must still be installed after a handle is poisoned"
+        );
+
+        let (r2, w2) = make_pipe();
+        let live = Handle::open(1, w2).must("open live");
+        let ticket = live.submit(header, b"still-here", 0).must("submit live");
+        assert_eq!(drain_ticket(r2), ticket);
+        match live.take(ticket).must("take live") {
+            JobResult::Ok(bytes) => assert_eq!(bytes, b"still-here"),
+            other => {
+                panic!("the global engine did not survive the other handle's panic: {other:?}")
+            }
+        }
+
+        clear_engine_handlers();
+        assert!(
+            !has_engine_handler(),
+            "clear_engine_handlers must drop the hook the adopter installed"
+        );
+        let ticket = live.submit(header, b"again", 0).must("submit after clear");
+        assert_eq!(drain_ticket(r2), ticket);
+        match live.take(ticket).must("take after clear") {
+            JobResult::Err(msg) => assert!(
+                msg.contains("no engine handler registered"),
+                "the adopter must reinstall explicitly, got: {msg}"
+            ),
+            other => panic!("cleared engine still ran: {other:?}"),
+        }
+
+        register_engine(OPCODE, |_ctx, input: &[u8]| Ok(input.to_vec())).must("reinstall");
+        let ticket = live.submit(header, b"back", 0).must("submit reinstalled");
+        assert_eq!(drain_ticket(r2), ticket);
+        match live.take(ticket).must("take reinstalled") {
+            JobResult::Ok(bytes) => assert_eq!(bytes, b"back"),
+            other => panic!("reinstalled engine did not run: {other:?}"),
+        }
+        match poisoned.submit(header, b"no", 0) {
+            Err(e) => assert!(e.contains("poisoned"), "got: {e}"),
+            Ok(t) => panic!("poisoned handle accepted ticket {t}"),
+        }
+
+        poisoned.close().must("close poisoned");
+        live.close().must("close live");
+        unsafe {
+            libc::close(r1);
+            libc::close(r2);
+        }
+    }
+
+    /// `close` must return while a worker is still inside an engine that
+    /// ignores cancellation, and must not report that the join succeeded.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn close_returns_while_a_worker_ignores_cancel() {
+        let _registry = lock_recover(&REGISTRY_TEST_LOCK);
+        const OPCODE: u32 = 9302;
+        clear_engine_handlers();
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let entered_c = Arc::clone(&entered);
+        let release_c = Arc::clone(&release);
+        register_engine(OPCODE, move |_ctx, _input: &[u8]| {
+            entered_c.store(true, Ordering::Release);
+            while !release_c.load(Ordering::Acquire) {
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(Vec::<u8>::new())
+        })
+        .must("register");
+
+        let (r, w) = make_pipe();
+        let handle = Handle::open(1, w).must("open");
+        let header = CallHeader {
+            reserved: OPCODE,
+            ..Default::default()
+        };
+        handle.submit(header, b"stuck", 0).must("submit");
+        let started = std::time::Instant::now();
+        while !entered.load(Ordering::Acquire) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "the engine never started"
+            );
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        let closing = Arc::clone(&handle);
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(closing.close_within(std::time::Duration::from_millis(200)));
+        });
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(2));
+        // Unblock the worker even when close failed to return, so this test
+        // cannot leave a thread behind for the rest of the binary.
+        release.store(true, Ordering::Release);
+        match outcome {
+            Ok(Err(msg)) => assert!(
+                msg.contains("workers still running"),
+                "close must report the expired budget, got: {msg}"
+            ),
+            Ok(Ok(())) => panic!("close joined a worker that was still inside the engine"),
+            Err(_) => panic!("close did not return within 2s; the join is unbounded"),
+        }
+
+        let settle = std::time::Instant::now();
+        while handle.in_flight() != 0 && settle.elapsed() < std::time::Duration::from_secs(2) {
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        handle.close().must("second close");
         unsafe {
             libc::close(r);
         }

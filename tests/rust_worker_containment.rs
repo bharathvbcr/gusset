@@ -134,7 +134,7 @@ fn assert_bomb_completes(kind: u8) {
         "a caught panic poisons the handle (I2)"
     );
 
-    handle.close();
+    assert!(handle.close().is_ok());
     unsafe {
         libc::close(r);
     }
@@ -162,7 +162,7 @@ fn panicking_payload_destructor_does_not_kill_the_worker() {
         Ok(JobResult::Ok(out)) => assert_eq!(out, vec![7, 7]),
         other => panic!("expected echo, got {:?}", other),
     }
-    handle.close();
+    assert!(handle.close().is_ok());
     unsafe {
         libc::close(r);
     }

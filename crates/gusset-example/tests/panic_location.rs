@@ -18,18 +18,20 @@ const OP_RESUMED: u32 = 0x7A02;
 
 #[test]
 fn a_resumed_panic_does_not_inherit_a_handled_panics_location() {
-    register_engine(OP_HANDLED, |_ctx, _input: &[u8]| {
+    assert!(register_engine(OP_HANDLED, |_ctx, _input: &[u8]| {
         // Panics and recovers internally: the hook records this line.
         let _ = std::panic::catch_unwind(|| panic!("handled inside the engine"));
         Ok(Vec::new())
-    });
-    register_engine(
+    })
+    .is_ok());
+    assert!(register_engine(
         OP_RESUMED,
         |_ctx, _input: &[u8]| -> Result<Vec<u8>, String> {
             // Propagated without running the hook.
             std::panic::resume_unwind(Box::new("real failure"))
         },
-    );
+    )
+    .is_ok());
 
     let (r, w) = make_pipe();
     let h = match Handle::open(1, w) {
@@ -66,6 +68,6 @@ fn a_resumed_panic_does_not_inherit_a_handled_panics_location() {
             }
         }
     }
-    h.close();
+    assert!(h.close().is_ok());
     unsafe { libc::close(r) };
 }

@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased] - 2026-10-02 · Docs catch up with Close
+
+- **`Close` is documented as bounded.** README, `docs/adoption.md` and `docs/choosing.md` still said `Close` has no budget. They now describe the 30-second join, the error when a worker outlasts it, and that the Rust pool stays allocated until that worker exits.
+- **`docs/adoption.md` covers engine registration and idle permits.** `register_engine` collisions and opcode 0 are refused; a `Submit` that nobody waits on returns its permit.
+- **`AGENTS.md` notes that GC-backstop closes are limited to four at a time.**
+
+## [Unreleased] - 2026-09-30 · Close, engine registration, and idle permits
+
+- **`Close` is bounded (I3, I5).** It joins workers for at most 30 seconds. If one is still inside an engine call, `Close` returns an error and a background thread holds the pool until that worker exits, so the caller is not wedged and the pool is not freed under it. A close whose workers do exit still joins them and closes the pipe before returning. `close_returns_while_a_worker_ignores_cancel` fails against an unbounded join.
+- **`register_engine` reports collisions and refuses opcode 0.** A second registration of the same opcode returns an error and leaves the first handler. Opcode 0 is not inserted: dispatch never consults the registry for it. `register_engine_does_not_overwrite_an_opcode` and `register_engine_rejects_opcode_zero` fail against the silent insert.
+- **A `Submit` that nobody waits on returns its permit when the reader stores the result (I4).** The result stays until `Wait` or `Close`. `TestPitfall_SubmitWithoutWaitDoesNotWedgeThePool` fails while the permit stays held.
+- **Engine hooks stay process-global.** A panic poisons the handle and leaves the hook. `clear_engine_handlers` drops it, and the next handle does not run until the adopter registers again. `AdviseMemoryLimit` still does not see Metal or mmap memory; that limit is documented on the function, with no new API. `write_ticket` remains the test helper that gives up after 10s; production completion writes go through `write_completion`, which retries.
+
 ## [Unreleased] - 2026-09-28 · Four audits of the Go/Rust boundary
 
 Each fix below has a test that fails on the code before it; each commit names the invariant it protects.

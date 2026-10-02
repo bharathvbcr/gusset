@@ -335,12 +335,13 @@ pub fn install_sigaltstack() -> Option<SigAltStackGuard> {
     }
 }
 
-/// Longest a completion write will wait for a full pipe before giving up.
+/// How long a stalled completion write waits before `write_ticket` gives up,
+/// and before `write_completion` (pool/mod.rs) logs that the reader is stuck.
 ///
-/// Bounded concurrency keeps unread tickets under `MAX_POOL_SIZE` (8 KiB of ticket
-/// bytes), which every supported platform's pipe buffer holds, so a full pipe means
-/// the reader has stalled. Waiting forever there would hang `Handle::close` in
-/// `join`; this bound turns that deadlock into a reported error.
+/// Production workers do not use `write_ticket`. They call `write_completion`,
+/// which retries until the write lands, the handle closes, or the pipe reports
+/// a hard error, and only logs once this duration has elapsed. `write_ticket`
+/// still returns `TimedOut` after this bound; its callers are tests.
 pub(crate) const WRITE_TICKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Upper bound on the backoff sleep between retries on a full pipe.

@@ -153,7 +153,12 @@ func FuzzHandleOpSequence(f *testing.F) {
 				return
 			}
 			if len(live) >= pool {
-				return // every permit held by a live ticket: Submit would park by design
+				// The model still tracks uncollected tickets as live. A finished
+				// ticket that nobody has Waited on no longer holds a permit, so
+				// this skips a Submit that would now succeed. That is the
+				// conservative side: it never claims a permit is free when one
+				// is actually still held by a running or abandoned job.
+				return
 			}
 			ctx, cancel := bounded()
 			defer cancel()

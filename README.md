@@ -223,7 +223,7 @@ Gusset exports strictly 17 C ABI functions from `libgusset.a` (enforced by `test
 
 ### 12 Go Public Entry Points
 - `gusset.Open(opts ...Option) (*Handle, error)`
-- `(*Handle).Close() error` — cancels, then **joins** the pool. Its latency is whatever the engine still has left to do; see `gusset.Shutdown` for the budgeted half.
+- `(*Handle).Close() error` — cancels, then **joins** the pool for at most 30 seconds. An engine that honours cancellation exits and `Close` returns `nil`. If a worker is still inside an engine call at the deadline, `Close` returns an error instead of wedging the caller, and a background thread keeps the Rust pool allocated until that worker exits, so the error is not permission to treat the engine's memory as freed. A second `Close` waits for the first. See `gusset.Shutdown` for the process-wide, budgeted drain.
 - `(*Handle).Call(ctx context.Context, in []byte) ([]byte, error)`
 - `(*Handle).CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error)` — the zero-copy round trip. `Call` refuses `[]byte` over 4 KiB, so the payloads zero-copy is for are the ones it cannot carry.
 - `(*Handle).Submit(ctx context.Context, in any) (uint64, error)`

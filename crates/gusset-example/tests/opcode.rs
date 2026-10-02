@@ -28,8 +28,7 @@ fn run(handle: &Handle, read_fd: i32, header: CallHeader, input: &[u8]) -> JobRe
 fn test_opcode_specific_engine_and_zero_copy_buffer() {
     gusset::pool::clear_engine_handlers();
 
-    // Register opcode 42
-    gusset::pool::register_engine(42, |ctx, input| {
+    assert!(gusset::pool::register_engine(42, |ctx, input| {
         assert_eq!(ctx.opcode(), 42);
         assert!(
             ctx.queue_delay().is_some(),
@@ -38,7 +37,8 @@ fn test_opcode_specific_engine_and_zero_copy_buffer() {
         let mut out = input.to_vec();
         out.reverse();
         Ok(out)
-    });
+    })
+    .is_ok());
 
     let (r, w) = make_pipe();
     let handle = match Handle::open(2, w) {
@@ -65,10 +65,11 @@ fn test_opcode_specific_engine_and_zero_copy_buffer() {
         std::ptr::copy_nonoverlapping([10u8, 20, 30, 40].as_ptr(), buf_ptr, 4);
     }
 
-    gusset::pool::register_engine(43, move |ctx, _input| {
+    assert!(gusset::pool::register_engine(43, move |ctx, _input| {
         assert_eq!(ctx.opcode(), 43);
         Ok(gusset::pool::JobOutput::Buffer(buf_id))
-    });
+    })
+    .is_ok());
 
     let header_buf = CallHeader {
         reserved: 43,
@@ -103,7 +104,7 @@ fn test_opcode_specific_engine_and_zero_copy_buffer() {
         other => panic!("expected Err for unregistered opcode, got {:?}", other),
     }
 
-    handle.close();
+    assert!(handle.close().is_ok());
     unsafe {
         libc::close(r);
     }

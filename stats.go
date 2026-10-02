@@ -27,6 +27,11 @@ func Stats() AllocStats {
 // AdviseMemoryLimit adjusts Go's runtime memory limit based on total budget and Rust live memory.
 // Calls debug.SetMemoryLimit(max(total - rustLive, floor)).
 // If total < 0, queries the current limit non-destructively.
+//
+// rustLive is what Gusset's counting allocator and its buffers report. Memory
+// allocated outside that — a Metal heap, an mmap the engine made itself — is
+// invisible here. Callers that park GPU or file mappings must subtract those
+// themselves; this function does not grow an API to observe them.
 func AdviseMemoryLimit(total int64) int64 {
 	if total < 0 {
 		return debug.SetMemoryLimit(-1)

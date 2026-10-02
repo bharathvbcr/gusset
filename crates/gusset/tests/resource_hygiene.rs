@@ -136,7 +136,7 @@ fn one_lifetime(pool: u32, ring: bool) -> Usage {
         }
     }
     let open_usage = usage();
-    h.close();
+    assert!(h.close().is_ok());
     drop(attached);
     drop(h);
     close(r);

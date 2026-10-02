@@ -760,10 +760,13 @@ func (tr *ticketReader) readOnce(fd uintptr) bool {
 // waiter yet to arrive, or straight to the bin when the owner has abandoned the
 // ticket.
 //
-// Abandonment is the only path that also returns the pool permit. A waiter that
-// gave up on its deadline deliberately left the permit behind, because the
-// worker was still executing; this is the moment the work actually stops, so
-// this is the moment the permit is free (I4).
+// The pool permit tracks a busy worker, not an uncollected result. It comes
+// back when the work stops and nobody is still waiting: an abandoned ticket,
+// or a result parked in completed because Submit had no Wait yet. A live
+// waiter returns the permit itself in collectLocked. Releasing it only in
+// those two places is what lets pool_size fire-and-forget Submits finish
+// without wedging the next Submit, and what keeps a still-running abandoned
+// job from sharing its worker (I4).
 func (s *handleState) deliver(ticket uint64, res callResult, takeID uint64) {
 	s.mu.Lock()
 	if _, gone := s.abandoned[ticket]; gone {
@@ -798,13 +801,35 @@ func (s *handleState) deliver(ticket uint64, res callResult, takeID uint64) {
 		// and parked on a completion that had already been handed out.
 		s.pending[ticket] = nil
 		ch <- res
-	} else {
-		s.completed[ticket] = res
+		s.mu.Unlock()
+		return
+	}
+	s.completed[ticket] = res
+	// The worker is done and no waiter is registered. The result stays until
+	// Wait or Close. The permit does not: leaving it in semTickets wedged the
+	// handle after pool_size Submits that nobody waited on.
+	//
+	// Submit may still be inserting semTickets (the job can finish before that
+	// assignment). If the ticket is not here yet, Submit releases when it sees
+	// the completed entry.
+	heldPermit := false
+	if _, held := s.semTickets[ticket]; held {
+		delete(s.semTickets, ticket)
+		heldPermit = true
 	}
 	s.mu.Unlock()
+	if heldPermit {
+		<-s.sem
+	}
 }
 
-// Close gracefully cancels pending work, shuts down the pool, and releases resources.
+// Close cancels pending work, joins the pool, and releases resources.
+//
+// The join is bounded by the Rust close budget (30s). Workers that have
+// already finished, or that observe cancellation, are joined and Close
+// returns nil. A worker that never returns produces an error instead of
+// wedging the caller; the Rust pool stays allocated until that worker exits,
+// so the error is not permission to treat the engine's memory as freed.
 func (h *Handle) Close() error {
 	if h == nil || h.state == nil {
 		return errors.New("gusset: handle is nil")
@@ -887,8 +912,9 @@ func shutdownCause(ctx context.Context, err error) error {
 //
 // Only close takes cgoMu exclusively, and it sets closed first. A reader that
 // passed an earlier closed check and then called RLock parked behind close's
-// unbounded worker join, ignoring its own context. TryRLock fails exactly when
-// that writer is holding or waiting, which is exactly "closing".
+// worker join (up to the 30s budget), ignoring its own context. TryRLock
+// fails exactly when that writer is holding or waiting, which is exactly
+// "closing".
 func (s *handleState) enterCgo() bool {
 	if s.closed.Load() || !s.cgoMu.TryRLock() {
 		return false
@@ -1193,8 +1219,21 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 
 	s.mu.Lock()
 	s.semTickets[ticket] = struct{}{}
+	// The reader can deliver this ticket before we get here: the worker ran
+	// between gusset_submit returning and this insert. deliver stored the
+	// result and left the permit, because the ticket was not in semTickets
+	// yet. Give the permit back now so a fire-and-forget Submit does not hold
+	// it for the life of the handle.
+	releaseNow := false
+	if _, done := s.completed[ticket]; done {
+		delete(s.semTickets, ticket)
+		releaseNow = true
+	}
 	s.mu.Unlock()
 	s.cgoMu.RUnlock()
+	if releaseNow {
+		<-s.sem
+	}
 
 	return ticket, nil
 }

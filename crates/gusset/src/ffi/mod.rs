@@ -336,9 +336,12 @@ pub unsafe extern "C" fn gusset_handle_close(handle: *mut Handle, status: *mut F
     let res = unsafe {
         ffi_guard_code(status, || {
             let arc = Arc::from_raw(handle);
-            arc.close();
+            // On a timed-out join, close keeps another Arc on the joiner.
+            // Dropping this one then does not free the pool under a worker
+            // that is still inside an engine call.
+            let joined = arc.close();
             drop(arc);
-            Ok(())
+            joined.map_err(FfiError::from)
         })
     };
 
@@ -1107,7 +1110,7 @@ mod export_panic_poisons_tests {
             unsafe { gusset_status_free(&mut st) };
             assert_eq!(rc, FFI_POISONED, "{name}: a later buf_alloc must fail fast");
 
-            handle.close();
+            assert!(handle.close().is_ok());
             // SAFETY: `r` is the read end this test opened.
             unsafe { libc::close(r) };
         }

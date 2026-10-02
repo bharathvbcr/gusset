@@ -46,5 +46,5 @@ fn a_closed_completion_pipe_does_not_kill_the_process() {
         "a broken completion pipe must refuse new work"
     );
     assert!(h.submit(header, &[0], 0).is_err());
-    h.close();
+    assert!(h.close().is_ok());
 }

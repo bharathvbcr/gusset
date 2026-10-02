@@ -99,14 +99,14 @@ fn descriptor_ownership_transfers_only_on_successful_open() {
     };
     assert!(fd_is_open(w2), "an open handle owns a live descriptor");
 
-    handle.close();
+    assert!(handle.close().is_ok());
     assert!(
         !fd_is_open(w2),
         "close must release the completion pipe descriptor"
     );
 
     // Second close, and the Drop that follows, must not close it again.
-    handle.close();
+    assert!(handle.close().is_ok());
     drop(handle);
     assert!(
         !fd_is_open(w2),
@@ -153,7 +153,7 @@ fn submit_rejects_unknown_header_flags() {
         Err(e) => panic!("known flag bit must be accepted: {}", e),
     }
 
-    handle.close();
+    assert!(handle.close().is_ok());
     unsafe {
         libc::close(r);
     }
@@ -462,7 +462,7 @@ fn submit_validates_inline_input_before_building_a_slice() {
     let _ = h.take(ticket);
     let rc = unsafe { gusset_buf_free(raw, id, &mut st) };
     assert_eq!(rc, FFI_OK);
-    h.close();
+    assert!(h.close().is_ok());
     unsafe { libc::close(r) };
 }
 
@@ -487,7 +487,7 @@ fn open_grows_a_one_page_completion_pipe_to_fit_the_pool() {
         "pipe holds {now} bytes, pool of {pool} needs {}",
         pool * 8
     );
-    h.close();
+    assert!(h.close().is_ok());
     unsafe { libc::close(r) };
 }
 
@@ -591,7 +591,7 @@ fn a_stalled_completion_counts_as_in_flight_and_is_delivered_after_recovery() {
         "the stalled result must still be collectable"
     );
     assert_eq!(h.in_flight(), 0);
-    h.close();
+    assert!(h.close().is_ok());
     unsafe { libc::close(r) };
 }
 

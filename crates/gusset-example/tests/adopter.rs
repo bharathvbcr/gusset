@@ -179,7 +179,7 @@ fn adopter_engine_runs_and_displaces_the_diagnostic_engine() {
         "a caught panic must poison the handle (I2)"
     );
 
-    handle.close();
+    assert!(handle.close().is_ok());
     unsafe {
         libc::close(r);
     }

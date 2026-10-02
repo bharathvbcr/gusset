@@ -349,9 +349,11 @@ Five things stop being defaults and become capacity decisions:
   the first time real input arrives rather than in your load test.
 - **Shutdown is two calls.** `gusset.Shutdown(budget)` drains with a bound, then
   `Close` each handle. `Close` requests cancellation and then *joins* its worker
-  threads — and since cancellation is cooperative, an uncooperative engine makes
-  `Close` take as long as its work does. The budget is on `Shutdown`; `Close`
-  has none.
+  threads for at most 30 seconds. Cancellation is cooperative, so an engine that
+  never calls `JobContext::check` can outlast that: `Close` then returns an error
+  and the pool stays allocated in the background until the worker exits. Pick
+  the `Shutdown` budget for your own deadline; the 30 seconds in `Close` is a
+  backstop, not a tuning knob.
 
 Wire `gusset.AdviseMemoryLimit` to your container limit so Go's heap budget
 accounts for Rust's live bytes, and `gusset.Stats()` into your metrics.
