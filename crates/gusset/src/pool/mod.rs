@@ -3234,8 +3234,21 @@ mod tests {
              bytes) baseline {base:?}, after respawns {after_respawns:?}, after failed opens \
              {after_failed_opens:?}; mappings not in the baseline: {new_maps:#?}"
         );
-        assert_eq!(after_respawns, base, "respawned workers leaked resources");
-        assert_eq!(after_failed_opens, base, "partial opens leaked resources");
+        // Descriptors and threads return to exactly the baseline. Mappings may
+        // end below it, never above: glibc evicting a cached thread stack is
+        // a smaller address space, not a leak, and an equality check would
+        // fail on it.
+        let leaked = |after: (usize, usize, usize, usize)| {
+            after.0 != base.0 || after.1 != base.1 || after.2 > base.2 || after.3 > base.3
+        };
+        assert!(
+            !leaked(after_respawns),
+            "respawned workers leaked resources"
+        );
+        assert!(
+            !leaked(after_failed_opens),
+            "partial opens leaked resources"
+        );
     }
 
     /// Drain one 8-byte ticket from the completion pipe.
