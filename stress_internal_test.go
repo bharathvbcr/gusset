@@ -572,21 +572,36 @@ func TestHammer_BoundaryUnderChaos(t *testing.T) {
 		s.cur.Store(nil)
 		all = append(all, s.states...)
 	}
-	deadline := time.Now().Add(30 * time.Second)
+	// A GC only helps a dropped handle still waiting for its backstop. This
+	// used to run one before checking each state, and `all` holds every
+	// handle the chaos goroutines opened — tens of thousands over 5 minutes —
+	// so the run spent 15+ minutes on back-to-back GOGC=1 collections after
+	// the chaos had ended, with no gusset goroutine left, which read as a hang.
+	closedYet := func(st *handleState) bool {
+		select {
+		case <-st.closeDone:
+			return true
+		default:
+			return false
+		}
+	}
+	tailStart := time.Now()
+	deadline := tailStart.Add(30 * time.Second)
+	gcs := 0
 	for _, st := range all {
-		for {
+		for !closedYet(st) {
+			if time.Now().After(deadline) {
+				t.Fatalf("a dropped handle was never closed by its AddCleanup backstop")
+			}
 			runtime.GC()
+			gcs++
 			select {
 			case <-st.closeDone:
 			case <-time.After(20 * time.Millisecond):
-				if time.Now().Before(deadline) {
-					continue
-				}
-				t.Fatalf("a dropped handle was never closed by its AddCleanup backstop")
 			}
-			break
 		}
 	}
+	t.Logf("final close: %d handle states closed after %d GCs in %v", len(all), gcs, time.Since(tailStart).Round(time.Millisecond))
 	settle()
 
 	for i, st := range all {
