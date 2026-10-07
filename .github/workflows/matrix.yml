@@ -17,7 +17,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -25,7 +25,7 @@ jobs:
           components: clippy, rustfmt, llvm-tools
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
           cache: false
@@ -73,13 +73,13 @@ jobs:
     name: Go 1.26 floor
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.26.x'
           cache: false
@@ -113,7 +113,7 @@ jobs:
       GUSSET_ALLOCATOR_API: '1'
       GUSSET_EXPECT_ALLOCATOR_API: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Rust (1.100+)
         uses: dtolnay/rust-toolchain@master
@@ -124,7 +124,7 @@ jobs:
           components: clippy, llvm-tools
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
           cache: false
@@ -164,7 +164,7 @@ jobs:
     name: Lint & Boundary Audits
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -172,9 +172,10 @@ jobs:
           components: clippy, rustfmt, llvm-tools
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
+          cache: false
 
       # --all-targets matters: without it clippy skips test targets entirely, and
       # the R3 disallowed-method rules went unenforced in exactly the code most
@@ -258,11 +259,12 @@ jobs:
     name: cgocheck2 (R6, R16)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
+          cache: false
       - name: Build Rust release
         run: cargo build --release
       # R6 and R16 name this job as their enforcer. It was absent, so both rules
@@ -275,11 +277,12 @@ jobs:
     name: Memory Limit Bridge
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
+          cache: false
       - name: Build Rust release
         run: cargo build --release
       - name: Allocator stats and AdviseMemoryLimit under a Go heap cap
@@ -291,15 +294,16 @@ jobs:
     name: Thread-Cap Soak
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
+          cache: false
 
       - name: Build Rust release
         run: cargo build --release
@@ -311,15 +315,16 @@ jobs:
     name: Race & Aggressive GC
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
+          cache: false
 
       - name: Build Rust release
         run: cargo build --release
@@ -340,7 +345,7 @@ jobs:
     runs-on: ubuntu-latest
     container: golang:1.27-alpine
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # R8's only real enforcer. musl's default thread stack is 128 KiB against
       # 8 MiB on glibc and darwin, so a deep-recursion test anywhere else passes
@@ -374,7 +379,7 @@ jobs:
     name: Cross-compile (supported platform set)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: >-
@@ -410,13 +415,14 @@ jobs:
     name: Benchmarks (R15)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
+          cache: false
 
       - name: Install benchstat
         run: go install golang.org/x/perf/cmd/benchstat@latest
@@ -493,11 +499,12 @@ jobs:
     # 13 targets; a per-push smoke. The nightly go-fuzz job runs each longer.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
+          cache: false
       - name: Build Rust release
         run: cargo build --release
 
@@ -511,7 +518,7 @@ jobs:
       # runner.
       - name: Upload any crashers
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashers
           path: |

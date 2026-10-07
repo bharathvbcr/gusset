@@ -14,7 +14,7 @@ jobs:
     name: Go Tip Compatibility
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Rust Stable
         uses: dtolnay/rust-toolchain@stable
@@ -31,7 +31,7 @@ jobs:
       # and ubuntu-latest still has Go 1.24 in the toolcache. The pin matches
       # the matrix (1.27.x), which is ahead of that floor.
       - name: Set up Go bootstrap
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.27.x'
           cache: false
@@ -93,7 +93,7 @@ jobs:
       # not running. A scheduled job whose failure nobody sees is not a gate.
       - name: Open a toolchain issue on failure
         if: failure()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const title = `Go tip breaks Gusset (run ${context.runId})`;
