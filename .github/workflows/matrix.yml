@@ -8,6 +8,10 @@ on:
   # Run by hand on a branch, so a fix is verified before its PR exists.
   workflow_dispatch:
 
+# Pinned by date per AGENTS.md; bump together with RUST_NIGHTLY in nightly.yml.
+env:
+  RUST_NIGHTLY: nightly-2026-10-05
+
 jobs:
   unit:
     name: Unit & Pitfalls (${{ matrix.os }})
@@ -157,7 +161,7 @@ jobs:
       - name: Set up Rust (1.100+)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: ${{ env.RUST_NIGHTLY }}
           # llvm-tools: exports_match reads the fat-LTO archive with llvm-nm;
           # Apple's nm cannot read newer-LLVM bitcode.
           components: clippy, llvm-tools
