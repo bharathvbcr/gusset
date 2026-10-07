@@ -412,6 +412,10 @@ fn diagnostic_allocated(ctx: &JobContext, input: &[u8]) -> Result<JobOutput, Str
     let seed = input.get(5).copied().unwrap_or(0);
 
     #[cfg(gusset_allocator_api)]
+    #[allow(
+        clippy::incompatible_msrv,
+        reason = "compiled only where allocator_probe.rs found the stable Allocator API"
+    )]
     let mut out: Vec<u8, crate::alloc::BufferAlloc> = Vec::new_in(crate::alloc::BufferAlloc);
     #[cfg(not(gusset_allocator_api))]
     let mut out: Vec<u8> = Vec::new();
@@ -3069,6 +3073,18 @@ mod tests {
                     "--test-threads=1",
                 ])
                 .env(CHILD, "1")
+                // glibc creates a malloc arena lazily, when a thread finds every
+                // existing one locked, and never unmaps it: a 132 KiB heap and
+                // the rest of its 64 MiB reservation, two lines of
+                // /proc/self/maps. How many arenas exist after N lifetimes
+                // depends on lock contention, up to 8 per CPU, so the count
+                // drifted by exactly those two lines in some runs and not
+                // others once Close gained its joiner thread. That is the
+                // allocator's cache, not a pool resource. One arena keeps
+                // malloc on the main heap, so every mmap left in the count is
+                // one the pool made: thread stacks and sigaltstacks. musl
+                // ignores the variable.
+                .env("MALLOC_ARENA_MAX", "1")
                 .output();
             let out = match out {
                 Ok(o) => o,
@@ -3085,30 +3101,49 @@ mod tests {
             return;
         }
 
-        fn count(path: &str, lines: bool) -> usize {
-            if lines {
-                match std::fs::read_to_string(path) {
-                    Ok(s) => s.lines().count(),
-                    Err(e) => panic!("{path}: {e}"),
-                }
-            } else {
-                match std::fs::read_dir(path) {
-                    Ok(d) => d.count(),
-                    Err(e) => panic!("{path}: {e}"),
-                }
+        fn entries(path: &str) -> usize {
+            match std::fs::read_dir(path) {
+                Ok(d) => d.count(),
+                Err(e) => panic!("{path}: {e}"),
             }
         }
+        fn maps() -> Vec<String> {
+            match std::fs::read_to_string("/proc/self/maps") {
+                Ok(s) => s.lines().map(str::to_owned).collect(),
+                Err(e) => panic!("/proc/self/maps: {e}"),
+            }
+        }
+        // Bytes as well as lines. The kernel merges an anonymous mapping into
+        // a neighbour with the same protection, so a leak shaped like its
+        // neighbour adds no line at all: one leaked read-only page per
+        // lifetime passed the line count alone. The brk heap is malloc's,
+        // grows and trims with ordinary allocation, and is not a pool mapping.
+        fn mapped_bytes(maps: &[String]) -> usize {
+            maps.iter()
+                .filter(|line| !line.ends_with("[heap]"))
+                .map(|line| {
+                    let range = line.split(' ').next().unwrap_or("");
+                    let (lo, hi) = range.split_once('-').unwrap_or(("0", "0"));
+                    match (usize::from_str_radix(lo, 16), usize::from_str_radix(hi, 16)) {
+                        (Ok(lo), Ok(hi)) if hi >= lo => hi - lo,
+                        _ => panic!("unparsable /proc/self/maps line: {line}"),
+                    }
+                })
+                .sum()
+        }
         let usage = || {
+            let maps = maps();
             (
-                count("/proc/self/fd", false),
-                count("/proc/self/task", false),
-                count("/proc/self/maps", true),
+                entries("/proc/self/fd"),
+                entries("/proc/self/task"),
+                maps.len(),
+                mapped_bytes(&maps),
             )
         };
-        let settled = |base: (usize, usize, usize)| {
+        let settled = |base: (usize, usize, usize, usize)| {
             let mut now = usage();
             for _ in 0..200 {
-                if now.0 <= base.0 && now.1 <= base.1 && now.2 <= base.2 {
+                if now.0 <= base.0 && now.1 <= base.1 && now.2 <= base.2 && now.3 <= base.3 {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
@@ -3177,6 +3212,7 @@ mod tests {
             failed_open();
         }
         let base = settled(usage());
+        let base_maps = maps();
         for _ in 0..rounds {
             lifetime();
         }
@@ -3185,11 +3221,18 @@ mod tests {
             failed_open();
         }
         let after_failed_opens = settled(base);
+        // A count says that something leaked; the mapping says what. A thread
+        // stack is a guard page and the stack below it, a sigaltstack the size
+        // `sys::sigaltstack_size` reports.
+        let new_maps: Vec<String> = maps()
+            .into_iter()
+            .filter(|line| !base_maps.contains(line))
+            .collect();
         eprintln!(
             "respawn hygiene over {rounds} lifetimes (3 respawns each, 1 after a failed \
-             spawn) and {rounds} partially spawned opens: (fds, threads, maps) baseline \
-             {base:?}, after respawns {after_respawns:?}, after failed opens \
-             {after_failed_opens:?}"
+             spawn) and {rounds} partially spawned opens: (fds, threads, map lines, mapped \
+             bytes) baseline {base:?}, after respawns {after_respawns:?}, after failed opens \
+             {after_failed_opens:?}; mappings not in the baseline: {new_maps:#?}"
         );
         assert_eq!(after_respawns, base, "respawned workers leaked resources");
         assert_eq!(after_failed_opens, base, "partial opens leaked resources");
