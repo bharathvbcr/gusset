@@ -39,11 +39,29 @@ fn count_dir(path: &str) -> usize {
     }
 }
 
-fn count_lines(path: &str) -> usize {
-    match std::fs::read_to_string(path) {
-        Ok(s) => s.lines().count(),
-        Err(e) => panic!("read {path}: {e}"),
+fn maps() -> Vec<String> {
+    match std::fs::read_to_string("/proc/self/maps") {
+        Ok(s) => s.lines().map(str::to_owned).collect(),
+        Err(e) => panic!("read /proc/self/maps: {e}"),
     }
+}
+
+/// Bytes as well as lines. The kernel merges an anonymous mapping into a
+/// neighbour with the same protection, so a leak shaped like its neighbour
+/// adds no line at all. The brk heap is malloc's, grows and trims with
+/// ordinary allocation, and is not a handle's mapping.
+fn mapped_bytes(maps: &[String]) -> usize {
+    maps.iter()
+        .filter(|line| !line.ends_with("[heap]"))
+        .map(|line| {
+            let range = line.split(' ').next().unwrap_or("");
+            let (lo, hi) = range.split_once('-').unwrap_or(("0", "0"));
+            match (usize::from_str_radix(lo, 16), usize::from_str_radix(hi, 16)) {
+                (Ok(lo), Ok(hi)) if hi >= lo => hi - lo,
+                _ => panic!("unparsable /proc/self/maps line: {line}"),
+            }
+        })
+        .sum()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,13 +69,45 @@ struct Usage {
     fds: usize,
     threads: usize,
     maps: usize,
+    mapped_bytes: usize,
+}
+
+impl Usage {
+    /// Descriptors and threads come back exactly. Mappings may end below the
+    /// baseline, never above: glibc evicting a cached thread stack shrinks the
+    /// address space without anything leaking.
+    fn leaked_since(self, base: Usage) -> bool {
+        self.fds != base.fds
+            || self.threads != base.threads
+            || self.maps > base.maps
+            || self.mapped_bytes > base.mapped_bytes
+    }
 }
 
 fn usage() -> Usage {
+    let maps = maps();
     Usage {
         fds: count_dir("/proc/self/fd"),
         threads: count_dir("/proc/self/task"),
-        maps: count_lines("/proc/self/maps"),
+        maps: maps.len(),
+        mapped_bytes: mapped_bytes(&maps),
+    }
+}
+
+/// glibc creates a malloc arena lazily, when a thread finds every existing
+/// one locked, and never unmaps it: a 132 KiB heap and the rest of its 64 MiB
+/// reservation, two lines of /proc/self/maps. How many exist after N
+/// lifetimes depends on lock contention, up to 8 per CPU, so a warm-up does
+/// not reach a steady count and CI saw maps 54 -> 56 with fds and threads
+/// exact. That is the allocator's cache, not a handle's resource. One arena
+/// keeps malloc on the brk heap, so every mmap the count sees is one a handle
+/// made. musl has no arenas.
+fn pin_malloc_arenas() {
+    #[cfg(target_env = "gnu")]
+    {
+        // SAFETY: mallopt only adjusts allocator tuning.
+        let ok = unsafe { libc::mallopt(libc::M_ARENA_MAX, 1) };
+        assert_eq!(ok, 1, "mallopt(M_ARENA_MAX, 1) failed");
     }
 }
 
@@ -66,7 +116,7 @@ fn usage() -> Usage {
 fn settled(base: Usage) -> Usage {
     let mut now = usage();
     for _ in 0..200 {
-        if now.threads <= base.threads && now.fds <= base.fds && now.maps <= base.maps {
+        if !now.leaked_since(base) {
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -149,15 +199,16 @@ fn handles_release_descriptors_threads_and_mappings() {
         .and_then(|v| v.into_string().ok())
         .and_then(|v| v.parse::<usize>().ok());
     let rounds = quick.unwrap_or(2000);
+    pin_malloc_arenas();
 
-    // Warm-up: the allocator's per-thread arenas and glibc's cache of freed
-    // thread stacks are process-lifetime and bounded; let them reach their
-    // steady size before taking the baseline.
+    // Warm-up: glibc's cache of freed thread stacks is process-lifetime and
+    // bounded; let it reach its steady size before taking the baseline.
     for _ in 0..50 {
         one_lifetime(4, false);
         one_lifetime(4, true);
     }
     let base = settled(usage());
+    let base_maps = maps();
 
     // What one open handle holds, so the report shows what was released.
     let mut peak = base;
@@ -166,6 +217,7 @@ fn handles_release_descriptors_threads_and_mappings() {
         peak.fds = peak.fds.max(u.fds);
         peak.threads = peak.threads.max(u.threads);
         peak.maps = peak.maps.max(u.maps);
+        peak.mapped_bytes = peak.mapped_bytes.max(u.mapped_bytes);
     }
     let after_success = settled(base);
 
@@ -187,11 +239,23 @@ fn handles_release_descriptors_threads_and_mappings() {
     }
     let after_failures = settled(base);
 
+    // A count says that something leaked; the mapping says what.
+    let new_maps: Vec<String> = maps()
+        .into_iter()
+        .filter(|line| !base_maps.contains(line))
+        .collect();
     eprintln!(
         "resource hygiene over {rounds} lifetimes (pool 4, half with a ring) and \
          {rounds}x3 failed opens: baseline {base:?}, peak with one handle open {peak:?}, after \
-         lifetimes {after_success:?}, after failed opens {after_failures:?}"
+         lifetimes {after_success:?}, after failed opens {after_failures:?}; mappings not in \
+         the baseline: {new_maps:#?}"
     );
-    assert_eq!(after_success, base, "handle lifetimes leaked resources");
-    assert_eq!(after_failures, base, "failed opens leaked resources");
+    assert!(
+        !after_success.leaked_since(base),
+        "handle lifetimes leaked resources"
+    );
+    assert!(
+        !after_failures.leaked_since(base),
+        "failed opens leaked resources"
+    );
 }
