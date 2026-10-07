@@ -19,7 +19,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # aarch64-unknown-linux-gnu is in the supported set, and `cross` only
+        # type-checks it. It differs where it matters to an FFI crate: c_char
+        # is unsigned there, which once made four `as *const u8` casts no-ops
+        # that clippy -D warnings rejects on ARM Linux and nowhere else.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -33,6 +37,12 @@ jobs:
         with:
           go-version: '1.27.x'
           cache: false
+
+      # The lint job runs clippy on x86_64 Linux only, so cfg(target_os =
+      # "macos") code and anything that depends on c_char's signedness was
+      # never linted. Each platform lints the code it compiles.
+      - name: Clippy on this platform
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build Rust static library
         run: cargo build --release
