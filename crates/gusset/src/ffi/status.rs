@@ -81,7 +81,7 @@ impl FfiStatus {
         Self::new_err(
             FFI_BAD_ARG,
             msg.as_bytes(),
-            c"ffi.rs".as_ptr() as *const u8,
+            c"ffi.rs".as_ptr().cast::<u8>(),
             6,
             line!(),
         )
@@ -92,7 +92,7 @@ impl FfiStatus {
         Self::new_err(
             FFI_POISONED,
             msg.as_bytes(),
-            c"handle.rs".as_ptr() as *const u8,
+            c"handle.rs".as_ptr().cast::<u8>(),
             9,
             line!(),
         )

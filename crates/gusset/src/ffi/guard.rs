@@ -269,7 +269,7 @@ where
                 let bytes = msg.as_bytes();
                 let (file_ptr, file_len) = match ffi_err.file {
                     Some(f) => (f.as_ptr(), f.len()),
-                    None => (c"unknown".as_ptr() as *const u8, 7),
+                    None => (c"unknown".as_ptr().cast::<u8>(), 7),
                 };
                 unsafe {
                     ptr::write(
@@ -289,7 +289,7 @@ where
                 let (file_ptr, file_len, line) = if let Some(l) = loc {
                     (l.file.as_ptr(), l.file.len(), l.line)
                 } else {
-                    (c"unknown".as_ptr() as *const u8, 7, 0)
+                    (c"unknown".as_ptr().cast::<u8>(), 7, 0)
                 };
                 unsafe {
                     ptr::write(
