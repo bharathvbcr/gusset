@@ -97,6 +97,45 @@ jobs:
           go vet ./...
           go test -timeout 10m ./...
 
+  # The Rust half of the same promise. AGENTS.md lists rust-version 1.97 as a
+  # supported floor with a CI leg, and none existed: every other lane is stable,
+  # nightly or the musl job's rustup stable, so the floor was checked only by
+  # clippy's incompatible_msrv lint, which knows the std items that carry a
+  # stability version and nothing else (language features, Cargo behaviour,
+  # lints that changed). Build what adopters on 1.97 link and run both suites
+  # against it.
+  rust-floor:
+    name: Rust 1.97 floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.97'
+          components: clippy, llvm-tools
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          cache: false
+
+      - name: Build Rust static library
+        run: cargo build --release
+
+      - name: Generate Go archive hash
+        run: go generate ./internal/ffi
+
+      - name: Clippy on the floor
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust and Go tests on the floor
+        run: |
+          cargo test --workspace
+          go test -timeout 10m ./...
+
   # The stable Allocator trait lands in Rust 1.100. Until that is the stable
   # channel, nightly carries it; switch `toolchain` to 1.100 once released. The
   # build probe decides per compiler, so GUSSET_ALLOCATOR_API=1 turns a silent
