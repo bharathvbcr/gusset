@@ -25,6 +25,10 @@ fn allocator_api_is_absent_only_where_it_is_not_expected() {
 }
 
 #[cfg(gusset_allocator_api)]
+#[allow(
+    clippy::incompatible_msrv,
+    reason = "compiled only where allocator_probe.rs found the stable Allocator API"
+)]
 mod on {
     use gusset::header::CallHeader;
     use gusset::pool::{register_engine, Handle, JobOutput, JobResult};

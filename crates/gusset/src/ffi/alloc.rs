@@ -229,6 +229,10 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
 /// Whether `A` is `std::alloc::Global`, whose allocations already pass through
 /// an installed `Counting` global allocator.
 #[cfg(gusset_allocator_api)]
+#[allow(
+    clippy::incompatible_msrv,
+    reason = "compiled only where allocator_probe.rs found the stable Allocator API"
+)]
 #[inline]
 fn is_global<A: 'static>() -> bool {
     std::any::TypeId::of::<A>() == std::any::TypeId::of::<Global>()
@@ -261,7 +265,16 @@ fn counts_itself<A: 'static>() -> bool {
 /// with a larger size than it requested (the Allocator contract allows up to the
 /// returned block length) leaves the live total low, never wrapped: the
 /// subtraction saturates.
+// The cfg is the version gate (AGENTS.md rule 6): it is set only when
+// allocator_probe.rs compiled a use of the stable `Allocator` trait with this
+// compiler, without a feature gate. clippy's MSRV lint judges each item against
+// `rust-version = "1.97"` and cannot see that gate, so it is told here, on the
+// gated items only. Ungated code stays under the lint.
 #[cfg(gusset_allocator_api)]
+#[allow(
+    clippy::incompatible_msrv,
+    reason = "compiled only where allocator_probe.rs found the stable Allocator API"
+)]
 unsafe impl<A: Allocator + 'static> Allocator for Counting<A> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let block = self.inner.allocate(layout)?;
@@ -380,6 +393,10 @@ impl BufferAlloc {
 }
 
 #[cfg(gusset_allocator_api)]
+#[allow(
+    clippy::incompatible_msrv,
+    reason = "compiled only where allocator_probe.rs found the stable Allocator API"
+)]
 unsafe impl Allocator for BufferAlloc {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let real = Self::buffer_layout(layout).ok_or(AllocError)?;
@@ -442,6 +459,10 @@ unsafe impl Allocator for BufferAlloc {
 }
 
 #[cfg(gusset_allocator_api)]
+#[allow(
+    clippy::incompatible_msrv,
+    reason = "compiled only where allocator_probe.rs found the stable Allocator API"
+)]
 impl BufferAlloc {
     #[inline]
     fn pair(old: Layout, new: Layout) -> Result<(Layout, Layout), AllocError> {

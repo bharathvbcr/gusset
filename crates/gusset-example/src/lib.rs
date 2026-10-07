@@ -58,6 +58,10 @@ pub fn init_example_engine() {
                 // on the cgo thread. `try_reserve` sizes it fallibly — an
                 // infallible push that cannot allocate aborts the whole process.
                 #[cfg(gusset_allocator_api)]
+                #[allow(
+                    clippy::incompatible_msrv,
+                    reason = "compiled only where gusset's build probe found the stable Allocator API"
+                )]
                 13 => {
                     let mut out: Vec<u8, BufferAlloc> = Vec::new_in(BufferAlloc);
                     out.try_reserve_exact(input.len() - 1)
