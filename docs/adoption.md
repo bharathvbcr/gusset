@@ -54,8 +54,10 @@ name = "gusset"                    # <- the output must be libgusset.a
 crate-type = ["staticlib"]
 
 [dependencies]
-# Renamed, because this crate cannot also be called `gusset`.
-gusset_core = { package = "gusset", version = "0.0.2" }
+# Renamed, because this crate cannot also be called `gusset`. Gusset is not on
+# crates.io: pin a release tag, or use `path = ".../gusset/crates/gusset"` for a
+# local checkout, as the known adopters do.
+gusset_core = { package = "gusset", git = "https://github.com/bharathvbcr/gusset", tag = "v0.0.2" }
 my-engine  = { path = "../my-engine" }
 
 [profile.release]

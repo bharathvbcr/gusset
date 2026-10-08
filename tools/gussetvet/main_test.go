@@ -61,6 +61,70 @@ var s = "C.free( in a string is not a call either // really"
 	}
 }
 
+// R5 reads the preamble only. A doc comment that names `#cgo noescape` used
+// to fail every export; directives in a comment cgo never reads must not count.
+func TestR5DirectivesComeFromThePreambleOnly(t *testing.T) {
+	exports := []string{"gusset_cancel", "gusset_cancel_all"}
+
+	good := t.TempDir()
+	write(t, good, "ffi.go", `package ffi
+/*
+#cgo noescape gusset_cancel
+#cgo nocallback gusset_cancel
+#cgo noescape gusset_cancel_all
+#cgo nocallback gusset_cancel_all
+*/
+import "C"
+
+// A helper whose doc names the #cgo noescape lines is documentation.
+func f() { C.gusset_cancel(); C.gusset_cancel_all() }
+`)
+	if v, err := checkDirectives(good, exports); err != nil || len(v) != 0 {
+		t.Fatalf("doc comment naming a directive flagged: %v %v", v, err)
+	}
+
+	stray := t.TempDir()
+	write(t, stray, "ffi.go", `package ffi
+/*
+#cgo noescape gusset_cancel_all
+#cgo nocallback gusset_cancel_all
+*/
+import "C"
+
+// #cgo noescape gusset_cancel
+// #cgo nocallback gusset_cancel
+func f() {}
+`)
+	v, err := checkDirectives(stray, exports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(v, "\n")
+	if len(v) != 2 || !strings.Contains(got, "'#cgo noescape gusset_cancel'") ||
+		!strings.Contains(got, "'#cgo nocallback gusset_cancel'") {
+		t.Fatalf("want gusset_cancel's two directives missing (prefix of gusset_cancel_all, stray comment ignored), got:\n%s", got)
+	}
+
+	// Every directive present, none of them where cgo reads them. The old scan
+	// passed this.
+	moved := t.TempDir()
+	write(t, moved, "ffi.go", `package ffi
+/*
+#include <stdint.h>
+*/
+import "C"
+
+// #cgo noescape gusset_cancel
+// #cgo nocallback gusset_cancel
+// #cgo noescape gusset_cancel_all
+// #cgo nocallback gusset_cancel_all
+func f() { C.gusset_cancel(); C.gusset_cancel_all() }
+`)
+	if v, err := checkDirectives(moved, exports); err == nil {
+		t.Fatalf("directives outside the preamble must not pass R5, got %v", v)
+	}
+}
+
 func TestR5RefusesExportedGoCallbacks(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "cb.go", `package p
