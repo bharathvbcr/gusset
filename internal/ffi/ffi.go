@@ -140,6 +140,15 @@ var (
 // for FFI_OK, otherwise the error the export wrote into st. A plain function
 // rather than one taking the call as a closure, so st stays on the caller's
 // stack. The exports that also return values keep their own one-line check.
+//
+// HandleClose, Cancel, CancelAll and BufFree are therefore two lines each,
+// differing only in the export they call, and stay separate on purpose. cgo
+// cannot pass an export as a Go value: a closure or func-value helper moves st
+// to the heap (`go build -gcflags=-m`), one allocation per large-result Wait
+// through BufFree. A C trampoline in the preamble avoids the allocation but
+// routes the calls around their own `#cgo noescape` lines (R5), and DevMap
+// still pairs the wrappers under it. DevMap reports both pairs as structural
+// clones; that is this decision, not an unfolded duplicate.
 func checkStatus(code C.int32_t, st *C.FfiStatus) error {
 	if code != C.FFI_OK {
 		return statusToError(st)
