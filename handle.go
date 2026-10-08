@@ -1073,6 +1073,14 @@ func (h *Handle) CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error) {
 }
 
 // Submit submits a job asynchronously (accepts either []byte or *Buffer) and returns a ticket.
+//
+// Collect every ticket with Wait or WaitBuffer, or give it up with Discard. A
+// finished job returns its pool permit before anyone Waits (DECISIONS
+// 2026-09-30), so a caller that never collects is not slowed down: its results
+// accumulate on the handle until Wait, Discard or Close, without bound. A
+// result over 4 KiB is held as Rust memory, which Go's GC pacer and
+// GOMEMLIMIT do not see, so a fire-and-forget loop can exhaust memory long
+// before the Go heap looks large.
 func (h *Handle) Submit(ctx context.Context, in any) (uint64, error) {
 	if h == nil || h.state == nil {
 		return 0, errors.New("gusset: handle is nil")
@@ -1357,30 +1365,28 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 	return newBufferFromRaw(s, 0, nil), nil
 }
 
-func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResult, uint64, error) {
-	s.mu.Lock()
+// claimLocked is the front half of Wait and Discard, the two ways a ticket's
+// result is moved out exactly once.
+//
+// done reports a stored result, moved out of completed with its take buffer id
+// and the ticket ended. err reports a ticket that cannot be claimed. With
+// neither, the ticket is live, still running, and has no waiter: the caller
+// either registers as its waiter or abandons it, still under mu.
+func (s *handleState) claimLocked(ticket uint64) (res callResult, takeID uint64, done bool, err error) {
 	if res, done := s.completed[ticket]; done {
 		delete(s.completed, ticket)
-		takeID := s.collectLocked(ticket)
-		s.mu.Unlock()
-		if res.err != nil {
-			s.discardTake(takeID)
-			return callResult{}, 0, res.err
-		}
-		return res, takeID, nil
+		return res, s.collectLocked(ticket), true, nil
 	}
 
 	// An abandoned ticket is spent. Its result is already promised to the bin,
 	// so a second waiter could only park for a completion it will never be
 	// handed — the same forever-park the abandonment exists to remove.
 	if _, gone := s.abandoned[ticket]; gone {
-		s.mu.Unlock()
-		return callResult{}, 0, ErrUnknownTicket
+		return callResult{}, 0, false, ErrUnknownTicket
 	}
 
 	if s.closed.Load() || s.drainExited.Load() {
-		s.mu.Unlock()
-		return callResult{}, 0, ErrClosed
+		return callResult{}, 0, false, ErrClosed
 	}
 
 	// Refuse a ticket this handle is not holding.
@@ -1391,8 +1397,7 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 	// the caller forever and its context deadline did nothing at all. semTickets is
 	// exactly the set of live tickets this handle issued and has not yet handed back.
 	if _, live := s.semTickets[ticket]; !live {
-		s.mu.Unlock()
-		return callResult{}, 0, ErrUnknownTicket
+		return callResult{}, 0, false, ErrUnknownTicket
 	}
 
 	// Refuse a second waiter rather than displacing the first.
@@ -1406,8 +1411,65 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 	// return used to consume it, so a third Submit could enter while the job
 	// was still running (I4).
 	if _, busy := s.pending[ticket]; busy {
+		return callResult{}, 0, false, ErrTicketBusy
+	}
+	return callResult{}, 0, false, nil
+}
+
+// Discard gives up a submitted ticket's result without waiting for it.
+//
+// A result nobody Waits for is otherwise kept until Close (see Submit). For a
+// result already stored, Discard frees it now, Rust take buffer included. For
+// a job still running, the result is freed when it lands and the pool permit
+// comes back when the work stops, exactly as for a ticket abandoned at its
+// deadline (I4). Discard does not cancel the job: the work runs to completion,
+// and only its result is dropped. To stop it as well, Wait with a context that
+// is already cancelled.
+//
+// A discarded ticket is spent: Wait and Discard on it return ErrUnknownTicket.
+// A ticket another goroutine is Waiting on returns ErrTicketBusy and stays
+// that waiter's. Once Close has begun it returns ErrClosed.
+func (h *Handle) Discard(ticket uint64) error {
+	if h == nil || h.state == nil {
+		return errors.New("gusset: handle is nil")
+	}
+	err := h.state.discard(ticket)
+	runtime.KeepAlive(h)
+	return err
+}
+
+func (s *handleState) discard(ticket uint64) error {
+	// Closed first, unlike Wait. drainPipe keeps storing completions while
+	// Close joins the workers, so a claim here could answer ErrClosed for a
+	// ticket and then nil for the same ticket once its completion landed.
+	// Close frees every result itself; there is nothing for Discard to do.
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	s.mu.Lock()
+	_, takeID, done, err := s.claimLocked(ticket)
+	if !done && err == nil {
+		// Running, with no waiter: deliver frees the result and returns the
+		// permit when the completion lands.
+		s.abandoned[ticket] = struct{}{}
+	}
+	s.mu.Unlock()
+	s.discardTake(takeID)
+	return err
+}
+
+func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResult, uint64, error) {
+	s.mu.Lock()
+	if res, takeID, done, err := s.claimLocked(ticket); done || err != nil {
 		s.mu.Unlock()
-		return callResult{}, 0, ErrTicketBusy
+		if err != nil {
+			return callResult{}, 0, err
+		}
+		if res.err != nil {
+			s.discardTake(takeID)
+			return callResult{}, 0, res.err
+		}
+		return res, takeID, nil
 	}
 
 	ticketCh := s.waitChanLocked()

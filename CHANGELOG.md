@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased] - 2026-10-07 · Bounds and validation at the public API
+
+- **`Handle.Discard(ticket)` (new, the thirteenth Go entry point; I1, I4).** A result nobody Waits for was kept until `Close`, and since a finished `Submit` returns its permit nothing slowed a fire-and-forget caller down: results over 4 KiB piled up as Rust memory the Go GC cannot see. `Discard` frees a stored result at once and a running job's result when it lands, and the permit still comes back only when the work stops. It does not cancel the work. `Submit`'s doc now states the retention. `TestPitfall_DiscardReleasesUncollectedResults` measures the growth and the release.
+- **`WithPoolSize(0)` and `WithPoolSize(-1)` say what is wrong (I4).** They were refused as "pool_size exceeds maximum 1024"; the error is now "pool_size must be at least 1 (got N)", and an over-ceiling value names itself. A dead `> MaxPoolSize` check in `Open` is gone.
+- **A negative `WithBufferBudget` is refused by `Open`.** It was silently read as 0, which means unlimited.
+- **A refused `Handle::open` leaves the caller's descriptor alone (I4).** It set O_NONBLOCK (NOSIGPIPE on Darwin) before checking the pool size, so a refused open still changed the caller's fd. Arguments are now all checked first and the descriptor's mode changes only once the pool is up. An unreachable `pipe_write_fd < 0` branch is removed.
+
 ## [Unreleased] - 2026-10-02 · Docs catch up with Close
 
 - **`Close` is documented as bounded.** README, `docs/adoption.md` and `docs/choosing.md` still said `Close` has no budget. They now describe the 30-second join, the error when a worker outlasts it, and that the Rust pool stays allocated until that worker exits.

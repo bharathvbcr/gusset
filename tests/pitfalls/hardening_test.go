@@ -480,3 +480,120 @@ func TestPitfall_ThreadsMetricIsLive(t *testing.T) {
 			runtime.Version(), samples[0].Value.Kind())
 	}
 }
+
+// waitLiveBytes polls Stats().LiveBytes until ok accepts it or 30s pass, and
+// returns the last reading with whether ok accepted it.
+func waitLiveBytes(ok func(uint64) bool) (uint64, bool) {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		live := gusset.Stats().LiveBytes
+		if ok(live) {
+			return live, true
+		}
+		if time.Now().After(deadline) {
+			return live, false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestPitfall_DiscardReleasesUncollectedResults pins the bound on results
+// nobody Waits for.
+//
+// Since a finished Submit returns its permit before Wait (DECISIONS
+// 2026-09-30), nothing back-pressures a fire-and-forget caller: every result
+// it never collects stays on the handle until Wait or Close, and a result over
+// 4 KiB is a live Rust take buffer that the Go GC pacer cannot see. There was
+// no way to let one go short of closing the handle. Discard is that way.
+//
+// The test first shows the retention (Rust live bytes grow by the results
+// nobody collected), then that Discard gives them back, for results already
+// stored and for one discarded while still running.
+func TestPitfall_DiscardReleasesUncollectedResults(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(4), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// 64 KiB echoes: over the 4 KiB inline ceiling, so each result is a Rust
+	// take buffer held on the handle, not a Go copy.
+	const payload = 64 * 1024
+	const rounds = 16
+	submit := func(prefix []byte) uint64 {
+		t.Helper()
+		b, err := h.NewBuffer(payload)
+		if err != nil {
+			t.Fatalf("NewBuffer failed: %v", err)
+		}
+		s := b.Bytes()
+		copy(s, prefix)
+		for i := len(prefix); i < len(s); i++ {
+			s[i] = byte(i)
+		}
+		ticket, err := h.Submit(ctx, b)
+		if err != nil {
+			_ = b.Free()
+			t.Fatalf("Submit failed: %v", err)
+		}
+		if err := b.Free(); err != nil {
+			t.Fatalf("Free failed: %v", err)
+		}
+		return ticket
+	}
+
+	// Warm-up so one-time allocations are in the baseline.
+	if _, err := h.Wait(ctx, submit([]byte{0})); err != nil {
+		t.Fatalf("warm-up Wait failed: %v", err)
+	}
+	baseline := gusset.Stats().LiveBytes
+
+	tickets := make([]uint64, 0, rounds)
+	for i := 0; i < rounds; i++ {
+		tickets = append(tickets, submit([]byte{0}))
+	}
+	retained := baseline + rounds*payload
+	if live, ok := waitLiveBytes(func(v uint64) bool { return v >= retained }); !ok {
+		t.Fatalf("%d uncollected %d-byte results should be held until Wait, Discard or Close: "+
+			"live %d, baseline %d", rounds, payload, live, baseline)
+	}
+
+	for i, ticket := range tickets {
+		if err := h.Discard(ticket); err != nil {
+			t.Fatalf("Discard of stored result %d: %v", i, err)
+		}
+	}
+	if live, ok := waitLiveBytes(func(v uint64) bool { return v < baseline+payload }); !ok {
+		t.Fatalf("Discard did not release the take buffers: live %d, baseline %d, %d results of %d bytes",
+			live, baseline, rounds, payload)
+	}
+
+	// A discarded ticket is spent, like an abandoned one.
+	if _, err := h.Wait(ctx, tickets[0]); !errors.Is(err, gusset.ErrUnknownTicket) {
+		t.Fatalf("Wait after Discard: got %v, want ErrUnknownTicket", err)
+	}
+	if err := h.Discard(tickets[0]); !errors.Is(err, gusset.ErrUnknownTicket) {
+		t.Fatalf("second Discard: got %v, want ErrUnknownTicket", err)
+	}
+	if err := h.Discard(1 << 62); !errors.Is(err, gusset.ErrUnknownTicket) {
+		t.Fatalf("Discard of a ticket never issued: got %v, want ErrUnknownTicket", err)
+	}
+
+	// Discarded while running: the engine finishes 200 ms later, and the
+	// result it produces then is freed on arrival instead of stored.
+	running := submit(nonCoopThen(200*time.Millisecond, 0))
+	if err := h.Discard(running); err != nil {
+		t.Fatalf("Discard of a running ticket: %v", err)
+	}
+	if live, ok := waitLiveBytes(func(v uint64) bool { return v < baseline+payload }); !ok {
+		t.Fatalf("a result discarded while running was kept when it landed: live %d, baseline %d", live, baseline)
+	}
+
+	// The handle still works, and Discard did not cancel or poison anything.
+	if _, err := h.Call(ctx, []byte{0, 1}); err != nil {
+		t.Fatalf("Call after Discard: %v", err)
+	}
+}

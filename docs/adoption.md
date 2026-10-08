@@ -307,7 +307,10 @@ Things worth knowing before you hit them:
   Handlers are process-global: a panic poisons the handle but leaves the hook,
   and `clear_engine_handlers` removes it.
 - **A `Submit` nobody waits on does not hold a permit.** The permit returns when
-  the reader stores the result; the result stays until `Wait` or `Close`.
+  the reader stores the result; the result stays until `Wait`, `Discard` or
+  `Close`. Nothing bounds how many pile up, and one over 4 KiB is Rust memory
+  the Go GC cannot see, so a fire-and-forget caller must `Discard` each ticket
+  it will not `Wait` on. `Discard` drops the result only; the work still runs.
 - **A ticket has exactly one waiter.** `Wait` on an unknown ticket returns
   `ErrUnknownTicket`; a second concurrent `Wait` on the same ticket returns
   `ErrTicketBusy`. Both used to park the caller forever, ignoring its context.

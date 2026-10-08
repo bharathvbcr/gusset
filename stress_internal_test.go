@@ -90,10 +90,11 @@ const (
 	opAbandon
 	opPanic
 	opDoubleWait
+	opDiscard
 	opCount
 )
 
-var opNames = [opCount]string{"echo", "slow", "coop", "submit-wait", "wait-buffer", "call-buffer", "allocated", "abandon", "panic", "double-wait"}
+var opNames = [opCount]string{"echo", "slow", "coop", "submit-wait", "wait-buffer", "call-buffer", "allocated", "abandon", "panic", "double-wait", "discard"}
 
 func (hm *hammer) failf(format string, args ...any) {
 	hm.unexpected.Add(1)
@@ -459,6 +460,54 @@ func (hm *hammer) step(s *hammerSlot, r *rand.Rand) {
 		}
 		if okN > 1 {
 			hm.failf("double-wait: one result was delivered twice")
+		}
+
+	case opDiscard: // Discard racing a Wait for one result, often a take buffer
+		n := r.IntN(64 << 10)
+		seed := byte(r.Uint32())
+		in := []byte{16, 0, 0, 0, 0, seed}
+		binary.LittleEndian.PutUint32(in[1:5], uint32(n))
+		if r.IntN(3) == 0 {
+			in = append([]byte{9, 1}, payload(r, 1+r.IntN(64))...) // still running
+		}
+		tk, err := h.Submit(ctx, in)
+		if err != nil {
+			hm.check(h, op, fmt.Errorf("submit: %w", err), short)
+			break
+		}
+		if r.IntN(2) == 0 {
+			runtime.Gosched() // let the result land in completed first
+		}
+		waited := make(chan error, 1)
+		racing := r.IntN(2) == 0
+		if racing {
+			go func() {
+				_, err := h.Wait(ctx, tk)
+				waited <- err
+			}()
+		}
+		derr := h.Discard(tk)
+		switch {
+		case derr == nil:
+		case errors.Is(derr, ErrTicketBusy), errors.Is(derr, ErrUnknownTicket):
+			if !racing {
+				hm.failf("discard: %v with no other claimant (%s)", derr, ticketState(h.state, tk))
+			}
+		default:
+			hm.check(h, op, fmt.Errorf("discard (%s): %w", ticketState(h.state, tk), derr), short)
+		}
+		if racing {
+			werr := <-waited
+			if werr == nil && derr == nil {
+				hm.failf("discard: a result Discard gave up was still delivered to Wait")
+			}
+			if werr != nil && !errors.Is(werr, ErrUnknownTicket) {
+				hm.check(h, op, fmt.Errorf("wait: %w", werr), short)
+			}
+		}
+		// Spent either way.
+		if err := h.Discard(tk); err == nil || (!errors.Is(err, ErrUnknownTicket) && !expected(h, err, short, false)) {
+			hm.failf("second Discard on a spent ticket: %v (first %v, racing %v, %s)", err, derr, racing, ticketState(h.state, tk))
 		}
 	}
 

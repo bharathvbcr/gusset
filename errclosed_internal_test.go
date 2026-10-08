@@ -70,6 +70,8 @@ func TestErrClosed_EveryEntryPointAfterClose(t *testing.T) {
 	wantClosed(t, "Wait(unknown ticket)", err, is)
 	_, err = h.NewBuffer(64)
 	wantClosed(t, "NewBuffer", err, is)
+	wantClosed(t, "Discard(outstanding ticket)", h.Discard(outstanding), is)
+	wantClosed(t, "Discard(unknown ticket)", h.Discard(1<<62), is)
 
 	// Buffer operations after Close are contract, not errors.
 	if b := buf.Bytes(); b != nil {

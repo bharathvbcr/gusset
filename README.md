@@ -221,13 +221,14 @@ Gusset exports strictly 17 C ABI functions from `libgusset.a` (enforced by `test
 - `gusset_buf_alloc(handle, len, out_id, out_ptr, status)`: Allocates 64-byte aligned Rust buffer.
 - `gusset_buf_free(handle, id, status)`: Frees Rust-owned buffer.
 
-### 12 Go Public Entry Points
+### 13 Go Public Entry Points
 - `gusset.Open(opts ...Option) (*Handle, error)`
 - `(*Handle).Close() error` — cancels, then **joins** the pool for at most 30 seconds. An engine that honours cancellation exits and `Close` returns `nil`. If a worker is still inside an engine call at the deadline, `Close` returns an error instead of wedging the caller, and a background thread keeps the Rust pool allocated until that worker exits, so the error is not permission to treat the engine's memory as freed. A second `Close` waits for the first. See `gusset.Shutdown` for the process-wide, budgeted drain.
 - `(*Handle).Call(ctx context.Context, in []byte) ([]byte, error)`
 - `(*Handle).CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error)` — the zero-copy round trip. `Call` refuses `[]byte` over 4 KiB, so the payloads zero-copy is for are the ones it cannot carry.
 - `(*Handle).Submit(ctx context.Context, in any) (uint64, error)`
 - `(*Handle).Wait(ctx context.Context, ticket uint64) ([]byte, error)` (and `WaitBuffer` for zero-copy egress)
+- `(*Handle).Discard(ticket uint64) error` — gives up a ticket's result without waiting. A result nobody collects is otherwise kept, as Rust memory the Go GC cannot see when it is over 4 KiB, until `Close`. Discard frees a stored result at once and a running job's result when it lands; it does not cancel the work.
 - `(*Handle).NewBuffer(n int) (*Buffer, error)` (with `(*Buffer).Free() error`)
 - `gusset.Shutdown(drain time.Duration) error` — process-wide, one-way, budgeted drain. Returns non-nil when work was still in flight at the deadline rather than reporting a success the caller cannot rely on.
 - `gusset.Stats() AllocStats`
@@ -235,7 +236,7 @@ Gusset exports strictly 17 C ABI functions from `libgusset.a` (enforced by `test
 - `gusset.Threads() int64`
 - `gusset.DrainLogs(buf []byte) int`
 
-Options (not entry points): `WithPoolSize`, `WithDiagnosticEngine`, `WithOpcode` (or `ContextWithOpcode` per call; any integer kind is accepted), and `WithBufferBudget`, which caps live `NewBuffer` bytes per handle so a missing `Free` becomes `ErrBufferBudget` instead of an OOM the Go GC cannot see coming. Errors to match with `errors.Is`: `ErrClosed` (any call after `Close`, and a waiter whose ticket `Close` or the completion reader ended; the texts "gusset: handle is closed" and "gusset: handle closed" are unchanged), `ErrPanic`, `ErrPoisoned`, `ErrUnknownTicket`, `ErrTicketBusy`, `ErrBufferBudget`, `ErrShutdown` (work cancelled by or refused after `Shutdown`, distinct from `context.Canceled`) and `ErrShutdownIncomplete` (drain budget expired).
+Options (not entry points): `WithPoolSize`, `WithDiagnosticEngine`, `WithOpcode` (or `ContextWithOpcode` per call; any integer kind is accepted), and `WithBufferBudget`, which caps live `NewBuffer` bytes per handle (a negative budget is refused by `Open`; 0 means unlimited) so a missing `Free` becomes `ErrBufferBudget` instead of an OOM the Go GC cannot see coming. Errors to match with `errors.Is`: `ErrClosed` (any call after `Close`, and a waiter whose ticket `Close` or the completion reader ended; the texts "gusset: handle is closed" and "gusset: handle closed" are unchanged), `ErrPanic`, `ErrPoisoned`, `ErrUnknownTicket`, `ErrTicketBusy`, `ErrBufferBudget`, `ErrShutdown` (work cancelled by or refused after `Shutdown`, distinct from `context.Canceled`) and `ErrShutdownIncomplete` (drain budget expired).
 
 A context deadline bounds **the caller**, not the work. `Call` and `Wait` return
 `ctx.Err()` when the context expires, whatever the engine is doing; the pool
