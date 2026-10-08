@@ -11,5 +11,8 @@ bench/results/*.tmp
 !.devcouncil/
 !.devcouncil/config.yaml
 
+# GitPulse (agent worktrees and task state)
+.gitpulse/
+
 # bench/record.sh holds this while a recording runs and removes it on exit.
 bench/results/.record.lock/
