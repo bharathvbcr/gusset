@@ -16,3 +16,6 @@ bench/results/*.tmp
 
 # bench/record.sh holds this while a recording runs and removes it on exit.
 bench/results/.record.lock/
+
+# bench/r14/run.sh stamps the linked archives' hash here before every link.
+bench/r14/host/zz_archives.go
