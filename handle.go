@@ -81,6 +81,13 @@ type handleState struct {
 	// busy — and deliver reclaims both the result and the permit when the
 	// completion finally lands.
 	abandoned map[uint64]struct{}
+	// parkedWaiters counts waiters blocked on their result channel. A delivery
+	// to one readies it onto the reader's P, so drainPipe yields after it; with
+	// none parked the reader keeps polling (see ticketReader.pollPause).
+	parkedWaiters atomic.Int32
+	// multiP caches runtime.GOMAXPROCS(0) > 1, whose read takes the
+	// scheduler's global lock. drainPipe refreshes it every gomaxprocsRefresh.
+	multiP atomic.Bool
 	// takeIDs holds Rust buffer ids for large take() results until a waiter
 	// consumes them. Kept off callResult so the completion channel stays the
 	// same size as HEAD (a uint64 on that struct was +10% B/op on CallParallel).
@@ -193,6 +200,8 @@ func Open(opts ...Option) (*Handle, error) {
 		abandoned:     make(map[uint64]struct{}),
 		takeIDs:       make(map[uint64]uint64),
 	}
+
+	state.multiP.Store(runtime.GOMAXPROCS(0) > 1)
 
 	h := &Handle{state: state}
 

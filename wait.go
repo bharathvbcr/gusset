@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"time"
 
 	"github.com/bharathvbcr/gusset/internal/ffi"
 )
@@ -223,8 +224,29 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 	s.pending[ticket] = ticketCh
 	s.mu.Unlock()
 
-	select {
-	case res := <-ticketCh:
+	res, received := s.pollResult(ctx, ticketCh)
+	if !received {
+		// Counted before the receive, read by deliver after its send: see
+		// deliver's readied. Only with at most one call in flight, the one
+		// case the reader reads it in (drainPipe's yieldEachPoll): under
+		// parallel load every caller bumping one shared counter would bounce
+		// its cache line between them. A waiter that parked under load and is
+		// delivered to once the load has drained is not counted, and runs
+		// when another P steals it, a few microseconds later.
+		counted := len(s.sem) <= 1
+		if counted {
+			s.parkedWaiters.Add(1)
+		}
+		select {
+		case res = <-ticketCh:
+			received = true
+		case <-ctx.Done():
+		}
+		if counted {
+			s.parkedWaiters.Add(-1)
+		}
+	}
+	if received {
 		s.mu.Lock()
 		s.recycleWaitChanLocked(ticketCh)
 		takeID := s.collectLocked(ticket)
@@ -234,57 +256,100 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 			return callResult{}, 0, res.err
 		}
 		return res, takeID, nil
+	}
 
-	case <-ctx.Done():
-		// Ask Rust to stop. This is all cancellation can be: the flag is only
-		// read by an engine that calls JobContext::check, and an engine that
-		// never does — a tokenizer, a regex scan, a proof verifier — runs to
-		// completion regardless.
-		// Never blocks: a close in progress cancels every job itself, and
-		// parking behind its worker join would hold this caller past the
-		// deadline it is returning for.
-		if s.enterCgo() {
-			_ = ffi.Cancel(s.ptr, ticket)
-			s.cgoMu.RUnlock()
-		}
+	// ctx ended first. Ask Rust to stop. This is all cancellation can be: the flag is only
+	// read by an engine that calls JobContext::check, and an engine that
+	// never does — a tokenizer, a regex scan, a proof verifier — runs to
+	// completion regardless.
+	// Never blocks: a close in progress cancels every job itself, and
+	// parking behind its worker join would hold this caller past the
+	// deadline it is returning for.
+	if s.enterCgo() {
+		_ = ffi.Cancel(s.ptr, ticket)
+		s.cgoMu.RUnlock()
+	}
 
-		// Detach rather than wait for the completion.
-		//
-		// This receive used to be unconditional, which made the caller's
-		// deadline a statement about the engine rather than about Gusset: an
-		// 80 ms deadline on a 1.5 s non-cooperative job returned after 1.5 s.
-		// Bounding the caller is the whole contract, so the caller leaves now
-		// and drainPipe disposes of the result when it lands.
-		//
-		// The permit stays behind deliberately. The worker is still executing,
-		// and handing the permit back here would let a further submission run
-		// alongside it — in-flight work above the pool size, which is exactly
-		// the OS-thread bound I4 sells. deliver returns the permit at the
-		// moment the work actually stops.
-		s.mu.Lock()
-		select {
-		case res := <-ticketCh:
-			// Raced: the completion landed between ctx firing and this lock, so
-			// there is nothing to abandon and the permit is free now.
-			s.recycleWaitChanLocked(ticketCh)
-			takeID := s.collectLocked(ticket)
-			s.mu.Unlock()
-			s.discardTake(takeID)
-			// A panic that arrived in the race window is reported as the panic,
-			// not as the deadline: the caller asked what happened to its work
-			// and a real answer exists. drainPipe has already latched the
-			// poison.
-			if res.err != nil && errors.Is(res.err, ErrPanic) {
-				return callResult{}, 0, res.err
-			}
-			return callResult{}, 0, ctx.Err()
-		default:
-			// Out of pending under mu with nothing sent: no send can reach it.
-			delete(s.pending, ticket)
-			s.recycleWaitChanLocked(ticketCh)
-		}
-		s.abandoned[ticket] = struct{}{}
+	// Detach rather than wait for the completion.
+	//
+	// This receive used to be unconditional, which made the caller's
+	// deadline a statement about the engine rather than about Gusset: an
+	// 80 ms deadline on a 1.5 s non-cooperative job returned after 1.5 s.
+	// Bounding the caller is the whole contract, so the caller leaves now
+	// and drainPipe disposes of the result when it lands.
+	//
+	// The permit stays behind deliberately. The worker is still executing,
+	// and handing the permit back here would let a further submission run
+	// alongside it — in-flight work above the pool size, which is exactly
+	// the OS-thread bound I4 sells. deliver returns the permit at the
+	// moment the work actually stops.
+	s.mu.Lock()
+	select {
+	case res := <-ticketCh:
+		// Raced: the completion landed between ctx firing and this lock, so
+		// there is nothing to abandon and the permit is free now.
+		s.recycleWaitChanLocked(ticketCh)
+		takeID := s.collectLocked(ticket)
 		s.mu.Unlock()
+		s.discardTake(takeID)
+		// A panic that arrived in the race window is reported as the panic,
+		// not as the deadline: the caller asked what happened to its work
+		// and a real answer exists. drainPipe has already latched the
+		// poison.
+		if res.err != nil && errors.Is(res.err, ErrPanic) {
+			return callResult{}, 0, res.err
+		}
 		return callResult{}, 0, ctx.Err()
+	default:
+		// Out of pending under mu with nothing sent: no send can reach it.
+		delete(s.pending, ticket)
+		s.recycleWaitChanLocked(ticketCh)
+	}
+	s.abandoned[ticket] = struct{}{}
+	s.mu.Unlock()
+	return callResult{}, 0, ctx.Err()
+}
+
+// waiterSpin is how long a lone waiter polls for its result before parking.
+const waiterSpin = ticketReaderSpin
+
+// pollResult polls a lone in-flight call's result channel for up to
+// waiterSpin, so a result that lands meanwhile is taken without the waiter
+// ever parking.
+//
+// A parked waiter is made runnable by the reader's send, and with a P idle
+// and no thread spinning that costs a system call to wake a thread
+// (pthread_cond_signal on darwin), several microseconds on the reader's
+// critical path; the reader then has to yield its P to run it. A send into
+// the buffered channel of a waiter that is still polling does neither. Only
+// a lone call polls, so a parallel load parks exactly as before and spends no
+// extra core, and only with more than one P: with one, the reader cannot run
+// until this goroutine stops, so a poll would only delay the result it waits
+// for.
+//
+// ok is false when the window ran out or ctx ended; the caller then waits
+// as before, and its select sees ctx.
+func (s *handleState) pollResult(ctx context.Context, ch chan callResult) (res callResult, ok bool) {
+	if len(s.sem) != 1 || !s.multiP.Load() {
+		return callResult{}, false
+	}
+	done := ctx.Done()
+	start := time.Now()
+	for i := 0; ; i++ {
+		select {
+		case res = <-ch:
+			return res, true
+		default:
+		}
+		if i&7 == 7 {
+			select {
+			case <-done:
+				return callResult{}, false
+			default:
+			}
+			if time.Since(start) >= waiterSpin {
+				return callResult{}, false
+			}
+		}
 	}
 }
