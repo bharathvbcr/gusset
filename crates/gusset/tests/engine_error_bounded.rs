@@ -19,43 +19,12 @@ use gusset::header::CallHeader;
 use gusset::{set_engine_handler, Handle};
 use std::ptr;
 
+#[path = "../../../tests/common/mod.rs"]
+mod common;
+use common::{make_pipe, read_ticket};
+
 /// The most bytes Go's `statusToError` reads from a status message.
 const GO_STATUS_MSG_CAP: usize = 65536;
-
-fn make_pipe() -> (i32, i32) {
-    let mut fds = [0i32; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        panic!("pipe failed");
-    }
-    (fds[0], fds[1])
-}
-
-fn read_ticket(fd: i32) -> u64 {
-    let mut buf = [0u8; 8];
-    let mut got = 0usize;
-    while got < 8 {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        if unsafe { libc::poll(&mut pfd, 1, 5000) } <= 0 {
-            panic!("no completion within 5s");
-        }
-        let n = unsafe {
-            libc::read(
-                fd,
-                buf.as_mut_ptr().add(got) as *mut libc::c_void,
-                buf.len() - got,
-            )
-        };
-        if n <= 0 {
-            panic!("completion pipe read failed");
-        }
-        got += n as usize;
-    }
-    u64::from_ne_bytes(buf)
-}
 
 #[test]
 fn a_huge_engine_error_is_capped_on_a_character_boundary() {

@@ -15,13 +15,8 @@ use gusset::header::{CallHeader, GUSSET_FLAG_DIAGNOSTIC_ENGINE};
 use gusset::pool::{Handle, MAX_POOL_SIZE};
 use std::time::{Duration, Instant};
 
-/// Creates a pipe, returning (read_fd, write_fd).
-fn make_pipe() -> (i32, i32) {
-    let mut fds = [0i32; 2];
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    assert_eq!(rc, 0, "pipe() failed");
-    (fds[0], fds[1])
-}
+mod common;
+use common::{make_pipe, read_ticket_within};
 
 /// Reports whether a descriptor number is currently open in this process.
 fn fd_is_open(fd: i32) -> bool {
@@ -540,4 +535,47 @@ fn workers_get_a_guard_paged_sigaltstack_of_at_least_the_floor() {
     })
     .join();
     assert!(res.is_ok());
+}
+
+/// The shared ticket reader is the one every Rust test binary waits on. Three of
+/// its former copies read with no deadline, so a lost ticket hung the binary
+/// until CI's job timeout instead of failing the test that lost it.
+#[test]
+fn shared_ticket_reader_gives_up_at_its_deadline() {
+    let (r, w) = make_pipe();
+    let start = Instant::now();
+    assert_eq!(read_ticket_within(r, Duration::from_millis(100)), None);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "a silent pipe held the reader for {:?}",
+        start.elapsed()
+    );
+    unsafe {
+        libc::close(r);
+        libc::close(w);
+    }
+}
+
+/// The interface allows a short read, so a ticket written in two halves must
+/// still come back whole, and a pipe closed mid-ticket must not be taken for one.
+#[test]
+fn shared_ticket_reader_reassembles_a_split_ticket_and_refuses_a_torn_one() {
+    let ticket: u64 = 0x0102_0304_0506_0708;
+    let bytes = ticket.to_ne_bytes();
+    let (r, w) = make_pipe();
+    let writer = std::thread::spawn(move || {
+        for half in bytes.chunks(4) {
+            let n = unsafe { libc::write(w, half.as_ptr() as *const libc::c_void, half.len()) };
+            assert_eq!(n, 4, "write of a ticket half failed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Half a ticket, then end-of-file.
+        let n = unsafe { libc::write(w, bytes.as_ptr() as *const libc::c_void, 4) };
+        assert_eq!(n, 4, "write of the torn half failed");
+        unsafe { libc::close(w) };
+    });
+    assert_eq!(read_ticket_within(r, Duration::from_secs(5)), Some(ticket));
+    assert!(writer.join().is_ok());
+    assert_eq!(read_ticket_within(r, Duration::from_secs(5)), None);
+    unsafe { libc::close(r) };
 }

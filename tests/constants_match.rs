@@ -10,19 +10,8 @@
 //! Deliberately textual: it reads `#define NAME value` and `const Name = value`
 //! lines and fails loudly on any name it cannot find.
 
-use std::fs;
-use std::path::PathBuf;
-
-fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn read(rel: &str) -> String {
-    match fs::read_to_string(root().join(rel)) {
-        Ok(s) => s,
-        Err(e) => panic!("read {rel}: {e}"),
-    }
-}
+mod common;
+use common::read_repo_file;
 
 /// Evaluates the literal forms used here: `4096u`, `1073741824ull`,
 /// `(1ull << 63)`, `1 << 30`.
@@ -77,7 +66,7 @@ fn constants_agree_across_rust_c_and_go() {
         MAX_INLINE_INPUT, MAX_POOL_SIZE, TAKE_OWNED_FLAG,
     };
 
-    let h = read("internal/ffi/gusset.h");
+    let h = read_repo_file("internal/ffi/gusset.h");
     let rust_c: &[(&str, u64)] = &[
         ("FFI_OK", FFI_OK as u64),
         ("FFI_ERR", FFI_ERR as u64),
@@ -120,9 +109,9 @@ fn constants_agree_across_rust_c_and_go() {
         );
     }
 
-    let handle_go = read("handle.go");
-    let options_go = read("options.go");
-    let buffer_go = read("buffer.go");
+    let handle_go = read_repo_file("handle.go");
+    let options_go = read_repo_file("options.go");
+    let buffer_go = read_repo_file("buffer.go");
     assert_eq!(
         go_const(&options_go, "MaxPoolSize"),
         MAX_POOL_SIZE as u64,

@@ -1,4 +1,4 @@
-use super::{drain_ticket, make_pipe, Must, REGISTRY_TEST_LOCK};
+use super::{make_pipe, read_ticket, Must, REGISTRY_TEST_LOCK};
 use crate::header::CallHeader;
 use crate::pool::{
     clear_engine_handlers, has_engine_handler, lock_recover, register_engine, Handle, JobResult,
@@ -31,7 +31,7 @@ fn register_engine_rejects_opcode_zero() {
     let handle = Handle::open(1, w).must("open");
     let header = CallHeader::default();
     let ticket = handle.submit(header, b"nope", 0).must("submit");
-    assert_eq!(drain_ticket(r), ticket);
+    assert_eq!(read_ticket(r), ticket);
     match handle.take(ticket).must("take") {
         JobResult::Err(msg) => assert!(
             msg.contains("no engine handler registered"),
@@ -73,7 +73,7 @@ fn register_engine_does_not_overwrite_an_opcode() {
         ..Default::default()
     };
     let ticket = handle.submit(header, b"x", 0).must("submit");
-    assert_eq!(drain_ticket(r), ticket);
+    assert_eq!(read_ticket(r), ticket);
     match handle.take(ticket).must("take") {
         JobResult::Ok(bytes) => assert_eq!(bytes, vec![1], "the first handler must still run"),
         other => panic!("unexpected result: {other:?}"),
@@ -111,7 +111,7 @@ fn a_panic_poisons_one_handle_and_leaves_the_global_engine() {
     let ticket = poisoned
         .submit(header, b"poison-this-handle", 0)
         .must("submit");
-    assert_eq!(drain_ticket(r1), ticket);
+    assert_eq!(read_ticket(r1), ticket);
     assert!(
         matches!(poisoned.take(ticket).must("take"), JobResult::Panic { .. }),
         "the engine panic must come back as a panic result"
@@ -128,7 +128,7 @@ fn a_panic_poisons_one_handle_and_leaves_the_global_engine() {
     let (r2, w2) = make_pipe();
     let live = Handle::open(1, w2).must("open live");
     let ticket = live.submit(header, b"still-here", 0).must("submit live");
-    assert_eq!(drain_ticket(r2), ticket);
+    assert_eq!(read_ticket(r2), ticket);
     match live.take(ticket).must("take live") {
         JobResult::Ok(bytes) => assert_eq!(bytes, b"still-here"),
         other => {
@@ -142,7 +142,7 @@ fn a_panic_poisons_one_handle_and_leaves_the_global_engine() {
         "clear_engine_handlers must drop the hook the adopter installed"
     );
     let ticket = live.submit(header, b"again", 0).must("submit after clear");
-    assert_eq!(drain_ticket(r2), ticket);
+    assert_eq!(read_ticket(r2), ticket);
     match live.take(ticket).must("take after clear") {
         JobResult::Err(msg) => assert!(
             msg.contains("no engine handler registered"),
@@ -153,7 +153,7 @@ fn a_panic_poisons_one_handle_and_leaves_the_global_engine() {
 
     register_engine(OPCODE, |_ctx, input: &[u8]| Ok(input.to_vec())).must("reinstall");
     let ticket = live.submit(header, b"back", 0).must("submit reinstalled");
-    assert_eq!(drain_ticket(r2), ticket);
+    assert_eq!(read_ticket(r2), ticket);
     match live.take(ticket).must("take reinstalled") {
         JobResult::Ok(bytes) => assert_eq!(bytes, b"back"),
         other => panic!("reinstalled engine did not run: {other:?}"),

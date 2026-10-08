@@ -10,25 +10,11 @@ mod submit;
 use super::*;
 use crate::header::GUSSET_FLAG_DIAGNOSTIC_ENGINE;
 
-trait Must<T> {
-    fn must(self, msg: &str) -> T;
-}
-impl<T, E: std::fmt::Debug> Must<T> for Result<T, E> {
-    fn must(self, msg: &str) -> T {
-        match self {
-            Ok(v) => v,
-            Err(e) => panic!("{msg}: {e:?}"),
-        }
-    }
-}
-impl<T> Must<T> for Option<T> {
-    fn must(self, msg: &str) -> T {
-        match self {
-            Some(v) => v,
-            None => panic!("{msg}: None"),
-        }
-    }
-}
+// The helpers every Rust test binary shares; see that file for why it lives
+// outside this crate's `src`.
+#[path = "../../../../../tests/common/mod.rs"]
+mod common;
+use common::{make_pipe, read_ticket, Must};
 
 /// Number of further worker spawns to allow before failing, or -1 to disable.
 ///
@@ -79,15 +65,6 @@ pub(super) fn spawn_should_fail() -> bool {
     }
     SPAWN_FAIL_COUNTDOWN.store(remaining - 1, Ordering::Release);
     false
-}
-
-/// Opens a real pipe, returning `(read_fd, write_fd)`.
-fn make_pipe() -> (i32, i32) {
-    let mut fds = [0i32; 2];
-    // SAFETY: `fds` is a valid two-element array for pipe(2) to fill.
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    assert_eq!(rc, 0, "pipe() failed");
-    (fds[0], fds[1])
 }
 
 /// True when `fd` is open *and still refers to the same pipe as `read_fd`*.
@@ -339,7 +316,7 @@ fn kill_workers(handle: &Handle, read_fd: i32, n: usize) {
             completion_ready_within(read_fd, 5_000),
             "kill job never completed"
         );
-        drain_ticket(read_fd);
+        read_ticket(read_fd);
     }
     let start = std::time::Instant::now();
     loop {
@@ -423,7 +400,7 @@ fn failed_respawn_is_retried_by_the_next_submit() {
                 .filter(|h| !h.is_finished())
                 .count()
         );
-        drain_ticket(r);
+        read_ticket(r);
         assert_eq!(
             lock_recover(&handle.workers).len(),
             pool,
@@ -563,7 +540,7 @@ fn respawn_and_failed_open_release_threads_and_mappings() {
             panic!("submit failed: {e}");
         }
         assert!(completion_ready_within(r, 5_000));
-        drain_ticket(r);
+        read_ticket(r);
         // One more dies; its respawn fails once, then succeeds.
         kill_workers(&handle, r, 1);
         arm_spawn_failure(0);
@@ -573,7 +550,7 @@ fn respawn_and_failed_open_release_threads_and_mappings() {
             panic!("submit after a failed respawn failed: {e}");
         }
         assert!(completion_ready_within(r, 5_000));
-        drain_ticket(r);
+        read_ticket(r);
         assert_eq!(lock_recover(&handle.workers).len(), 4);
         handle.close().must("close");
         // SAFETY: the read end is still this test's.
@@ -640,23 +617,4 @@ fn respawn_and_failed_open_release_threads_and_mappings() {
         !leaked(after_failed_opens),
         "partial opens leaked resources"
     );
-}
-
-/// Drain one 8-byte ticket from the completion pipe.
-fn drain_ticket(read_fd: i32) -> u64 {
-    let mut buf = [0u8; 8];
-    let mut got = 0usize;
-    while got < buf.len() {
-        // SAFETY: reading into a valid stack buffer from the pipe's read end.
-        let n = unsafe {
-            libc::read(
-                read_fd,
-                buf.as_mut_ptr().add(got) as *mut libc::c_void,
-                buf.len() - got,
-            )
-        };
-        assert!(n > 0, "completion pipe read failed");
-        got += n as usize;
-    }
-    u64::from_ne_bytes(buf)
 }

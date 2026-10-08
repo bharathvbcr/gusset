@@ -10,12 +10,8 @@
 use gusset::header::{CallHeader, GUSSET_FLAG_DIAGNOSTIC_ENGINE};
 use gusset::pool::{self, Handle};
 
-fn make_pipe() -> (i32, i32) {
-    let mut fds = [0i32; 2];
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    assert_eq!(rc, 0, "pipe() failed");
-    (fds[0], fds[1])
-}
+mod common;
+use common::make_pipe;
 
 /// Drains the completion pipe so workers never block writing tickets.
 fn spawn_drainer(fd: i32) -> std::thread::JoinHandle<()> {

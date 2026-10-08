@@ -15,25 +15,14 @@
 use gusset::header::CallHeader;
 use gusset::pool::{Handle, JobOutput, JobResult};
 
+#[path = "../../../tests/common/mod.rs"]
 mod common;
-use common::{make_pipe, read_ticket};
+use common::{make_pipe, read_ticket, Must};
 
 /// Opcodes of their own, so registration cannot disturb a parallel test in this
 /// binary the way a global `set_engine_handler` would.
 const OPCODE_ALIAS_INPUT: u32 = 9101;
 const OPCODE_RETURN_ZERO: u32 = 9102;
-
-trait Must<T> {
-    fn must(self, msg: &str) -> T;
-}
-impl<T, E: std::fmt::Debug> Must<T> for Result<T, E> {
-    fn must(self, msg: &str) -> T {
-        match self {
-            Ok(v) => v,
-            Err(e) => panic!("{msg}: {e:?}"),
-        }
-    }
-}
 
 #[test]
 fn engine_returning_its_input_buffer_is_refused_not_freed_under_the_caller() {

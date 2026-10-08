@@ -22,28 +22,15 @@
 //! must not silently approve.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::PathBuf;
+
+mod common;
+use common::read_repo_file;
 
 /// One `extern "C"` function, in a form both sides can be reduced to.
 #[derive(Debug, PartialEq, Eq)]
 struct Signature {
     ret: String,
     params: Vec<String>,
-}
-
-fn repo_root() -> PathBuf {
-    // This file lives in the workspace-root `tests/` directory but is registered as
-    // a `[[test]]` of `crates/gusset`, so CARGO_MANIFEST_DIR points at the crate.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn read(path: &str) -> String {
-    let full = repo_root().join(path);
-    match fs::read_to_string(&full) {
-        Ok(s) => s,
-        Err(e) => panic!("cannot read {}: {}", full.display(), e),
-    }
 }
 
 /// Maps a Rust FFI type onto the C spelling the header must use.
@@ -232,8 +219,8 @@ fn parse_rust(src: &str) -> BTreeMap<String, Signature> {
 
 #[test]
 fn header_declarations_match_the_rust_exports() {
-    let rust = parse_rust(&read("crates/gusset/src/ffi/mod.rs"));
-    let header = parse_header(&read("internal/ffi/gusset.h"));
+    let rust = parse_rust(&read_repo_file("crates/gusset/src/ffi/mod.rs"));
+    let header = parse_header(&read_repo_file("internal/ffi/gusset.h"));
 
     assert!(
         !rust.is_empty(),
@@ -287,7 +274,7 @@ fn header_declarations_match_the_rust_exports() {
 
 #[test]
 fn exports_list_matches_the_header_and_the_rust_source() {
-    let listed: Vec<String> = read("internal/ffi/exports.txt")
+    let listed: Vec<String> = read_repo_file("internal/ffi/exports.txt")
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
@@ -301,10 +288,10 @@ fn exports_list_matches_the_header_and_the_rust_source() {
         "internal/ffi/exports.txt must stay sorted so diffs stay reviewable"
     );
 
-    let rust: Vec<String> = parse_rust(&read("crates/gusset/src/ffi/mod.rs"))
+    let rust: Vec<String> = parse_rust(&read_repo_file("crates/gusset/src/ffi/mod.rs"))
         .into_keys()
         .collect();
-    let header: Vec<String> = parse_header(&read("internal/ffi/gusset.h"))
+    let header: Vec<String> = parse_header(&read_repo_file("internal/ffi/gusset.h"))
         .into_keys()
         .collect();
 

@@ -13,6 +13,8 @@
 
 #![allow(unsafe_code)]
 
+mod common;
+
 #[cfg(not(gusset_allocator_api))]
 #[test]
 fn allocator_api_is_absent_only_where_it_is_not_expected() {
@@ -37,45 +39,10 @@ mod on {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    /// `expect` without tripping the crate's R3 clippy ban on it.
-    trait Must<T> {
-        fn must(self, what: &str) -> T;
-    }
-    impl<T, E: std::fmt::Debug> Must<T> for Result<T, E> {
-        fn must(self, what: &str) -> T {
-            match self {
-                Ok(v) => v,
-                Err(e) => panic!("{what}: {e:?}"),
-            }
-        }
-    }
+    use super::common::{make_pipe, read_ticket, Must};
 
     fn live() -> usize {
         get_alloc_stats().live_bytes
-    }
-
-    fn make_pipe() -> (i32, i32) {
-        let mut fds = [0i32; 2];
-        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-        assert_eq!(rc, 0, "pipe() failed");
-        (fds[0], fds[1])
-    }
-
-    fn read_ticket(fd: i32) -> u64 {
-        let mut buf = [0u8; 8];
-        let mut got = 0usize;
-        while got < buf.len() {
-            let n = unsafe {
-                libc::read(
-                    fd,
-                    buf.as_mut_ptr().add(got) as *mut libc::c_void,
-                    buf.len() - got,
-                )
-            };
-            assert!(n > 0, "completion pipe read failed");
-            got += n as usize;
-        }
-        u64::from_ne_bytes(buf)
     }
 
     fn pattern(len: usize, seed: u8) -> impl Iterator<Item = u8> {

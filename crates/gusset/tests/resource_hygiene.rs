@@ -19,12 +19,9 @@ use gusset::header::{CallHeader, GUSSET_FLAG_DIAGNOSTIC_ENGINE};
 use gusset::pool::{Handle, MAX_POOL_SIZE};
 use std::time::Duration;
 
-fn make_pipe() -> (i32, i32) {
-    let mut fds = [0i32; 2];
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    assert_eq!(rc, 0, "pipe() failed");
-    (fds[0], fds[1])
-}
+#[path = "../../../tests/common/mod.rs"]
+mod common;
+use common::{make_pipe, read_ticket};
 
 fn close(fd: i32) {
     unsafe {
@@ -123,31 +120,6 @@ fn settled(base: Usage) -> Usage {
         now = usage();
     }
     now
-}
-
-fn read_ticket(fd: i32) -> u64 {
-    let mut buf = [0u8; 8];
-    let mut got = 0usize;
-    while got < 8 {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        if unsafe { libc::poll(&mut pfd, 1, 5000) } <= 0 {
-            panic!("no completion within 5s");
-        }
-        let n = unsafe {
-            libc::read(
-                fd,
-                buf.as_mut_ptr().add(got) as *mut libc::c_void,
-                buf.len() - got,
-            )
-        };
-        assert!(n > 0, "completion read failed");
-        got += n as usize;
-    }
-    u64::from_ne_bytes(buf)
 }
 
 /// One full lifetime: open, run jobs on every worker, attach a ring (and be

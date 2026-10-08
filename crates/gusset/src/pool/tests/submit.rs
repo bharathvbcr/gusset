@@ -1,4 +1,4 @@
-use super::{drain_ticket, make_pipe, Must, INJECT_LOCK, REGISTRY_TEST_LOCK};
+use super::{make_pipe, read_ticket, Must, INJECT_LOCK, REGISTRY_TEST_LOCK};
 use crate::header::{CallHeader, GUSSET_FLAG_DIAGNOSTIC_ENGINE};
 use crate::pool::{
     lock_recover, register_engine, reserve_id, Handle, JobOutput, JobResult, ID_CEILING,
@@ -137,7 +137,7 @@ fn tickets_are_unique_across_handles() {
                 Ok(t) => t,
                 Err(e) => panic!("submit: {e}"),
             };
-            assert_eq!(drain_ticket(r), t);
+            assert_eq!(read_ticket(r), t);
             assert!(seen.insert(t), "ticket {t} was issued by two handles");
         }
     }
@@ -248,7 +248,7 @@ fn large_ok_result_is_promoted_off_the_cgo_thread() {
         Ok(t) => t,
         Err(e) => panic!("submit failed: {}", e),
     };
-    assert_eq!(drain_ticket(r), ticket);
+    assert_eq!(read_ticket(r), ticket);
 
     let result = match handle.take(ticket) {
         Ok(r) => r,
@@ -336,7 +336,7 @@ fn gusset_buf_alloc_marks_the_buffer_caller_held() {
         Ok(t) => t,
         Err(e) => panic!("submit failed: {}", e),
     };
-    assert_eq!(drain_ticket(r), ticket);
+    assert_eq!(read_ticket(r), ticket);
 
     match handle.take(ticket) {
         Ok(JobResult::Err(msg)) => assert!(

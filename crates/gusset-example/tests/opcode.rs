@@ -8,6 +8,7 @@
 use gusset::header::CallHeader;
 use gusset::pool::{Handle, JobResult};
 
+#[path = "../../../tests/common/mod.rs"]
 mod common;
 use common::{make_pipe, read_ticket};
 

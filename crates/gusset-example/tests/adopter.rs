@@ -15,6 +15,7 @@ use gusset::header::{CallHeader, GUSSET_FLAG_DIAGNOSTIC_ENGINE};
 use gusset::pool::{Handle, JobResult};
 use gusset_example::init_example_engine;
 
+#[path = "../../../tests/common/mod.rs"]
 mod common;
 use common::{make_pipe, read_ticket};
 

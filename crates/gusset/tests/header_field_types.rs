@@ -16,19 +16,10 @@
 //! shapes this ABI uses and fails on anything else rather than skipping it.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::PathBuf;
 
-fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn read(rel: &str) -> String {
-    match fs::read_to_string(root().join(rel)) {
-        Ok(s) => s,
-        Err(e) => panic!("read {rel}: {e}"),
-    }
-}
+#[path = "../../../tests/common/mod.rs"]
+mod common;
+use common::read_repo_file;
 
 /// Rust field type, in C spelling. Arrays become `base[len]`.
 fn rust_to_c(t: &str) -> String {
@@ -149,7 +140,7 @@ fn c_structs(src: &str) -> BTreeMap<String, Vec<(String, String)>> {
 
 #[test]
 fn header_struct_field_types_match_rust() {
-    let header = c_structs(&read("internal/ffi/gusset.h"));
+    let header = c_structs(&read_repo_file("internal/ffi/gusset.h"));
     let cases = [
         ("crates/gusset/src/header.rs", "CallHeader"),
         ("crates/gusset/src/ffi/status.rs", "FfiStatus"),
@@ -157,7 +148,7 @@ fn header_struct_field_types_match_rust() {
         ("crates/gusset/src/ffi/alloc.rs", "AllocStats"),
     ];
     for (file, name) in cases {
-        let rust = rust_struct(&read(file), name);
+        let rust = rust_struct(&read_repo_file(file), name);
         let c = match header.get(name) {
             Some(f) => f,
             None => panic!("gusset.h has no typedef struct {name}"),
@@ -173,9 +164,13 @@ fn header_struct_field_types_match_rust() {
 fn the_type_scan_sees_a_signedness_flip() {
     // The scan must be able to fail: a header differing only in the sign of
     // one field is rejected.
-    let flipped = read("internal/ffi/gusset.h").replace("    uint32_t line;", "    int32_t line;");
+    let flipped =
+        read_repo_file("internal/ffi/gusset.h").replace("    uint32_t line;", "    int32_t line;");
     let header = c_structs(&flipped);
-    let rust = rust_struct(&read("crates/gusset/src/ffi/status.rs"), "FfiStatus");
+    let rust = rust_struct(
+        &read_repo_file("crates/gusset/src/ffi/status.rs"),
+        "FfiStatus",
+    );
     let c = match header.get("FfiStatus") {
         Some(f) => f,
         None => panic!("FfiStatus missing"),

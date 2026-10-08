@@ -17,6 +17,7 @@ use gusset::pool::{Handle, JobResult};
 use gusset::{CancelReason, FFI_ERR};
 use gusset_example::init_example_engine;
 
+#[path = "../../../tests/common/mod.rs"]
 mod common;
 use common::{make_pipe, read_ticket};
 

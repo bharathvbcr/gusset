@@ -10,49 +10,10 @@
 //! Separate test binary because it registers a process-global engine handler.
 
 use gusset::pool::{set_engine_handler, Handle, JobResult};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-fn make_pipe() -> (i32, i32) {
-    let mut fds = [0i32; 2];
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    assert_eq!(rc, 0, "pipe() failed");
-    (fds[0], fds[1])
-}
-
-/// Reads one 8-byte completion ticket, or `None` once `limit` passes without one.
-fn read_ticket(fd: i32, limit: Duration) -> Option<u64> {
-    let deadline = Instant::now() + limit;
-    let mut buf = [0u8; 8];
-    let mut got = 0usize;
-    while got < buf.len() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return None;
-        }
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ms = left.as_millis().min(i32::MAX as u128) as i32;
-        let rc = unsafe { libc::poll(&mut pfd, 1, ms.max(1)) };
-        if rc <= 0 {
-            continue;
-        }
-        let n = unsafe {
-            libc::read(
-                fd,
-                buf.as_mut_ptr().add(got) as *mut libc::c_void,
-                buf.len() - got,
-            )
-        };
-        if n <= 0 {
-            return None;
-        }
-        got += n as usize;
-    }
-    Some(u64::from_ne_bytes(buf))
-}
+mod common;
+use common::{make_pipe, read_ticket_within};
 
 /// A panic payload whose destructor panics again.
 struct DropBomb {
@@ -100,7 +61,7 @@ fn assert_bomb_completes(kind: u8) {
         Err(e) => panic!("submit failed: {}", e),
     };
 
-    let Some(done) = read_ticket(r, Duration::from_secs(5)) else {
+    let Some(done) = read_ticket_within(r, Duration::from_secs(5)) else {
         panic!(
             "no completion for ticket {ticket} within 5s: the worker died outside the \
              panic firewall and the Go waiter would park forever (I2, I4)"
@@ -157,7 +118,7 @@ fn panicking_payload_destructor_does_not_kill_the_worker() {
         Ok(t) => t,
         Err(e) => panic!("submit failed: {}", e),
     };
-    assert_eq!(read_ticket(r, Duration::from_secs(5)), Some(ticket));
+    assert_eq!(read_ticket_within(r, Duration::from_secs(5)), Some(ticket));
     match handle.take(ticket) {
         Ok(JobResult::Ok(out)) => assert_eq!(out, vec![7, 7]),
         other => panic!("expected echo, got {:?}", other),
