@@ -121,9 +121,10 @@ fn constants_agree_across_rust_c_and_go() {
     }
 
     let handle_go = read("handle.go");
+    let options_go = read("options.go");
     let buffer_go = read("buffer.go");
     assert_eq!(
-        go_const(&handle_go, "MaxPoolSize"),
+        go_const(&options_go, "MaxPoolSize"),
         MAX_POOL_SIZE as u64,
         "Go MaxPoolSize"
     );

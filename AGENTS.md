@@ -194,7 +194,9 @@ gusset/
   crates/gusset/          # runtime crate: ffi/, pool/, alloc/, header/
   crates/gusset-example/  # reference adopter engine exercising all failure modes
   go.mod                  # module github.com/bharathvbcr/gusset
-  gusset.go handle.go stats.go buffer.go  # public API (13 entry points)
+  gusset.go handle.go stats.go buffer.go  # public API (13 entry points), with
+  options.go submit.go wait.go            #   Handle's options, Submit/Call and Wait/Discard
+  drain.go ticket_reader.go tickets.go    # completion reader, delivery, ticket bookkeeping
   internal/ffi/           # cgo bridge, hand-maintained gusset.h, exports.txt
   tools/gussetvet/        # custom go vet analyzer enforcing R4 & R5
   tools/benchdoc/         # benchstat-driven README generator
