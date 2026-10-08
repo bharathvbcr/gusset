@@ -11,8 +11,11 @@ Each step exists because skipping it produces a specific failure, named inline.
 
 ## 1. Build one staticlib, from an umbrella crate
 
-R14 allows exactly one Rust `staticlib` per Go binary. Two of them put std in the
-binary twice and the link fails with `rust_eh_personality` defined twice.
+R14 allows exactly one *unsealed* Rust `staticlib` per Go binary. Two of them put
+std in the binary twice: under fat LTO the link fails with `rust_eh_personality`
+defined twice, and without LTO it can link cleanly and quietly share one std
+between engines, which is worse. An engine that cannot be built into the umbrella
+is sealed instead; see [1b](#1b-an-engine-that-cannot-join-the-umbrella).
 
 So an adopter does not link Gusset's archive *and* their engine's archive. They
 build a single umbrella crate that depends on both.
@@ -70,6 +73,47 @@ the panic firewall silently becomes a no-op. LTO is **your** choice: `lto = "thi
 and `lto = "fat"` are both fine, and no Gusset invariant depends on either. Note
 that a `fat`-LTO archive holds LLVM bitcode, which a system `nm` from an older LLVM
 cannot read; use the toolchain's `llvm-nm` if you inspect symbols.
+
+## 1b. An engine that cannot join the umbrella
+
+Use the umbrella whenever you can: it costs nothing, and `register_engine(opcode, …)`
+already gives each engine its own crate and owner. Seal an archive only when the
+umbrella cannot hold it — a vendor staticlib with no source, an engine pinned to a
+different Rust toolchain, or one whose releases must not rebuild the umbrella.
+
+```sh
+go run github.com/bharathvbcr/gusset/tools/gussetseal \
+  -prefix vendor_ -o lib/libvendor.a path/to/libvendor.a
+```
+
+`gussetseal` links the archive into one object and leaves only `vendor_*`
+global; the engine keeps a private std, allocator and panic runtime. COMDAT
+groups and common symbols get names only this engine has (a shared personality
+group crashes the second engine on its first panic). It refuses to write the
+archive when anything else is still global, when nothing matches the prefix,
+when the prefix claims Gusset's or Rust's names, or when the archive it wrote
+does not hold exactly the object it verified. It runs on darwin (either
+architecture, one per archive) and Linux (glibc and musl), which is all of
+Gusset's supported set.
+
+What changes for you once an engine is sealed:
+
+- **Only its C ABI crosses the seal.** Never hand a `String`, `Vec`, `Box`, trait
+  object or panic payload from one sealed copy to another, or to the umbrella.
+  Memory goes back through the engine's own `*_free` (R4).
+- **Its heap is invisible to Gusset.** `gusset.Stats()` and `AdviseMemoryLimit`
+  count `libgusset.a`'s allocator only. Export the engine's own live-bytes counter
+  and add it in before setting `GOMEMLIMIT`.
+- **Its panics are its own.** A sealed engine must catch its own panics at its C
+  ABI; it does not get Gusset's firewall, poisoned handles or deadlines unless its
+  work is submitted through Gusset by an umbrella engine.
+- **About 300 KB more text**, its private std (darwin/arm64, fat LTO).
+- **The binary still needs external linking**, as it already does for
+  `libgusset.a` alone.
+
+`bench/r14/run.sh` is the proof and the regression test: it links two sealed
+engines beside `libgusset.a` and checks panics, panic hooks, allocators and
+thread-locals stay per engine (`docs/rfc-r14.md`).
 
 ## 2. Register your engine, and call the registration
 

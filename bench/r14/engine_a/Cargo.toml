@@ -1,0 +1,22 @@
+[package]
+name = "engine_a"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A standalone staticlib, deliberately not part of Gusset's workspace or of any
+# umbrella: the point of the R14 spike is two archives built independently.
+[lib]
+crate-type = ["staticlib"]
+
+# Gusset's release profile (R2, plus fat LTO), so the archive has the same shape
+# an adopter's would.
+[profile.release]
+panic = "unwind"
+codegen-units = 1
+lto = "fat"
+
+[profile.dev]
+panic = "unwind"
+
+[workspace]

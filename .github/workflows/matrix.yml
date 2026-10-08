@@ -393,6 +393,120 @@ jobs:
       - name: Aggressive GC Test
         run: GOGC=1 go test -v -count=5 -timeout 20m . ./tests/panic_zoo/... ./tests/pitfalls/...
 
+  # R14's enforcer (docs/rfc-r14.md). A toolchain bump that changes what a naive
+  # second staticlib does, or makes the COMDAT rename unnecessary, or breaks a
+  # sealed engine beside libgusset.a, fails here instead of in an adopter.
+  r14:
+    name: R14 sealed staticlibs (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # Installed first so stable below stays the default; run.sh builds engine B
+      # with `cargo +1.97` for the toolchain-skew scenario.
+      - name: Set up Rust 1.97 (skew scenario)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.97'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # asan-rust builds libgusset.a and both engines with -Zsanitizer=address.
+      # run.sh reads the same RUST_NIGHTLY pin; `toolchain install` leaves the
+      # default alone. Go's -asan is linux-gnu only, so macOS reports n/a.
+      - name: Install the pinned nightly (asan-rust scenario)
+        if: runner.os == 'Linux'
+        run: rustup toolchain install "$RUST_NIGHTLY" --profile minimal
+
+      # x86_64-apple-darwin is in the supported set; the macOS runner is arm64,
+      # so that leg runs under Rosetta. A missing Rosetta fails here rather
+      # than skipping the architecture.
+      - name: Add x86_64-apple-darwin (Rosetta leg)
+        if: runner.os == 'macOS'
+        run: |
+          arch -x86_64 /usr/bin/true || { echo "::error::Rosetta is not available"; exit 1; }
+          rustup target add x86_64-apple-darwin
+          rustup target add --toolchain 1.97 x86_64-apple-darwin
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          cache: false
+
+      # Platform-specific tests live in _linux/_darwin files, so no test skips on
+      # a runner that has cc and ar; a skip means a check did not run, which is
+      # not a pass. pipefail because an unset `shell:` is `bash -e` alone, and
+      # tee would hide a failure.
+      - name: gussetseal tests
+        run: |
+          set -o pipefail
+          go test -count=1 -v ./tools/gussetseal | tee seal.txt
+          if grep -q -- '--- SKIP' seal.txt; then
+            echo "::error::a gussetseal test skipped"; exit 1
+          fi
+
+      # The host is its own module, so the lint job's `go vet ./...` never sees it.
+      - name: Vet the harness host
+        run: cd bench/r14/host && go vet .
+
+      - name: R14 harness
+        run: |
+          set -o pipefail
+          bench/r14/run.sh | tee r14.txt
+          if grep -q '^SKIPPED' r14.txt; then
+            echo "::error::an R14 scenario skipped"; exit 1
+          fi
+
+      - name: R14 harness, x86_64-apple-darwin under Rosetta
+        if: runner.os == 'macOS'
+        env:
+          R14_TARGET: x86_64-apple-darwin
+          GOARCH: amd64
+        run: |
+          set -o pipefail
+          bench/r14/run.sh | tee r14-x86.txt
+          if grep -q '^SKIPPED' r14-x86.txt; then
+            echo "::error::an R14 scenario skipped"; exit 1
+          fi
+
+  # x86_64-unknown-linux-musl is in the supported set. Same container and
+  # toolchain setup as the musl job below.
+  r14-musl:
+    name: R14 sealed staticlibs (musl)
+    runs-on: ubuntu-latest
+    container: golang:1.27-alpine
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install toolchain
+        run: |
+          apk add --no-cache build-base musl-dev rustup binutils
+          rustup-init -y --default-toolchain stable --profile minimal
+          "$HOME/.cargo/bin/rustup" toolchain install 1.97 --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: gussetseal tests
+        run: |
+          set -o pipefail
+          go test -count=1 -v ./tools/gussetseal | tee seal.txt
+          if grep -q -- '--- SKIP' seal.txt; then
+            echo "::error::a gussetseal test skipped"; exit 1
+          fi
+
+      - name: R14 harness
+        run: |
+          set -o pipefail
+          bench/r14/run.sh | tee r14.txt
+          if grep -q '^SKIPPED' r14.txt; then
+            echo "::error::an R14 scenario skipped"; exit 1
+          fi
+
   musl:
     name: musl (I5, R8)
     runs-on: ubuntu-latest
