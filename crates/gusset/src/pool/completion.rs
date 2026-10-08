@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 /// The descriptor is read under `lock` on every attempt, and `close` swaps it to
 /// -1 and closes it under the same lock: a write can never land on a number
 /// `close` has already released and the process has reused for another file.
-fn write_completion(
+pub(super) fn write_completion(
     lock: &Mutex<()>,
     fd: &AtomicI32,
     closed: &AtomicBool,

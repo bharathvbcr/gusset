@@ -2,7 +2,7 @@
 //!
 //! `gusset_submit` and `gusset_buf_alloc` run the guarded call, and when it
 //! fails and the handle turns out to be poisoned they report `FFI_POISONED`
-//! instead. They used to `ptr::write` the new status over the one `ffi_guard`
+//! instead. They used to `ptr::write` the new status over the one `ffi_guard_code`
 //! had just filled, leaking its boxed message on every such failure.
 //!
 //! The poison flip that reaches that branch is a race and cannot be scheduled

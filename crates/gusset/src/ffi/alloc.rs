@@ -64,8 +64,9 @@ fn mark_counting_active() {
 ///
 /// Inferred: the flag is set by the first allocation any `Counting` serves
 /// through `GlobalAlloc`, so a non-global `Counting` called through
-/// `GlobalAlloc` sets it too. Only [`record_alloc`]/[`record_dealloc`] consult
-/// it; Gusset's own buffers never do (see [`count_buffer_alloc`]).
+/// `GlobalAlloc` sets it too. Only `Counting`'s allocator-API path consults it,
+/// to skip bytes a counted global allocator below it already saw; Gusset's own
+/// buffers never do (see [`count_buffer_alloc`]).
 #[inline]
 pub fn counting_is_active() -> bool {
     COUNTING_ACTIVE.load(Ordering::Relaxed)
@@ -140,8 +141,9 @@ fn dec_live_bytes(size: usize) {
 
 /// Records `size` freshly allocated bytes that bypassed the global allocator.
 ///
-/// Unlike [`record_alloc`], never skipped: the caller knows these bytes did not
-/// pass through an installed `Counting`, so nothing else will count them.
+/// Never skipped, whatever [`counting_is_active`] says: the caller knows these
+/// bytes did not pass through an installed `Counting`, so nothing else will
+/// count them.
 #[cfg(gusset_allocator_api)]
 #[inline]
 fn count_alloc_always(size: usize) {
@@ -151,8 +153,9 @@ fn count_alloc_always(size: usize) {
     }
 }
 
-/// Moves the live total from `old` to `new` bytes after a resize, with the same
-/// no-op rule as [`record_alloc`] when `always` is false.
+/// Moves the live total from `old` to `new` bytes after a resize. Unless
+/// `always`, a no-op once [`counting_is_active`]: the counted global allocator
+/// below has already seen the bytes.
 #[cfg(gusset_allocator_api)]
 #[inline]
 fn count_resize(old: usize, new: usize, always: bool) {
@@ -482,19 +485,6 @@ pub fn get_alloc_stats() -> AllocStats {
     }
 }
 
-/// Records an allocation that bypassed the counting wrapper.
-///
-/// A no-op once `Counting` is installed, because the global allocator has already
-/// counted these bytes. See `COUNTING_ACTIVE`.
-#[inline]
-pub fn record_alloc(size: usize) {
-    if counting_is_active() {
-        return;
-    }
-    add_live_bytes(size);
-    add_alloc_count();
-}
-
 /// Counts `size` bytes of Gusset buffer memory. Always counted here.
 ///
 /// Buffer memory ([`BufferAlloc`] and every `RawBuffer`) comes from `System`,
@@ -519,23 +509,6 @@ pub fn count_buffer_dealloc(size: usize) {
     }
 }
 
-/// Records a deallocation that bypassed the counting wrapper.
-///
-/// Paired with [`record_alloc`]: both consult the same flag. The flag only
-/// ever turns on, but it can turn on between a recorded allocation and its
-/// free (a non-global `Counting` called through `GlobalAlloc` flips it; see
-/// `tests/rust_counting_flip.rs`). A record made before the flip is then never
-/// released and `live_bytes` stays high for the rest of the process. Memory
-/// that never passes through the global allocator should use
-/// [`count_buffer_alloc`]/[`count_buffer_dealloc`], which do not consult it.
-#[inline]
-pub fn record_dealloc(size: usize) {
-    if counting_is_active() {
-        return;
-    }
-    dec_live_bytes(size);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,10 +518,9 @@ mod tests {
     /// delta for the same reason.
     #[test]
     fn accounting_is_balanced_saturating_and_peak_monotonic() {
-        // Gusset installs no global allocator, so unless an adopter installed
-        // Counting the manual recorders are live. If some other test in this binary
-        // ever installs one, this test would be measuring nothing; assert instead of
-        // silently passing.
+        // Gusset installs no global allocator (DECISIONS 2026-09-20); the
+        // adopter does. A library that installed one would count every heap
+        // allocation in this binary under the deltas below.
         assert!(
             !counting_is_active(),
             "the library under test must not install a global allocator"
@@ -556,7 +528,7 @@ mod tests {
 
         let before = get_alloc_stats();
 
-        record_alloc(4096);
+        count_buffer_alloc(4096);
         let after_alloc = get_alloc_stats();
         assert_eq!(
             after_alloc.live_bytes,
@@ -573,7 +545,7 @@ mod tests {
             "peak must never read below live"
         );
 
-        record_dealloc(4096);
+        count_buffer_dealloc(4096);
         let after_free = get_alloc_stats();
         assert_eq!(
             after_free.live_bytes, before.live_bytes,
@@ -588,7 +560,7 @@ mod tests {
         // `live_bytes` is a usize read by AdviseMemoryLimit as a signed budget; an
         // underflow there would subtract roughly 16 EiB from the Go heap limit.
         let live_now = get_alloc_stats().live_bytes;
-        record_dealloc(live_now.saturating_add(1 << 20));
+        count_buffer_dealloc(live_now.saturating_add(1 << 20));
         assert_eq!(
             get_alloc_stats().live_bytes,
             0,
@@ -603,7 +575,7 @@ mod tests {
         let saved_live = LIVE_BYTES.swap(usize::MAX - 8, Ordering::Relaxed);
         let saved_peak = PEAK_BYTES.swap(0, Ordering::Relaxed);
         let saved_count = ALLOC_COUNT.load(Ordering::Relaxed);
-        record_alloc(64);
+        count_buffer_alloc(64);
         let saturated = LIVE_BYTES.load(Ordering::Relaxed);
         LIVE_BYTES.store(saved_live, Ordering::Relaxed);
         PEAK_BYTES.store(saved_peak.max(saved_live), Ordering::Relaxed);

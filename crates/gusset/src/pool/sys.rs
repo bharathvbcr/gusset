@@ -148,11 +148,6 @@ impl RawBuffer {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
-
-    /// Copies buffer bytes into a new `Vec<u8>`.
-    pub fn to_vec(&self) -> Vec<u8> {
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len).to_vec() }
-    }
 }
 
 impl Drop for RawBuffer {
@@ -335,34 +330,27 @@ pub fn install_sigaltstack() -> Option<SigAltStackGuard> {
     }
 }
 
-/// How long a stalled completion write waits before `write_ticket` gives up,
-/// and before `write_completion` (pool/completion.rs) logs that the reader is stuck.
+/// How long a stalled completion write waits before `write_completion`
+/// (pool/completion.rs) logs that the reader is stuck.
 ///
-/// Production workers do not use `write_ticket`. They call `write_completion`,
-/// which retries until the write lands, the handle closes, or the pipe reports
-/// a hard error, and only logs once this duration has elapsed. `write_ticket`
-/// still returns `TimedOut` after this bound; its callers are tests.
+/// It is a log threshold, not a give-up: `write_completion` retries until the
+/// write lands, the handle closes, or the pipe reports a hard error.
 pub(crate) const WRITE_TICKET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Upper bound on the backoff sleep between retries on a full pipe.
 pub(crate) const WRITE_TICKET_MAX_BACKOFF: std::time::Duration =
     std::time::Duration::from_millis(8);
 
-/// One non-blocking attempt to write an 8-byte ticket.
-///
-/// Returns [`ErrorKind::WouldBlock`] when the pipe is full and no byte of this
-/// ticket has been committed, so the caller can sleep without holding the
-/// exclusivity lock. A short write is finished inside this call: releasing the
-/// lock between the two halves would let another ticket interleave and break
-/// framing for every later completion.
-pub fn write_ticket_attempt(fd: i32, ticket: u64) -> Result<()> {
-    write_record_attempt(fd, &ticket.to_ne_bytes())
-}
-
 /// One non-blocking attempt to write a whole completion record (a bare ticket,
 /// or an inline-result record of at most 64 bytes). Records are far below
 /// `PIPE_BUF`, so on a pipe the write is all-or-nothing; the short-write
 /// handling below is for anything else the descriptor might be.
+///
+/// Returns [`ErrorKind::WouldBlock`] when the pipe is full and no byte of this
+/// record has been committed, so the caller can sleep without holding the
+/// exclusivity lock. A short write is finished inside this call: releasing the
+/// lock between the two halves would let another record interleave and break
+/// framing for every later completion.
 pub fn write_record_attempt(fd: i32, bytes: &[u8]) -> Result<()> {
     if fd < 0 {
         return Err(Error::new(
@@ -414,41 +402,6 @@ pub fn write_record_attempt(fd: i32, bytes: &[u8]) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Writes an 8-byte ticket to the pipe file descriptor with EINTR/EAGAIN retries.
-///
-/// POSIX guarantees atomic writes for payloads up to PIPE_BUF (>= 512 bytes).
-///
-/// `EINTR` is retried without limit: Go's async preemption (`SIGURG`) interrupts
-/// syscalls on this thread constantly and makes no progress claim either way.
-/// `EAGAIN` means the pipe is genuinely full, so it backs off exponentially instead
-/// of spinning `yield_now` at 100% CPU, and gives up once `WRITE_TICKET_TIMEOUT`
-/// has elapsed.
-pub fn write_ticket(fd: i32, ticket: u64) -> Result<()> {
-    let mut backoff = std::time::Duration::from_micros(50);
-    let mut blocked_since: Option<std::time::Instant> = None;
-
-    loop {
-        match write_ticket_attempt(fd, ticket) {
-            Ok(()) => return Ok(()),
-            Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                let since = *blocked_since.get_or_insert_with(std::time::Instant::now);
-                if since.elapsed() >= WRITE_TICKET_TIMEOUT {
-                    return Err(Error::new(
-                        ErrorKind::TimedOut,
-                        format!(
-                            "completion pipe full for {:?}; reader is not draining",
-                            WRITE_TICKET_TIMEOUT
-                        ),
-                    ));
-                }
-                std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(WRITE_TICKET_MAX_BACKOFF);
-            }
-            Err(err) => return Err(err),
-        }
-    }
 }
 
 /// Makes sure the pipe behind `fd` can hold `bytes` unread bytes.

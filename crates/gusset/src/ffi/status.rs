@@ -100,7 +100,7 @@ impl FfiStatus {
 
     /// Replaces an initialised status, releasing the message it still owns.
     ///
-    /// `ffi_guard` has always initialised the status by the time an export
+    /// `ffi_guard_code` has always initialised the status by the time an export
     /// decides to report something else instead (poison discovered after the
     /// guarded call failed). A plain `ptr::write` over it leaked the boxed
     /// message the guard had just allocated.

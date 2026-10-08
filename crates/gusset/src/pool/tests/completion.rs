@@ -1,13 +1,109 @@
 use super::{make_pipe, Must, FORCE_TICKET_ONLY};
 use crate::header::{CallHeader, GUSSET_FLAG_DIAGNOSTIC_ENGINE};
-use crate::pool::completion::size_completion_pipe;
+use crate::pool::completion::{size_completion_pipe, write_completion};
 use crate::pool::{
-    lock_recover, Handle, IdMap, JobResult, INLINE_RECORD_FLAG, INLINE_RECORD_MAX,
+    lock_recover, sys, Handle, IdMap, JobResult, INLINE_RECORD_FLAG, INLINE_RECORD_MAX,
     INLINE_RESULT_MAX,
 };
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
+
+/// A non-blocking pipe whose buffer is full, returning `(read_fd, write_fd)`.
+fn full_pipe() -> (i32, i32) {
+    let (r, w) = make_pipe();
+    sys::set_nonblocking(w).must("set_nonblocking");
+    let filler = [0u8; 4096];
+    // SAFETY: writing from a valid stack buffer until the kernel refuses.
+    while unsafe { libc::write(w, filler.as_ptr() as *const libc::c_void, filler.len()) } > 0 {}
+    (r, w)
+}
+
+/// A full completion pipe used to spin `yield_now()` forever, hanging
+/// `Handle::close` in `join`. `write_completion` keeps retrying a live reader
+/// by design, but `close` sets `closed` first, so a writer on a pipe nobody
+/// will drain gives up within a backoff step of it.
+///
+/// Ported from `write_ticket_gives_up_on_a_permanently_full_pipe`, which
+/// tested a bounded writer no production path used.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn write_completion_gives_up_on_a_full_pipe_once_the_handle_closes() {
+    let (r, w) = full_pipe();
+    let lock = Mutex::new(());
+    let fd = AtomicI32::new(w);
+    let closed = Arc::new(AtomicBool::new(false));
+
+    let closer = {
+        let closed = Arc::clone(&closed);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            closed.store(true, Ordering::Release);
+        })
+    };
+    let started = Instant::now();
+    let result = write_completion(&lock, &fd, &closed, 42, &42u64.to_ne_bytes());
+    let elapsed = started.elapsed();
+    closer.join().must("closer");
+
+    match result {
+        Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotConnected, "{e}"),
+        Ok(()) => panic!("a full pipe nobody drains reported a delivered completion"),
+    }
+    assert!(
+        elapsed >= Duration::from_millis(200),
+        "gave up before the handle closed: a live reader would lose the ticket"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "still writing {elapsed:?} after close"
+    );
+    // SAFETY: both ends are owned by this test.
+    unsafe {
+        libc::close(r);
+        libc::close(w);
+    }
+}
+
+/// A slow-but-live reader is served: the retry path makes progress rather
+/// than giving up, and the record arrives whole after the filler.
+///
+/// Ported from `write_ticket_succeeds_once_a_stalled_reader_drains`.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn write_completion_succeeds_once_a_stalled_reader_drains() {
+    let (r, w) = full_pipe();
+    let lock = Mutex::new(());
+    let fd = AtomicI32::new(w);
+    let closed = AtomicBool::new(false);
+
+    let reader = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(200));
+        let mut sink = vec![0u8; 1 << 20];
+        let mut got = Vec::new();
+        // Drain until the record lands behind the filler: every filler byte
+        // is zero, so the ticket is the only nonzero word.
+        while !got.ends_with(&7u64.to_ne_bytes()) {
+            // SAFETY: reading into a valid heap buffer from our read end.
+            let n = unsafe { libc::read(r, sink.as_mut_ptr() as *mut libc::c_void, sink.len()) };
+            assert!(n > 0, "pipe read failed");
+            got.extend_from_slice(&sink[..n as usize]);
+        }
+        r
+    });
+
+    let result = write_completion(&lock, &fd, &closed, 7, &7u64.to_ne_bytes());
+    if let Err(e) = result {
+        panic!("write must succeed once the reader drains, got {e}");
+    }
+    let r = reader.join().must("reader");
+    // SAFETY: both ends are owned by this test.
+    unsafe {
+        libc::close(r);
+        libc::close(w);
+    }
+}
 
 #[test]
 fn completion_pipe_sizing_falls_back_to_tickets_then_refuses() {

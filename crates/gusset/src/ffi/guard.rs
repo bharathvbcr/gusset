@@ -183,7 +183,7 @@ fn describe_panic_payload(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// Structured error passed through ffi_guard to populate FfiStatus (R1, R2, R3).
+/// Structured error passed through ffi_guard_code to populate FfiStatus (R1, R2, R3).
 #[derive(Debug, Clone)]
 pub struct FfiError {
     /// Return status code (FFI_ERR, FFI_PANIC, FFI_POISONED, FFI_BAD_ARG).
@@ -213,20 +213,8 @@ impl From<&str> for FfiError {
     }
 }
 
-/// Executes a closure behind a panic firewall and populates out_status (R1, R2, R3).
-///
-/// # Safety
-///
-/// The caller must ensure that `status` is either null or points to valid, writable
-/// memory for an `FfiStatus` struct.
-pub unsafe fn ffi_guard<F, R>(status: *mut FfiStatus, f: F) -> Option<R>
-where
-    F: FnOnce() -> Result<R, FfiError>,
-{
-    unsafe { ffi_guard_code(status, f) }.ok()
-}
-
-/// [`ffi_guard`] that also returns the failure code, whatever `status` is.
+/// Executes a closure behind the panic firewall, populates `status` (R1, R2, R3)
+/// and returns the failure code, whatever `status` is.
 ///
 /// The status is optional in every export. Reading the code back out of it
 /// left a caller that passes NULL with no code at all, and every export then
@@ -235,7 +223,8 @@ where
 ///
 /// # Safety
 ///
-/// Same as [`ffi_guard`].
+/// The caller must ensure that `status` is either null or points to valid, writable
+/// memory for an `FfiStatus` struct.
 pub unsafe fn ffi_guard_code<F, R>(status: *mut FfiStatus, f: F) -> Result<R, i32>
 where
     F: FnOnce() -> Result<R, FfiError>,
@@ -342,8 +331,9 @@ mod tests {
     #[test]
     fn a_status_message_is_freed_once_and_a_second_free_is_a_no_op() {
         let mut st = FfiStatus::ok();
-        let r: Option<()> = unsafe { ffi_guard(&mut st, || Err(FfiError::from("engine said no"))) };
-        assert!(r.is_none());
+        let r: Result<(), i32> =
+            unsafe { ffi_guard_code(&mut st, || Err(FfiError::from("engine said no"))) };
+        assert_eq!(r, Err(FFI_ERR));
         assert_eq!(st.code, FFI_ERR);
         assert_eq!(msg_of(&st), "engine said no");
         unsafe { gusset_status_free(&mut st) };
@@ -357,8 +347,8 @@ mod tests {
     #[test]
     fn non_string_and_self_destructing_payloads_are_contained() {
         let mut st = FfiStatus::ok();
-        let _: Option<()> = unsafe {
-            ffi_guard(&mut st, || -> Result<(), FfiError> {
+        let _: Result<(), i32> = unsafe {
+            ffi_guard_code(&mut st, || -> Result<(), FfiError> {
                 std::panic::panic_any(7u8)
             })
         };
@@ -372,8 +362,8 @@ mod tests {
                 panic!("payload destructor");
             }
         }
-        let _: Option<()> = unsafe {
-            ffi_guard(&mut st, || -> Result<(), FfiError> {
+        let _: Result<(), i32> = unsafe {
+            ffi_guard_code(&mut st, || -> Result<(), FfiError> {
                 std::panic::panic_any(Bomb)
             })
         };
@@ -384,8 +374,8 @@ mod tests {
     #[test]
     fn an_error_message_is_capped_on_a_char_boundary() {
         let mut st = FfiStatus::ok();
-        let _: Option<()> = unsafe {
-            ffi_guard(&mut st, || -> Result<(), FfiError> {
+        let _: Result<(), i32> = unsafe {
+            ffi_guard_code(&mut st, || -> Result<(), FfiError> {
                 Err(FfiError::from("€".repeat(20_000)))
             })
         };

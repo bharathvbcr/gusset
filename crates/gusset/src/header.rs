@@ -73,7 +73,6 @@ pub struct JobContext {
     deadline: Option<Instant>,
     cancel_flag: Arc<AtomicBool>,
     dequeued_at: Option<Instant>,
-    finished_at: Option<Instant>,
 }
 
 impl JobContext {
@@ -87,7 +86,6 @@ impl JobContext {
             deadline,
             cancel_flag,
             dequeued_at: None,
-            finished_at: None,
         }
     }
 
@@ -106,31 +104,18 @@ impl JobContext {
         self.dequeued_at = Some(Instant::now());
     }
 
-    /// Marks the instant when job execution finished on the worker thread.
-    pub fn mark_finished(&mut self) {
-        self.finished_at = Some(Instant::now());
-    }
-
     /// Time spent waiting in the worker queue before execution began.
     pub fn queue_delay(&self) -> Option<Duration> {
         self.dequeued_at
             .map(|d| d.saturating_duration_since(self.submit_instant))
     }
 
-    /// Duration of engine compute on the worker thread.
-    pub fn compute_duration(&self) -> Option<Duration> {
-        match (self.dequeued_at, self.finished_at) {
-            (Some(d), Some(f)) => Some(f.saturating_duration_since(d)),
-            _ => None,
-        }
-    }
-
-    /// Total duration elapsed since job submission.
+    /// Time elapsed since the job was submitted, read now.
+    ///
+    /// An engine calls this while it runs, so it always measures up to the
+    /// present: the job is not finished while anyone can still read it.
     pub fn total_duration(&self) -> Duration {
-        match self.finished_at {
-            Some(f) => f.saturating_duration_since(self.submit_instant),
-            None => Instant::now().saturating_duration_since(self.submit_instant),
-        }
+        Instant::now().saturating_duration_since(self.submit_instant)
     }
 
     /// Checks whether the job has been cancelled or exceeded its deadline (R9).
@@ -176,6 +161,21 @@ fn resolve_deadline(submit_instant: Instant, timeout_ns: u64) -> Option<Instant>
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    /// What an engine reads mid-job: time since submit, growing while it runs.
+    /// It used to prefer a finish instant that was only ever set after the
+    /// engine had returned, so no reader could see that branch.
+    #[test]
+    fn total_duration_measures_up_to_now_while_the_job_runs() {
+        let ctx = JobContext::new(CallHeader::default(), Arc::new(AtomicBool::new(false)));
+        let first = ctx.total_duration();
+        std::thread::sleep(Duration::from_millis(2));
+        let second = ctx.total_duration();
+        assert!(
+            second >= first + Duration::from_millis(2),
+            "total_duration stopped advancing: {first:?} then {second:?}"
+        );
+    }
 
     /// Miri runs these: they are pure, allocation-light, and free of FFI and
     /// threads. The nightly Miri job used to invoke `cargo miri test -p gusset

@@ -12,7 +12,6 @@
 use gusset::ffi::guard::panic_location_count;
 use gusset::ffi::log_event;
 use gusset::header::{CallHeader, GUSSET_FLAG_DIAGNOSTIC_ENGINE};
-use gusset::pool::sys::write_ticket;
 use gusset::pool::{Handle, MAX_POOL_SIZE};
 use std::time::{Duration, Instant};
 
@@ -27,18 +26,6 @@ fn make_pipe() -> (i32, i32) {
 /// Reports whether a descriptor number is currently open in this process.
 fn fd_is_open(fd: i32) -> bool {
     unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
-}
-
-fn set_nonblocking(fd: i32) {
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        assert_ne!(flags, -1, "F_GETFL failed");
-        assert_ne!(
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK),
-            -1,
-            "F_SETFL O_NONBLOCK failed"
-        );
-    }
 }
 
 /// Pool size came straight from a caller argument with no ceiling. Each worker is an
@@ -156,85 +143,6 @@ fn submit_rejects_unknown_header_flags() {
     assert!(handle.close().is_ok());
     unsafe {
         libc::close(r);
-    }
-}
-
-/// A full completion pipe used to spin `yield_now()` forever, burning a core and
-/// hanging `Handle::close` in `join`. It now backs off and gives up.
-#[test]
-fn write_ticket_gives_up_on_a_permanently_full_pipe() {
-    let (r, w) = make_pipe();
-    set_nonblocking(w);
-
-    // Fill the pipe. Nothing ever reads it.
-    let filler = vec![0u8; 4096];
-    loop {
-        let n = unsafe { libc::write(w, filler.as_ptr() as *const libc::c_void, filler.len()) };
-        if n < 0 {
-            break;
-        }
-    }
-
-    let started = Instant::now();
-    let result = write_ticket(w, 42);
-    let elapsed = started.elapsed();
-
-    assert!(
-        result.is_err(),
-        "a permanently full pipe must produce an error, not an infinite spin"
-    );
-    assert!(
-        elapsed < Duration::from_secs(30),
-        "write_ticket must be bounded; took {:?}",
-        elapsed
-    );
-
-    unsafe {
-        libc::close(r);
-        libc::close(w);
-    }
-}
-
-/// A slow-but-live reader must still be served: the retry path has to make progress,
-/// not just time out. This is the other half of the bound above.
-#[test]
-fn write_ticket_succeeds_once_a_stalled_reader_drains() {
-    let (r, w) = make_pipe();
-    set_nonblocking(w);
-
-    let filler = vec![0u8; 4096];
-    loop {
-        let n = unsafe { libc::write(w, filler.as_ptr() as *const libc::c_void, filler.len()) };
-        if n < 0 {
-            break;
-        }
-    }
-
-    // Drain the pipe shortly after the write starts backing off.
-    let reader = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(200));
-        let mut sink = vec![0u8; 65536];
-        unsafe {
-            libc::read(r, sink.as_mut_ptr() as *mut libc::c_void, sink.len());
-        }
-        r
-    });
-
-    let result = write_ticket(w, 7);
-    assert!(
-        result.is_ok(),
-        "write must succeed once the reader drains, got {:?}",
-        result.err()
-    );
-
-    match reader.join() {
-        Ok(fd) => unsafe {
-            libc::close(fd);
-        },
-        Err(_) => panic!("reader thread panicked"),
-    }
-    unsafe {
-        libc::close(w);
     }
 }
 

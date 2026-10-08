@@ -201,7 +201,7 @@ impl Handle {
                 let handles = std::mem::take(&mut *lock_recover(&slots_for_joiner));
                 for handle in handles {
                     // A worker that died hands back its panic payload here, and
-                    // close runs under ffi_guard inside an extern "C" export: a
+                    // close runs under ffi_guard_code inside an extern "C" export: a
                     // payload whose destructor panics must not unwind out of the
                     // joiner into the process.
                     if let Err(payload) = handle.join() {

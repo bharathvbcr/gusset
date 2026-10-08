@@ -41,7 +41,6 @@ fn execute_unit(weak: &Weak<Handle>, mut unit: WorkUnit) -> JobResult {
     // stale entry was reported as this job's panic site.
     let _ = take_panic_location();
     let dispatch_res = catch_unwind(AssertUnwindSafe(|| default_dispatch(&unit.ctx, slice)));
-    unit.ctx.mark_finished();
 
     match dispatch_res {
         Ok(Ok(JobOutput::Bytes(out))) => JobResult::Ok(out),
