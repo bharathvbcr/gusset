@@ -34,7 +34,7 @@ flowchart TD
     end
 
     subgraph RustCrate ["Gusset Rust Runtime (crates/gusset)"]
-        Guard["ffi_guard (Panic Catching & FfiStatus Formatting)"]
+        Guard["ffi_guard_code (Panic Catching & FfiStatus Formatting)"]
         Workers["Worker Pool with Explicit 8 MiB Stacks (gusset-w0 .. gusset-wN)"]
         SigAlt["sigaltstack (at least 64 KiB per worker)"]
         Ring["Completion Ring (Rust-owned, 128-byte slots)"]
@@ -148,7 +148,7 @@ stateDiagram-v2
         InFlight --> Idle: Ticket Complete (gusset_take)
     }
 
-    Healthy --> Poisoned: Rust panic caught by ffi_guard (I2)
+    Healthy --> Poisoned: Rust panic caught by ffi_guard_code (I2)
     state Poisoned {
         [*] --> FailFast
         FailFast --> FailFast: Subsequent calls return ErrPoisoned

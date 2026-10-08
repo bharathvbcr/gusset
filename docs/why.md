@@ -31,7 +31,7 @@ flowchart TD
     end
 
     subgraph Gusset ["Gusset Runtime Contract"]
-        G1["ffi_guard: catch_unwind + Safe FfiStatus"] --> S1["Panic Caught: Process Stays Alive"]
+        G1["ffi_guard_code: catch_unwind + Safe FfiStatus"] --> S1["Panic Caught: Process Stays Alive"]
         G2["Go Semaphore + Completion Ring (pipe doorbell)"] --> S2["Thread Cap Bounded (<= PoolSize <= 1024)"]
         G3["Rust Worker Pool with Explicit 8 MiB Stacks"] --> S3["Deterministic Stack & sigaltstack Protection"]
         G4["Relative timeout_ns + AtomicBool Flag"] --> S4["Cooperative Cancellation between Work Units"]
@@ -54,7 +54,7 @@ flowchart TD
 
 **How Gusset Solves It:**
 - Rule R3 forbids `CString::new`, `unwrap`, and `expect` in the boundary crate.
-- `ffi_guard` null-checks pointers, transfers messages as raw `(ptr, len)` without NUL-termination, and wraps error `Display` formatting in its own nested `catch_unwind`.
+- `ffi_guard_code` null-checks pointers, transfers messages as raw `(ptr, len)` without NUL-termination, and wraps error `Display` formatting in its own nested `catch_unwind`.
 - Verified by Gusset's 5-case Panic Zoo suite (`tests/panic_zoo/`), which tests `&str`, `String`, non-string payloads (`panic_any(42)`), panic inside `Display`, and embedded NUL bytes.
 
 ---

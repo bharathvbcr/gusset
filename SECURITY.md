@@ -19,7 +19,7 @@ We take the security and integrity of this boundary seriously.
 ## Reporting a Vulnerability
 
 If you discover a security vulnerability—especially concerning:
-- A panic payload or format string that escapes the `ffi_guard` and triggers `SIGABRT` or process crash.
+- A panic payload or format string that escapes `ffi_guard_code` and triggers `SIGABRT` or process crash.
 - A memory corruption, use-after-free, or double-free across the FFI boundary.
 - A Go pointer retention bug violating cgo pointer passing rules (`cgocheck`).
 - A race condition in semaphore accounting or completion ticket dispatch that could lead to deadlock or unbounded thread exhaustion.

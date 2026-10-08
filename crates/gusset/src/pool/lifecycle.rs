@@ -111,7 +111,7 @@ impl Handle {
     ///
     /// `Ok(())` means every worker this call had to join has exited and the
     /// completion pipe is closed. `Err` means one was still inside an engine
-    /// call when [`CLOSE_JOIN_BUDGET`] expired. In that case a background
+    /// call when [`CLOSE_JOIN_BUDGET`](Self::CLOSE_JOIN_BUDGET) expired. In that case a background
     /// thread keeps the `Arc` and the `JoinHandle`s until the workers exit, so
     /// dropping the caller's `Arc` does not free the pool under them. The
     /// error is the signal that the join did not finish; a second `close` on
@@ -126,7 +126,7 @@ impl Handle {
         self.close_within(Self::CLOSE_JOIN_BUDGET)
     }
 
-    /// [`close`] with an explicit join budget. Tests use a short one.
+    /// [`close`](Self::close) with an explicit join budget. Tests use a short one.
     pub(super) fn close_within(&self, budget: std::time::Duration) -> Result<(), String> {
         if self.closed.swap(true, Ordering::SeqCst) {
             return Ok(());
