@@ -116,7 +116,7 @@ sequenceDiagram
     and Reader
         Handle->>Reader: Await ticket on Go channel or ctx.Done()
         alt Ring has a record
-            Ring-->>Reader: Atomic load; no system call
+            Ring-->>Reader: Atomic load, no system call
         else Reader is idle
             Pipe-->>Reader: Netpoller wakes reader on the token
         end
@@ -124,7 +124,7 @@ sequenceDiagram
     end
 
     alt Small inline success
-        Note over Handle: Bytes already in the record; no gusset_take
+        Note over Handle: Bytes already in the record, so no gusset_take
     else Larger result, error, or panic
         Handle->>CGO: gusset_take(handle, ticket, &out, &len)
         Note over CGO: Result moved out exactly once

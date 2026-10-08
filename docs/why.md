@@ -83,7 +83,7 @@ sequenceDiagram
         HTTP->>GoSched: Sustained concurrent goroutines
         GoSched->>OS: Every call still blocking at ~20 µs pins an M
         OS->>Rust: Block in native execution
-        GoSched->>OS: sysmon hands off P; runtime wakes or spawns more Ms
+        GoSched->>OS: sysmon hands off P, runtime wakes or spawns more Ms
         Note over OS: Count tracks concurrency, not cores.<br/>Hundreds of Ms at 2,048 in-flight 7 ms calls.<br/>The longer each call blocks, the closer to 1:1.
         OS-->>HTTP: fatal error: program exceeds 10000-thread limit
     end
