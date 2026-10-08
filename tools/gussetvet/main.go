@@ -28,84 +28,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Parsed file by file rather than with parser.ParseDir, which staticcheck
-	// rejects as deprecated (SA1019) — so `staticcheck ./...` in the lint job
-	// exited 1 on every commit, the same way the forbidden-pattern audit used to.
-	// The documented replacement is golang.org/x/tools/go/packages, a dependency
-	// this check does not need: it reads cgo preambles out of comments and never
-	// asks which package a file belongs to.
-	entries, err := os.ReadDir(targetDir)
+	violations, err := checkDirectives(targetDir, exports)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gussetvet: cannot read %s: %v\n", targetDir, err)
-		os.Exit(1)
-	}
-
-	fset := token.NewFileSet()
-	var violations []string
-	parsed := 0
-
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		filename := filepath.Join(targetDir, name)
-
-		file, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "gussetvet: parse error in %s: %v\n", filename, err)
-			os.Exit(1)
-		}
-		parsed++
-
-		// Look for cgo preamble in comments
-		for _, commentGroup := range file.Comments {
-			text := commentGroup.Text()
-			if !strings.Contains(text, "#cgo") {
-				continue
-			}
-
-			// Collect the directives as whole lines.
-			//
-			// This used to be strings.Contains over the entire preamble, which
-			// matched on prefixes: `#cgo noescape gusset_cancel_all` contains
-			// `#cgo noescape gusset_cancel`, so deleting *both* directives for
-			// `gusset_cancel` left R5 reporting "checks passed". That is a live
-			// pair in exports.txt, not a hypothetical — and R5 is the rule that
-			// keeps cgo from treating Go pointers as escaping into C, so losing it
-			// on one export is silent.
-			directives := make(map[string]bool)
-			for _, line := range strings.Split(text, "\n") {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "#cgo ") {
-					directives[line] = true
-				}
-			}
-
-			for _, fn := range exports {
-				fn = strings.TrimSpace(fn)
-				if fn == "" || strings.HasPrefix(fn, "#") {
-					continue
-				}
-
-				noescape := fmt.Sprintf("#cgo noescape %s", fn)
-				nocallback := fmt.Sprintf("#cgo nocallback %s", fn)
-
-				if !directives[noescape] {
-					violations = append(violations, fmt.Sprintf("%s: missing '%s'", filename, noescape))
-				}
-				if !directives[nocallback] {
-					violations = append(violations, fmt.Sprintf("%s: missing '%s'", filename, nocallback))
-				}
-			}
-		}
-	}
-
-	// A directory that parsed nothing would report "R5 checks passed" having
-	// inspected no cgo preamble at all — the failure mode this whole audit exists
-	// to prevent, one level up.
-	if parsed == 0 {
-		fmt.Fprintf(os.Stderr, "gussetvet: no non-test .go files in %s; R5 was not checked\n", targetDir)
+		fmt.Fprintf(os.Stderr, "gussetvet: %v; R5 was not checked\n", err)
 		os.Exit(1)
 	}
 
@@ -142,6 +67,79 @@ func main() {
 	fmt.Println("gussetvet: R4 checks passed (no C.free or preamble free() on Rust-owned memory)")
 	fmt.Println("gussetvet: R5 checks passed (no //export callbacks from C into Go)")
 	fmt.Println("gussetvet: R1 checks passed (every export has a Go wrapper)")
+}
+
+// checkDirectives enforces R5 on the cgo preamble of each non-test file in dir:
+// every export in exports carries `#cgo noescape` and `#cgo nocallback`.
+//
+// Only the comment attached to `import "C"` is a preamble. This used to treat
+// every comment group containing "#cgo" as one, so a doc comment that merely
+// named a directive failed the check for all 17 exports, and a preamble with no
+// directives left passed as long as some other comment spelled them all out.
+//
+// Directives are compared as whole lines. strings.Contains over the preamble
+// matched on prefixes: `#cgo noescape gusset_cancel_all` contains
+// `#cgo noescape gusset_cancel`, so deleting *both* directives for
+// `gusset_cancel` left R5 reporting "checks passed". That is a live pair in
+// exports.txt, not a hypothetical — and R5 is the rule that keeps cgo from
+// treating Go pointers as escaping into C, so losing it on one export is silent.
+//
+// Parsed file by file rather than with parser.ParseDir, which staticcheck
+// rejects as deprecated (SA1019) — so `staticcheck ./...` in the lint job
+// exited 1 on every commit, the same way the forbidden-pattern audit used to.
+// The documented replacement is golang.org/x/tools/go/packages, a dependency
+// this check does not need: it reads cgo preambles out of comments and never
+// asks which package a file belongs to.
+//
+// A directory with no preamble carrying `#cgo` lines is an error, not a pass:
+// "R5 checks passed" having inspected no preamble is the failure mode this
+// audit exists to prevent.
+func checkDirectives(dir string, exports []string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %w", dir, err)
+	}
+	fset := token.NewFileSet()
+	var violations []string
+	checked := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		filename := filepath.Join(dir, name)
+		file, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
+		if err != nil {
+			return nil, fmt.Errorf("parse error in %s: %w", filename, err)
+		}
+		directives := make(map[string]bool)
+		for _, line := range preambleLines(file) {
+			text := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line.text), "//"))
+			if strings.HasPrefix(text, "#cgo ") {
+				directives[text] = true
+			}
+		}
+		if len(directives) == 0 {
+			continue
+		}
+		checked++
+		for _, fn := range exports {
+			fn = strings.TrimSpace(fn)
+			if fn == "" || strings.HasPrefix(fn, "#") {
+				continue
+			}
+			for _, kind := range []string{"noescape", "nocallback"} {
+				want := fmt.Sprintf("#cgo %s %s", kind, fn)
+				if !directives[want] {
+					violations = append(violations, fmt.Sprintf("%s: missing '%s'", filename, want))
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		return nil, fmt.Errorf("no cgo preamble with #cgo lines in %s", dir)
+	}
+	return violations, nil
 }
 
 // crossFreeAllowed lists the paths permitted to call C.free.
