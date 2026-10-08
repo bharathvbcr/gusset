@@ -80,6 +80,9 @@ type ticketReader struct {
 	// tokensOwed counts wake tokens a worker has written, or is about to
 	// write, and this reader has not read yet.
 	tokensOwed int
+	// yieldEachPoll reports whether a poll must yield its P (see pollPause).
+	// nil means always, for a reader that is not attached to a handle.
+	yieldEachPoll func() bool
 }
 
 // readOnce behaviours on EAGAIN.
@@ -201,9 +204,7 @@ func (tr *ticketReader) waitRing() error {
 			if i&7 == 7 && time.Since(tr.lastTicket) >= budget {
 				break
 			}
-			// The caller that submitted is usually runnable on this P;
-			// yielding lets it run, and costs no system call.
-			runtime.Gosched()
+			tr.pollPause()
 		}
 	}
 	waiting := (*uint32)(unsafe.Add(tr.ring.Shared, ffi.RingOffWaiting))
@@ -301,6 +302,35 @@ func (tr *ticketReader) fill(p []byte) (int, error) {
 	return tr.n, tr.rerr
 }
 
+// pollPause runs between two polls.
+//
+// A goroutine readied by a delivery goes to this P's runnext slot, which
+// another P steals only after a pause of its own (~3 us), so the reader
+// yields on every poll to let it run. Each yield also queues the reader
+// globally and, with a P idle and no thread spinning, wakes a thread with a
+// system call (pthread_cond_signal on darwin), several microseconds each.
+// Polled through a lone job, those wakes grew a serial Call's overhead with
+// the job's length: 200k serial Calls on an M5 Pro spent 1.5 us each in
+// runtime.wakep at ~0.7 us jobs and 5.9 us at ~7 us jobs, 78% of it from the
+// reader's own yields.
+//
+// So for a lone call on several Ps the poll does not yield: its waiter
+// polls for the result itself (waitInternal), and drainPipe yields once after
+// a delivery that readied someone. With one P nothing else runs until the
+// reader yields, and that yield wakes no thread because no P is idle. Under
+// parallel load quiet polling held up the callers the reader readies (0.7 us
+// and 7 us jobs on 18 Ps regressed), so it yields there as before.
+func (tr *ticketReader) pollPause() {
+	if tr.yieldsEachPoll() {
+		runtime.Gosched()
+	}
+}
+
+// yieldsEachPoll reports whether pollPause yields.
+func (tr *ticketReader) yieldsEachPoll() bool {
+	return tr.yieldEachPoll == nil || tr.yieldEachPoll()
+}
+
 func (tr *ticketReader) spinBudget() time.Duration {
 	if tr.inFlight != nil && tr.inFlight() {
 		return min(max(2*tr.gapEWMA, ticketReaderSpin), ticketReaderSpinBusy)
@@ -342,7 +372,7 @@ func (tr *ticketReader) readOnce(fd uintptr) bool {
 				return false
 			}
 			if !tr.lastTicket.IsZero() && time.Since(tr.lastTicket) < tr.spinBudget() {
-				runtime.Gosched()
+				tr.pollPause()
 				continue
 			}
 			return false // park until readable

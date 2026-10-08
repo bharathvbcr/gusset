@@ -3,6 +3,8 @@ package gusset
 import (
 	"errors"
 	"log/slog"
+	"runtime"
+	"time"
 
 	"github.com/bharathvbcr/gusset/internal/ffi"
 )
@@ -21,9 +23,26 @@ func drainPipe(s *handleState) {
 	// completion is always pending, and polling between them took a core the
 	// workers needed (1 ms parallel jobs +18% on 4 vCPUs).
 	tr.inFlight = func() bool { return len(s.sem) == 1 }
+	// At most one call in flight on several Ps is the case the poll is quiet
+	// for (see ticketReader.pollPause): a serial caller's next call comes
+	// while the reader still polls after the last. Otherwise the reader
+	// yields on every poll.
+	tr.yieldEachPoll = func() bool { return !s.multiP.Load() || len(s.sem) > 1 }
+	// handOff delivers a completion and, when that readied a goroutine the
+	// reader's polls will not yield to, yields to it now.
+	handOff := func(ticket uint64, res callResult, takeID uint64) {
+		if s.deliver(ticket, res, takeID) && !tr.yieldsEachPoll() {
+			runtime.Gosched()
+		}
+	}
+	var procsAt time.Time
 
 	for {
 		ticket, inlineData, inline, err := tr.next()
+		if err == nil && tr.lastTicket.Sub(procsAt) >= gomaxprocsRefresh {
+			procsAt = tr.lastTicket
+			s.multiP.Store(runtime.GOMAXPROCS(0) > 1)
+		}
 		if err != nil {
 			// Close sets closed before it stops the reader, so an error with
 			// the handle still open is the reader failing, not being stopped.
@@ -69,7 +88,7 @@ func drainPipe(s *handleState) {
 				out = make([]byte, len(inlineData))
 				copy(out, inlineData)
 			}
-			s.deliver(ticket, callResult{data: out}, 0)
+			handOff(ticket, callResult{data: out}, 0)
 			continue
 		}
 
@@ -81,7 +100,7 @@ func drainPipe(s *handleState) {
 		// Close took that long. During a close every result is discarded
 		// anyway, so keep reading and hand each waiter "closed".
 		if !s.enterCgo() {
-			s.deliver(ticket, callResult{err: errDrainClosed}, 0)
+			handOff(ticket, callResult{err: errDrainClosed}, 0)
 			continue
 		}
 
@@ -116,9 +135,15 @@ func drainPipe(s *handleState) {
 		}
 		s.cgoMu.RUnlock()
 
-		s.deliver(ticket, res, takeID)
+		handOff(ticket, res, takeID)
 	}
 }
+
+// gomaxprocsRefresh is how often drainPipe re-reads GOMAXPROCS into multiP.
+// The runtime can change it while the process runs (container CPU limits),
+// and reading it takes the scheduler's global lock, so once per completion
+// is too often.
+const gomaxprocsRefresh = 10 * time.Millisecond
 
 // deliver routes one completion: to its waiter, to the completed map for a
 // waiter yet to arrive, or straight to the bin when the owner has abandoned the
@@ -131,7 +156,11 @@ func drainPipe(s *handleState) {
 // those two places is what lets pool_size fire-and-forget Submits finish
 // without wedging the next Submit, and what keeps a still-running abandoned
 // job from sharing its worker (I4).
-func (s *handleState) deliver(ticket uint64, res callResult, takeID uint64) {
+//
+// readied reports that the delivery may have made a goroutine runnable: a
+// waiter parked on its channel while at most one call was in flight (see
+// waitInternal), or a submitter parked on the permit returned here.
+func (s *handleState) deliver(ticket uint64, res callResult, takeID uint64) (readied bool) {
 	s.mu.Lock()
 	if _, gone := s.abandoned[ticket]; gone {
 		delete(s.abandoned, ticket)
@@ -152,7 +181,7 @@ func (s *handleState) deliver(ticket uint64, res callResult, takeID uint64) {
 			// Never blocks: the permit for this ticket is held by definition.
 			<-s.sem
 		}
-		return
+		return heldPermit
 	}
 
 	if takeID != 0 {
@@ -166,7 +195,9 @@ func (s *handleState) deliver(ticket uint64, res callResult, takeID uint64) {
 		s.pending[ticket] = nil
 		ch <- res
 		s.mu.Unlock()
-		return
+		// Read after the send: a waiter that registers as parked later finds
+		// the result already buffered and never parks (waitInternal).
+		return s.parkedWaiters.Load() > 0
 	}
 	s.completed[ticket] = res
 	// The worker is done and no waiter is registered. The result stays until
@@ -185,4 +216,5 @@ func (s *handleState) deliver(ticket uint64, res callResult, takeID uint64) {
 	if heldPermit {
 		<-s.sem
 	}
+	return heldPermit
 }
