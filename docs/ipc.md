@@ -103,3 +103,17 @@ sequenceDiagram
 3. **Fault Containment:** If a Metal kernel aborts the worker, only the worker sub-process terminates. The Go service remains alive and healthy.
 4. **Restart Budget:** The supervisor restarts workers up to N times within window T. If the budget is exhausted, circuit breaker opens.
 5. **Transparency:** To the Go caller, `gusset-ipc.Handle` exposes the identical `Call(ctx, in)` and `Submit`/`Wait` semantics.
+
+---
+
+## Prototype (2026-10-08)
+
+`internal/isolate` is the spike that tests point 5 before any transport work. It is internal and adds no entry point; `DECISIONS.md` 2026-10-08 records what it found.
+
+- **Transport stand-in:** length-prefixed JSON frames on a worker's stdin and stdout, the house process contract. It copies every payload and base64-encodes it, so it says nothing about iceoryx2's cost; it exists so the API question can be answered without waiting on the binding.
+- **Worker:** `isolate.Serve(stdin, stdout, handle, poolSize)` runs an ordinary `*gusset.Handle` and announces its pool size, which the host uses as its semaphore (R11).
+- **Host:** `isolate.Start(ctx, cmd)` returns a `*Proc` with `Call`, `Submit`, `Wait`, `Discard` and `Close`, which are the same methods and errors as `*gusset.Handle`. Both satisfy `isolate.Caller`, and the parity tests in `internal/isolate` run every assertion against both.
+- **Fault containment:** a worker that dies of SIGKILL or SIGABRT fails its in-flight tickets and every later call with an error matching `gusset.ErrPoisoned`. The host keeps running and can start a replacement. Restart budgets and heartbeats (points 2 and 4) are not prototyped.
+- **Not carried:** `NewBuffer`, `CallBuffer` and `WaitBuffer`. A `*gusset.Buffer` is Rust memory in the calling process, so the out-of-process equivalent is the shared segment this document assigns to iceoryx2. `Proc.Submit` refuses a `*Buffer` with `isolate.ErrBufferUnsupported`. `TestParity_BufferInputDiverges` pins that difference. A public carrier needs three things the prototype does not decide: a third `Buffer` backing beside the Rust id and the Go-heap id 0 (`newHeapBuffer`); an ownership rule for a segment whose worker has died; and a buffer budget charged on the host side.
+
+Run it with `go test ./internal/isolate/`.
