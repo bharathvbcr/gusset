@@ -236,6 +236,7 @@ func (tr *ticketReader) parseBuffered() (ticket uint64, data []byte, inline bool
 	}
 	n := binary.NativeEndian.Uint64(b[8:16])
 	if n > uint64(ffi.InlineResultMax) {
+		// Rust never writes this; a stream that does is not ours to parse.
 		return 0, nil, false, 0, fmt.Errorf("gusset: corrupt completion record (length %d)", n)
 	}
 	size = 16 + (int(n)+7)&^7
@@ -246,7 +247,9 @@ func (tr *ticketReader) parseBuffered() (ticket uint64, data []byte, inline bool
 }
 
 // fillMode reads more pipe bytes after the buffered ones, with the given
-// EAGAIN behaviour.
+// EAGAIN behaviour. A record is one atomic write under PIPE_BUF, but a read
+// may still end partway through one when the buffer fills, so the unread tail
+// moves to the front and the next read completes it.
 func (tr *ticketReader) fillMode(mode int) error {
 	if tr.start > 0 {
 		copy(tr.buf[:], tr.buf[tr.start:tr.end])
@@ -261,51 +264,26 @@ func (tr *ticketReader) fillMode(mode int) error {
 }
 
 // nextPipe is next without a ring: every completion comes through the pipe.
+//
+// A read error is returned only once the bytes read before it hold no whole
+// record, so a record that arrived with the error is still delivered.
 func (tr *ticketReader) nextPipe() (ticket uint64, data []byte, inline bool, err error) {
-	if err := tr.need(8); err != nil {
-		return 0, nil, false, err
-	}
-	w := binary.NativeEndian.Uint64(tr.buf[tr.start : tr.start+8])
-	if w&ffi.InlineRecordFlag == 0 {
-		tr.start += 8
-		tr.completed()
-		return w, nil, false, nil
-	}
-	if err := tr.need(16); err != nil {
-		return 0, nil, false, err
-	}
-	n := binary.NativeEndian.Uint64(tr.buf[tr.start+8 : tr.start+16])
-	if n > uint64(ffi.InlineResultMax) {
-		// Rust never writes this; a stream that does is not ours to parse.
-		return 0, nil, false, fmt.Errorf("gusset: corrupt completion record (length %d)", n)
-	}
-	size := 16 + (int(n)+7)&^7
-	if err := tr.need(size); err != nil {
-		return 0, nil, false, err
-	}
-	data = tr.buf[tr.start+16 : tr.start+16+int(n)]
-	tr.start += size
-	tr.completed()
-	return w &^ ffi.InlineRecordFlag, data, true, nil
-}
-
-// need buffers at least k unread bytes (k <= len(buf)). A record is one
-// atomic write under PIPE_BUF, but a read may still end partway through one
-// when the buffer fills, so the tail is kept and completed by the next read.
-func (tr *ticketReader) need(k int) error {
-	for tr.end-tr.start < k {
-		if tr.start > 0 {
-			copy(tr.buf[:], tr.buf[tr.start:tr.end])
-			tr.end -= tr.start
-			tr.start = 0
+	var readErr error
+	for {
+		t, d, in, size, err := tr.parseBuffered()
+		if err != nil {
+			return 0, nil, false, err
 		}
-		n, err := tr.fill(tr.buf[tr.end:])
-		tr.end += n
-		if err != nil && tr.end-tr.start < k {
-			return err
+		if size > 0 {
+			tr.start += size
+			tr.completed()
+			return t, d, in, nil
 		}
+		if readErr != nil {
+			return 0, nil, false, readErr
+		}
+		readErr = tr.fillMode(readSpin)
 	}
-	return nil
 }
 
 // fill reads what is available, polling briefly before letting the netpoller

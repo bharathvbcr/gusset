@@ -136,6 +136,17 @@ var (
 	ErrBadArg   = &Error{Code: FFI_BAD_ARG}
 )
 
+// checkStatus is the epilogue of the exports that return only an error: nil
+// for FFI_OK, otherwise the error the export wrote into st. A plain function
+// rather than one taking the call as a closure, so st stays on the caller's
+// stack. The exports that also return values keep their own one-line check.
+func checkStatus(code C.int32_t, st *C.FfiStatus) error {
+	if code != C.FFI_OK {
+		return statusToError(st)
+	}
+	return nil
+}
+
 func statusToError(st *C.FfiStatus) error {
 	if st == nil {
 		return nil
@@ -396,11 +407,7 @@ func HandleOpen(poolSize uint32, pipeWriteFD int) (unsafe.Pointer, error) {
 // HandleClose closes a Rust handle.
 func HandleClose(h unsafe.Pointer) error {
 	var st C.FfiStatus
-	code := C.gusset_handle_close((*C.GussetHandle)(h), &st)
-	if code != C.FFI_OK {
-		return statusToError(&st)
-	}
-	return nil
+	return checkStatus(C.gusset_handle_close((*C.GussetHandle)(h), &st), &st)
 }
 
 // Ring is an attached completion ring (gusset_handle_ring). Every pointer is
@@ -514,21 +521,13 @@ func Take(h unsafe.Pointer, ticket uint64) (uint64, []byte, error) {
 // Cancel cancels a task by ticket.
 func Cancel(h unsafe.Pointer, ticket uint64) error {
 	var st C.FfiStatus
-	code := C.gusset_cancel((*C.GussetHandle)(h), C.uint64_t(ticket), &st)
-	if code != C.FFI_OK {
-		return statusToError(&st)
-	}
-	return nil
+	return checkStatus(C.gusset_cancel((*C.GussetHandle)(h), C.uint64_t(ticket), &st), &st)
 }
 
 // CancelAll cancels all tasks on handle.
 func CancelAll(h unsafe.Pointer) error {
 	var st C.FfiStatus
-	code := C.gusset_cancel_all((*C.GussetHandle)(h), &st)
-	if code != C.FFI_OK {
-		return statusToError(&st)
-	}
-	return nil
+	return checkStatus(C.gusset_cancel_all((*C.GussetHandle)(h), &st), &st)
 }
 
 // AllocStats retrieves allocator statistics.
@@ -570,9 +569,5 @@ func BufAlloc(h unsafe.Pointer, len int) (uint64, []byte, error) {
 // BufFree frees a Rust-owned buffer by id.
 func BufFree(h unsafe.Pointer, id uint64) error {
 	var st C.FfiStatus
-	code := C.gusset_buf_free((*C.GussetHandle)(h), C.uint64_t(id), &st)
-	if code != C.FFI_OK {
-		return statusToError(&st)
-	}
-	return nil
+	return checkStatus(C.gusset_buf_free((*C.GussetHandle)(h), C.uint64_t(id), &st), &st)
 }

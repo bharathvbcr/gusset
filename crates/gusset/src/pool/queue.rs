@@ -13,9 +13,10 @@
 //! while any worker is polling. An idle pool polls once for that window and
 //! then sleeps exactly as before, so it costs no CPU at rest.
 
+use super::lock_recover;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// How long an idle worker polls before parking.
@@ -75,10 +76,6 @@ pub enum PushError<T> {
     Closed(T),
 }
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 impl<T> JobQueue<T> {
     /// A queue holding at most `cap` units, and its sending half.
     pub fn new(cap: usize) -> (QueueSender<T>, Arc<JobQueue<T>>) {
@@ -103,7 +100,7 @@ impl<T> JobQueue<T> {
 
     fn push(&self, item: T) -> Result<(), PushError<T>> {
         let wake = {
-            let mut st = lock(&self.state);
+            let mut st = lock_recover(&self.state);
             if st.closed {
                 return Err(PushError::Closed(item));
             }
@@ -128,7 +125,7 @@ impl<T> JobQueue<T> {
     }
 
     fn close(&self) {
-        lock(&self.state).closed = true;
+        lock_recover(&self.state).closed = true;
         self.closed.store(true, Ordering::Release);
         self.ready.notify_all();
     }
@@ -190,7 +187,7 @@ impl<T> JobQueue<T> {
         }
         self.spinning.fetch_sub(1, Ordering::SeqCst);
 
-        let mut st = lock(&self.state);
+        let mut st = lock_recover(&self.state);
         loop {
             if let Some(item) = st.items.pop_front() {
                 self.queued.store(st.items.len(), Ordering::Release);
@@ -209,7 +206,7 @@ impl<T> JobQueue<T> {
 #[cfg(test)]
 impl<T> JobQueue<T> {
     fn pause_after_fast_take(&self) {
-        let pause = *lock(&self.pause_after_fast_take);
+        let pause = *lock_recover(&self.pause_after_fast_take);
         if let Some(d) = pause {
             self.fast_take_pauses.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(d);
@@ -282,14 +279,14 @@ mod tests {
                 })
             };
             let start = Instant::now();
-            while lock(&q.state).sleepers != 1 {
+            while lock_recover(&q.state).sleepers != 1 {
                 assert!(
                     start.elapsed() < Duration::from_secs(10),
                     "sleeper never parked"
                 );
                 std::thread::yield_now();
             }
-            *lock(&q.pause_after_fast_take) = Some(pause);
+            *lock_recover(&q.pause_after_fast_take) = Some(pause);
             // A fresh poller, as a worker that has just finished a unit.
             let poller = {
                 let q = Arc::clone(&q);
@@ -301,7 +298,7 @@ mod tests {
                 if q.spinning.load(Ordering::SeqCst) == 1 {
                     break true;
                 }
-                if lock(&q.state).sleepers == 2 {
+                if lock_recover(&q.state).sleepers == 2 {
                     break false;
                 }
                 std::thread::yield_now();

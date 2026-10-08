@@ -31,6 +31,11 @@ impl BufferSlot {
             caller_held,
         }
     }
+
+    /// A buffer born as a job's output: nothing else may return it as one.
+    fn output(buf: RawBuffer) -> Self {
+        Self::new(buf, true, false)
+    }
 }
 
 impl Handle {
@@ -55,16 +60,30 @@ impl Handle {
         if self.poisoned.load(Ordering::Acquire) {
             return Err("handle is poisoned".to_string());
         }
+        self.register(|| {
+            Ok(BufferSlot::new(
+                RawBuffer::allocate(len)?,
+                false,
+                caller_held,
+            ))
+        })
+    }
+
+    /// Adds the buffer `build` makes to the registry, returning its id and pointer.
+    ///
+    /// Refused once the handle has closed. The check and the id come before
+    /// `build` runs, so a refusal allocates nothing.
+    fn register(
+        &self,
+        build: impl FnOnce() -> Result<BufferSlot, String>,
+    ) -> Result<(u64, *mut u8), String> {
         if self.closed.load(Ordering::Acquire) {
             return Err("handle is closed".to_string());
         }
         let id = reserve_id(&self.next_buffer_id)?;
-        let buf = RawBuffer::allocate(len)?;
-        let ptr = buf.as_mut_ptr();
-
-        let mut map = lock_recover(&self.buffers);
-        map.insert(id, BufferSlot::new(buf, false, caller_held));
-
+        let slot = build()?;
+        let ptr = slot.buf.as_mut_ptr();
+        lock_recover(&self.buffers).insert(id, slot);
         Ok((id, ptr))
     }
 
@@ -79,15 +98,7 @@ impl Handle {
     /// check here lost a sibling's finished result the moment another job
     /// panicked, and only for results small enough not to have been promoted.
     pub(crate) fn buf_from_bytes(&self, data: &[u8]) -> Result<(u64, *mut u8), String> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err("handle is closed".to_string());
-        }
-        let id = reserve_id(&self.next_buffer_id)?;
-        let buf = RawBuffer::from_bytes(data)?;
-        let ptr = buf.as_mut_ptr();
-        // Born as an output: nothing else may return it as one.
-        lock_recover(&self.buffers).insert(id, BufferSlot::new(buf, true, false));
-        Ok((id, ptr))
+        self.register(|| RawBuffer::from_bytes(data).map(BufferSlot::output))
     }
 
     /// Registers an engine's `BufferAlloc` output as a result buffer, zero-copy.
@@ -108,23 +119,15 @@ impl Handle {
                 MAX_BUFFER_BYTES
             ));
         }
-        if self.closed.load(Ordering::Acquire) {
-            return JobResult::Err("handle is closed".to_string());
+        let adopted = self.register(|| {
+            RawBuffer::adopt(out)
+                .or_else(|foreign| RawBuffer::from_bytes(&foreign))
+                .map(BufferSlot::output)
+        });
+        match adopted {
+            Ok((id, _)) => JobResult::Buffer(id),
+            Err(e) => JobResult::Err(e),
         }
-        let id = match reserve_id(&self.next_buffer_id) {
-            Ok(id) => id,
-            Err(e) => return JobResult::Err(e),
-        };
-        let buf = match RawBuffer::adopt(out) {
-            Ok(buf) => buf,
-            Err(foreign) => match RawBuffer::from_bytes(&foreign) {
-                Ok(buf) => buf,
-                Err(e) => return JobResult::Err(e),
-            },
-        };
-        // Born as an output, like buf_from_bytes: nothing may return it again.
-        lock_recover(&self.buffers).insert(id, BufferSlot::new(buf, true, false));
-        JobResult::Buffer(id)
     }
 
     /// Transfers a live buffer to a job's result, refusing any second owner.

@@ -83,21 +83,30 @@ fn execute_unit(weak: &Weak<Handle>, mut unit: WorkUnit) -> JobResult {
             None => JobResult::Err("handle is closed".to_string()),
         },
         Ok(Err(err)) => JobResult::Err(err),
-        Err(payload) => {
-            // Caught panic: poison handle (I2)
-            if let Some(h) = weak.upgrade() {
-                h.poisoned.store(true, Ordering::Release);
-            }
-            // Location first: disposing of the payload can panic again and
-            // record the destructor's location over the engine's.
-            let loc = take_panic_location();
-            let msg = extract_panic_payload(payload);
-            JobResult::Panic {
-                msg,
-                file: loc.map(|l| l.file),
-                line: loc.map(|l| l.line).unwrap_or(0),
-            }
-        }
+        Err(payload) => caught_panic(weak, payload, |msg| msg),
+    }
+}
+
+/// The result for a panic caught on a worker, either firewall: the handle is
+/// poisoned (I2) and the panic reported where it happened, its message worded
+/// by `describe`.
+///
+/// Location first: disposing of the payload can panic again and record the
+/// destructor's location over the original's.
+fn caught_panic(
+    weak: &Weak<Handle>,
+    payload: Box<dyn std::any::Any + Send>,
+    describe: impl FnOnce(String) -> String,
+) -> JobResult {
+    if let Some(h) = weak.upgrade() {
+        h.poison();
+    }
+    let loc = take_panic_location();
+    let msg = extract_panic_payload(payload);
+    JobResult::Panic {
+        msg: describe(msg),
+        file: loc.map(|l| l.file),
+        line: loc.map(|l| l.line).unwrap_or(0),
     }
 }
 
@@ -226,18 +235,9 @@ impl Handle {
                             execute_unit(&weak_clone, unit)
                         })) {
                             Ok(r) => r,
-                            Err(payload) => {
-                                if let Some(h) = weak_clone.upgrade() {
-                                    h.poisoned.store(true, Ordering::Release);
-                                }
-                                let loc = take_panic_location();
-                                let msg = extract_panic_payload(payload);
-                                JobResult::Panic {
-                                    msg: format!("worker fault outside the engine call: {}", msg),
-                                    file: loc.map(|l| l.file),
-                                    line: loc.map(|l| l.line).unwrap_or(0),
-                                }
-                            }
+                            Err(payload) => caught_panic(&weak_clone, payload, |msg| {
+                                format!("worker fault outside the engine call: {}", msg)
+                            }),
                         };
 
                         // Store result and wake netpoller if handle still alive

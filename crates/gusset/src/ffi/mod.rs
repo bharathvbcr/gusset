@@ -161,6 +161,69 @@ fn poison_on_panic(h: &Handle, code: i32) -> i32 {
     code
 }
 
+/// A handle-bound export's return code for its guarded body: `FFI_OK`, or the
+/// failure code with a caught panic latching poison (see [`poison_on_panic`]).
+fn handle_outcome(h: &Handle, res: Result<(), i32>) -> i32 {
+    match res {
+        Ok(()) => FFI_OK,
+        Err(code) => poison_on_panic(h, code),
+    }
+}
+
+/// [`handle_outcome`] for the exports that refuse a poisoned handle (R10).
+///
+/// A failure that finds the latch set is `FFI_POISONED`: the handle's own
+/// methods return `Err(String)` for it, which the guard maps to `FFI_ERR`, and
+/// R10 promises `FFI_POISONED` without a second reading. A caught panic is the
+/// exception: its own report comes first, and later calls see `FFI_POISONED`.
+///
+/// # Safety
+///
+/// `status` must be null or point to the `FfiStatus` the guard initialised.
+unsafe fn poison_checked_outcome(h: &Handle, status: *mut FfiStatus, res: Result<(), i32>) -> i32 {
+    match res {
+        Ok(()) => FFI_OK,
+        Err(FFI_PANIC) => poison_on_panic(h, FFI_PANIC),
+        Err(_) if h.is_poisoned() => {
+            if !status.is_null() {
+                unsafe {
+                    FfiStatus::overwrite(status, FfiStatus::poisoned("handle is poisoned"));
+                }
+            }
+            FFI_POISONED
+        }
+        Err(code) => code,
+    }
+}
+
+/// Refuses an export's arguments: `FFI_BAD_ARG`, with `msg` in a non-null `status`.
+///
+/// # Safety
+///
+/// `status` must be null or valid for a write of an `FfiStatus`.
+unsafe fn refuse_arg(status: *mut FfiStatus, msg: &str) -> i32 {
+    if !status.is_null() {
+        unsafe {
+            ptr::write(status, FfiStatus::bad_arg(msg));
+        }
+    }
+    FFI_BAD_ARG
+}
+
+/// Refuses a call on a poisoned handle before it enters Rust (R10).
+///
+/// # Safety
+///
+/// `status` must be null or valid for a write of an `FfiStatus`.
+unsafe fn refuse_poisoned(status: *mut FfiStatus) -> i32 {
+    if !status.is_null() {
+        unsafe {
+            ptr::write(status, FfiStatus::poisoned("handle is poisoned"));
+        }
+    }
+    FFI_POISONED
+}
+
 // ----------------------------------------------------------------------------
 // The 17 Exported C Functions (R1)
 // ----------------------------------------------------------------------------
@@ -294,12 +357,7 @@ pub unsafe extern "C" fn gusset_handle_open(
     status: *mut FfiStatus,
 ) -> i32 {
     if out_handle.is_null() {
-        if !status.is_null() {
-            unsafe {
-                ptr::write(status, FfiStatus::bad_arg("out_handle is null"));
-            }
-        }
-        return FFI_BAD_ARG;
+        return unsafe { refuse_arg(status, "out_handle is null") };
     }
 
     let res = unsafe {
@@ -325,12 +383,7 @@ pub unsafe extern "C" fn gusset_handle_open(
 #[no_mangle]
 pub unsafe extern "C" fn gusset_handle_close(handle: *mut Handle, status: *mut FfiStatus) -> i32 {
     if handle.is_null() {
-        if !status.is_null() {
-            unsafe {
-                ptr::write(status, FfiStatus::bad_arg("handle is null"));
-            }
-        }
-        return FFI_BAD_ARG;
+        return unsafe { refuse_arg(status, "handle is null") };
     }
 
     let res = unsafe {
@@ -368,22 +421,12 @@ pub unsafe extern "C" fn gusset_submit(
     status: *mut FfiStatus,
 ) -> i32 {
     if handle.is_null() || header.is_null() || out_ticket.is_null() {
-        if !status.is_null() {
-            unsafe {
-                ptr::write(status, FfiStatus::bad_arg("null argument passed to submit"));
-            }
-        }
-        return FFI_BAD_ARG;
+        return unsafe { refuse_arg(status, "null argument passed to submit") };
     }
 
     let h = unsafe { &*handle };
     if h.is_poisoned() {
-        if !status.is_null() {
-            unsafe {
-                ptr::write(status, FfiStatus::poisoned("handle is poisoned"));
-            }
-        }
-        return FFI_POISONED;
+        return unsafe { refuse_poisoned(status) };
     }
 
     // Validate (ptr, len) before a slice exists. `slice::from_raw_parts` with a
@@ -396,27 +439,14 @@ pub unsafe extern "C" fn gusset_submit(
     let input_slice: &[u8] = if buffer_id != 0 || input_len == 0 {
         &[]
     } else if input_ptr.is_null() {
-        if !status.is_null() {
-            unsafe {
-                ptr::write(
-                    status,
-                    FfiStatus::bad_arg("input_ptr is null with a nonzero input_len"),
-                );
-            }
-        }
-        return FFI_BAD_ARG;
+        return unsafe { refuse_arg(status, "input_ptr is null with a nonzero input_len") };
     } else if input_len > crate::pool::MAX_INLINE_INPUT {
-        if !status.is_null() {
-            unsafe {
-                ptr::write(
-                    status,
-                    FfiStatus::bad_arg(
-                        "inline input exceeds the 4096-byte copy limit; use a Buffer",
-                    ),
-                );
-            }
-        }
-        return FFI_BAD_ARG;
+        return unsafe {
+            refuse_arg(
+                status,
+                "inline input exceeds the 4096-byte copy limit; use a Buffer",
+            )
+        };
     } else {
         unsafe { std::slice::from_raw_parts(input_ptr, input_len) }
     };
@@ -432,22 +462,7 @@ pub unsafe extern "C" fn gusset_submit(
         })
     };
 
-    match res {
-        Ok(()) => FFI_OK,
-        // The panic's own report comes first; later calls see FFI_POISONED.
-        Err(FFI_PANIC) => poison_on_panic(h, FFI_PANIC),
-        Err(_) if h.is_poisoned() => {
-            // submit() returns Err(String) for the poison latch, which ffi_guard
-            // maps to FFI_ERR. R10 is FFI_POISONED without a second reading.
-            if !status.is_null() {
-                unsafe {
-                    FfiStatus::overwrite(status, FfiStatus::poisoned("handle is poisoned"));
-                }
-            }
-            FFI_POISONED
-        }
-        Err(code) => code,
-    }
+    unsafe { poison_checked_outcome(h, status, res) }
 }
 
 /// 7. Takes a completed job result (moves out exactly once).
@@ -465,12 +480,7 @@ pub unsafe extern "C" fn gusset_take(
     status: *mut FfiStatus,
 ) -> i32 {
     if handle.is_null() || out_buf_id.is_null() || out_ptr.is_null() || out_len.is_null() {
-        if !status.is_null() {
-            unsafe {
-                ptr::write(status, FfiStatus::bad_arg("null argument passed to take"));
-            }
-        }
-        return FFI_BAD_ARG;
+        return unsafe { refuse_arg(status, "null argument passed to take") };
     }
 
     let h = unsafe { &*handle };
@@ -540,10 +550,7 @@ pub unsafe extern "C" fn gusset_take(
         })
     };
 
-    match res {
-        Ok(()) => FFI_OK,
-        Err(code) => poison_on_panic(h, code),
-    }
+    handle_outcome(h, res)
 }
 
 /// 8. Cancels a specific job ticket (I3).
@@ -558,12 +565,7 @@ pub unsafe extern "C" fn gusset_cancel(
     status: *mut FfiStatus,
 ) -> i32 {
     if handle.is_null() {
-        if !status.is_null() {
-            unsafe {
-                ptr::write(status, FfiStatus::bad_arg("handle is null"));
-            }
-        }
-        return FFI_BAD_ARG;
+        return unsafe { refuse_arg(status, "handle is null") };
     }
 
     let h = unsafe { &*handle };
@@ -576,10 +578,7 @@ pub unsafe extern "C" fn gusset_cancel(
         })
     };
 
-    match res {
-        Ok(()) => FFI_OK,
-        Err(code) => poison_on_panic(h, code),
-    }
+    handle_outcome(h, res)
 }
 
 /// 9. Cancels all pending jobs on the handle (I3).
@@ -590,12 +589,7 @@ pub unsafe extern "C" fn gusset_cancel(
 #[no_mangle]
 pub unsafe extern "C" fn gusset_cancel_all(handle: *mut Handle, status: *mut FfiStatus) -> i32 {
     if handle.is_null() {
-        if !status.is_null() {
-            unsafe {
-                ptr::write(status, FfiStatus::bad_arg("handle is null"));
-            }
-        }
-        return FFI_BAD_ARG;
+        return unsafe { refuse_arg(status, "handle is null") };
     }
 
     let h = unsafe { &*handle };
@@ -608,10 +602,7 @@ pub unsafe extern "C" fn gusset_cancel_all(handle: *mut Handle, status: *mut Ffi
         })
     };
 
-    match res {
-        Ok(()) => FFI_OK,
-        Err(code) => poison_on_panic(h, code),
-    }
+    handle_outcome(h, res)
 }
 
 /// 9a. Attaches a shared-memory completion ring to the handle.
@@ -646,12 +637,7 @@ pub unsafe extern "C" fn gusset_handle_ring(
         || out_slots.is_null()
         || out_capacity.is_null()
     {
-        if !status.is_null() {
-            unsafe {
-                ptr::write(status, FfiStatus::bad_arg("null handle or out pointer"));
-            }
-        }
-        return FFI_BAD_ARG;
+        return unsafe { refuse_arg(status, "null handle or out pointer") };
     }
 
     let h = unsafe { &*handle };
@@ -668,10 +654,7 @@ pub unsafe extern "C" fn gusset_handle_ring(
         })
     };
 
-    match res {
-        Ok(()) => FFI_OK,
-        Err(code) => poison_on_panic(h, code),
-    }
+    handle_outcome(h, res)
 }
 
 /// 9b. Drops the reference `gusset_handle_ring` returned. NULL is a no-op.
@@ -800,25 +783,12 @@ pub unsafe extern "C" fn gusset_buf_alloc(
     status: *mut FfiStatus,
 ) -> i32 {
     if handle.is_null() || out_id.is_null() || out_ptr.is_null() {
-        if !status.is_null() {
-            unsafe {
-                ptr::write(
-                    status,
-                    FfiStatus::bad_arg("null argument passed to buf_alloc"),
-                );
-            }
-        }
-        return FFI_BAD_ARG;
+        return unsafe { refuse_arg(status, "null argument passed to buf_alloc") };
     }
 
     let h = unsafe { &*handle };
     if h.is_poisoned() {
-        if !status.is_null() {
-            unsafe {
-                ptr::write(status, FfiStatus::poisoned("handle is poisoned"));
-            }
-        }
-        return FFI_POISONED;
+        return unsafe { refuse_poisoned(status) };
     }
 
     let res = unsafe {
@@ -832,20 +802,7 @@ pub unsafe extern "C" fn gusset_buf_alloc(
         })
     };
 
-    match res {
-        Ok(()) => FFI_OK,
-        // The panic's own report comes first; later calls see FFI_POISONED.
-        Err(FFI_PANIC) => poison_on_panic(h, FFI_PANIC),
-        Err(_) if h.is_poisoned() => {
-            if !status.is_null() {
-                unsafe {
-                    FfiStatus::overwrite(status, FfiStatus::poisoned("handle is poisoned"));
-                }
-            }
-            FFI_POISONED
-        }
-        Err(code) => code,
-    }
+    unsafe { poison_checked_outcome(h, status, res) }
 }
 
 /// 14. Frees a Rust-owned buffer by id (R4, R16).
@@ -860,12 +817,7 @@ pub unsafe extern "C" fn gusset_buf_free(
     status: *mut FfiStatus,
 ) -> i32 {
     if handle.is_null() {
-        if !status.is_null() {
-            unsafe {
-                ptr::write(status, FfiStatus::bad_arg("handle is null"));
-            }
-        }
-        return FFI_BAD_ARG;
+        return unsafe { refuse_arg(status, "handle is null") };
     }
 
     let h = unsafe { &*handle };
@@ -877,10 +829,7 @@ pub unsafe extern "C" fn gusset_buf_free(
         })
     };
 
-    match res {
-        Ok(()) => FFI_OK,
-        Err(code) => poison_on_panic(h, code),
-    }
+    handle_outcome(h, res)
 }
 
 #[cfg(test)]
