@@ -40,17 +40,13 @@ static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 static PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// Set the first time a `Counting` wrapper services an allocation.
+/// Set the first time a `Counting` wrapper services an allocation through
+/// `GlobalAlloc` (see [`counting_is_active`]).
 ///
-/// Gusset declares no `#[global_allocator]`, so `Stats()` would read zero for an
-/// adopter who never installs `Counting`. `RawBuffer` therefore records its own
-/// allocations by hand. When the adopter *does* install `Counting`, those same
-/// bytes already went through it — `RawBuffer` allocates from the global allocator
-/// — and counting them again reports every buffer at twice its size, which
-/// `AdviseMemoryLimit` then subtracts twice from the Go heap budget.
-///
-/// A global allocator services the process's first allocation, long before any
-/// buffer exists, so this flag is always settled by the time a manual record runs.
+/// `Counting`'s allocator-API path reads it to skip bytes that a counted global
+/// allocator below it has already seen, so they are not reported twice. Gusset's
+/// buffers do not read it: they allocate from `System` and are always counted
+/// (see [`count_buffer_alloc`]).
 static COUNTING_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 #[inline]

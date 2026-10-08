@@ -147,9 +147,9 @@ var (
 // to the heap (`go build -gcflags=-m`), one allocation per large-result Wait
 // through BufFree. A C trampoline in the preamble avoids the allocation but
 // routes the calls around their own noescape and nocallback directives (R5),
-// and DevMap
-// still pairs the wrappers under it. DevMap reports both pairs as structural
-// clones; that is this decision, not an unfolded duplicate.
+// and DevMap pairs the trampolines just the same. The two structural clone
+// groups DevMap reports here are this decision, not an unfolded duplicate
+// (DECISIONS.md 2026-10-08).
 func checkStatus(code C.int32_t, st *C.FfiStatus) error {
 	if code != C.FFI_OK {
 		return statusToError(st)
