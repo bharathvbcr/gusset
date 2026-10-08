@@ -240,7 +240,7 @@ pub const MAX_BUFFER_BYTES: usize = sys::MAX_BUFFER_BYTES;
 /// Each worker is a real OS thread with an 8 MiB stack, so an unbounded pool size
 /// is an unbounded thread and address-space request driven straight from a caller
 /// argument. It also bounds the number of completion tickets that can be in flight
-/// behind the completion pipe, which is what keeps `write_ticket` from ever facing
+/// behind the completion pipe, which is what keeps `write_completion` from ever facing
 /// a full pipe under the documented bounded-concurrency contract (I4, R11).
 pub const MAX_POOL_SIZE: usize = 1024;
 
