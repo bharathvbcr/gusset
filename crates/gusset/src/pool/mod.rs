@@ -423,7 +423,7 @@ fn diagnostic_allocated(ctx: &JobContext, input: &[u8]) -> Result<JobOutput, Str
     const CHUNK: usize = 1 << 16;
     let mut i = 0usize;
     while i < len {
-        ctx.check().map_err(|r| format!("cancelled: {:?}", r))?;
+        ctx.check()?;
         let n = CHUNK.min(len - i);
         // Fallible growth: an infallible push that cannot allocate aborts the
         // process, Go included (see BufferAlloc).
@@ -471,7 +471,7 @@ pub fn diagnostic_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, St
                 100
             };
             for _ in 0..iterations {
-                ctx.check().map_err(|e| format!("cancelled: {:?}", e))?;
+                ctx.check()?;
                 thread::sleep(std::time::Duration::from_millis(10));
             }
             Ok(vec![5, 0])
@@ -568,7 +568,7 @@ pub fn diagnostic_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, St
             // inner fold vectorizes (see the example engine's opcode 10).
             let mut acc = 0u64;
             for chunk in input[1..].chunks(4096) {
-                ctx.check().map_err(|e| format!("cancelled: {:?}", e))?;
+                ctx.check()?;
                 // 4096 * 255^2 < 2^32: a chunk sums exactly in u32, which
                 // packs twice as many lanes per vector as u64. The widest
                 // vector unit is chosen at run time (sys::sum_squares_chunk).
@@ -712,7 +712,17 @@ fn execute_unit(weak: &Weak<Handle>, mut unit: WorkUnit) -> JobResult {
             }
             None => JobResult::Err("handle is closed".to_string()),
         },
-        Ok(Err(err)) => JobResult::Err(err),
+        // An engine that stops because `ctx.check()` failed reports it in its
+        // own words ("deadline exceeded"), and Go classifies a cancel only by the
+        // runtime's exact message. Re-checking here makes the runtime, not the
+        // engine's wording, decide: the documented I3 pattern now surfaces as
+        // context.DeadlineExceeded / context.Canceled. An unrelated engine error
+        // that lands after the deadline is reported as the deadline — the
+        // caller's deadline had passed either way, and Go's ctx says the same.
+        Ok(Err(err)) => match unit.ctx.check() {
+            Err(reason) => JobResult::Cancelled(reason),
+            Ok(()) => JobResult::Err(err),
+        },
         Err(payload) => {
             // Caught panic: poison handle (I2)
             if let Some(h) = weak.upgrade() {
@@ -1409,8 +1419,9 @@ impl Handle {
 
     /// Cancels a specific job by ticket (I3).
     ///
-    /// Returns whether a live flag was found. A caller that cancels an unknown or
-    /// already-completed ticket learns so instead of being told nothing.
+    /// Returns whether a live flag was found. A Rust caller that cancels an
+    /// unknown or already-completed ticket learns so instead of being told
+    /// nothing; the C export `gusset_cancel` does not pass the answer on.
     pub fn cancel(&self, ticket: u64) -> bool {
         let flags = lock_recover(&self.cancel_flags);
         match flags.get(&ticket) {

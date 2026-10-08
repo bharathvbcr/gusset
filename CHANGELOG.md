@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased] - 2026-10-07 · Errors keep their meaning across the boundary
+
+From the 2026-10-07 audit. Each fix has a test that fails on the code before it; no export signature changed, so the ABI version and header signatures are unchanged.
+
+- **An engine that notices its own deadline reports a deadline (I3).** `execute_unit` mapped every engine `Err` to a generic error, and Go recognises a cancel only by the runtime's exact `cancelled: …` text, so the documented pattern (the example engine's opcode 10 returned `"deadline exceeded"`) never matched `context.DeadlineExceeded`. An engine `Err` returned after `ctx.check()` fails is now reported as `Cancelled(reason)`. `CancelReason` implements `Display` and converts into `String` with the canonical text, so `ctx.check()?` works in an engine; the example engine, the diagnostic engine and `docs/adoption.md` use it. `an_engine_stopping_on_its_own_deadline_reports_deadline_exceeded` fails before the fix with `Err("deadline exceeded")`.
+- **A panic inside `gusset_shutdown` is not reported as budget expiry (I2).** The unwind arm returned `FFI_ERR`, the expiry code, and Go mapped every non-OK code to `ErrShutdownIncomplete`. It returns `FFI_PANIC` now, which Go reports as `ErrPanic`; `gusset_init`'s unwind arm does the same, and both log the payload instead of dropping it in `extern "C"`.
+- **The completion reader's exit cause is kept (I4).** A corrupt record or unexpected read error ended `drainPipe` on an open handle and the error was dropped. It is logged with `slog.Warn`, stored on the handle, and carried by the waiter's error and every later refusal; all still match `ErrClosed` and keep their historical text.
+- **No more made-up `file:line`.** Engine errors, bad arguments and poison stamped `gusset.rs`, `ffi.rs` or `handle.rs` (none exist) with the constructor's own line, and Go printed `(at gusset.rs:204)`. Only a caught panic carries a location now.
+- **Boundary refusals are sentinels.** `ErrNilHandle`, `ErrNilContext`, `ErrNilBuffer` and `ErrInputTooLarge` are exported beside `ErrClosed`, with unchanged texts; `ErrUnknownTicket` and `ErrTicketBusy` moved there.
+- **`gusset_cancel` / `gusset_cancel_all` are documented as they behave.** They return `FFI_OK` without reporting whether a ticket was found or how many were cancelled; `gusset.h`, the Rust docs and the Go wrappers now say so.
+- **Two races the new tests exposed.** `install_panic_hook` set its flag before installing the hook, so a concurrent caller (another handle opening, `gusset_init`) could return early and a panic in that window lost its location; it uses `Once` now. In tests only, the fault injector held one armed thread, so parallel tests disarmed each other (for `gusset_shutdown` that would have run a real shutdown); it keeps a set now.
+
 ## [Unreleased] - 2026-10-02 · Docs catch up with Close
 
 - **`Close` is documented as bounded.** README, `docs/adoption.md` and `docs/choosing.md` still said `Close` has no budget. They now describe the 30-second join, the error when a worker outlasts it, and that the Rust pool stays allocated until that worker exits.

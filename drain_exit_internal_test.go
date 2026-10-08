@@ -1,7 +1,12 @@
 package gusset
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -101,5 +106,91 @@ func TestDrainExit_ParkedSubmitterIsRefusedNotParkedOrAdmitted(t *testing.T) {
 				t.Fatalf("%d permits held after Close (I4)", n)
 			}
 		})
+	}
+}
+
+// When drainPipe stops on its own — a corrupt record, an errno nobody asked
+// for — the reason has to survive. It used to be dropped: every waiter got
+// "gusset: handle closed", every later call ErrClosed, and nothing was logged,
+// so a handle that had stopped working could not say why. The cause is now
+// logged, kept on the handle, and carried by the waiter's error and every
+// later refusal, which still match ErrClosed.
+func TestDrainExit_CauseIsRetainedAndStillErrClosed(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+
+	h, err := Open(WithPoolSize(1), WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	s := h.state
+	ctx := context.Background()
+
+	busy, err := h.Submit(ctx, []byte{9, 30}) // 300 ms job
+	if err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan error, 1)
+	go func() { _, err := h.Wait(ctx, busy); waited <- err }()
+	eventually(t, "the waiter to register", func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		_, ok := s.pending[busy]
+		return ok
+	})
+
+	// killDrain ends the reader with a read-deadline error on an open handle.
+	killDrain(t, s)
+
+	isCause := func(what string, err error, prefix string) {
+		t.Helper()
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("%s: %v does not match ErrClosed", what, err)
+		}
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("%s: %v lost the reader's exit cause", what, err)
+		}
+		if !strings.HasPrefix(err.Error(), prefix) {
+			t.Fatalf("%s: %q dropped the historical text %q", what, err, prefix)
+		}
+	}
+
+	cause := s.drainErr.Load()
+	if cause == nil {
+		t.Fatal("drainPipe exited on an open handle without recording why")
+	}
+	if !errors.Is(cause.cause, os.ErrDeadlineExceeded) {
+		t.Fatalf("recorded cause %v is not the read error", cause.cause)
+	}
+	isCause("waiter", <-waited, "gusset: handle closed")
+	_, err = h.Submit(ctx, []byte{0, 1})
+	isCause("later Submit", err, "gusset: handle is closed")
+	_, err = h.Call(ctx, []byte{0, 1})
+	isCause("later Call", err, "gusset: handle is closed")
+	if !strings.Contains(logs.String(), "completion reader stopped") {
+		t.Fatalf("the reader's exit was not logged; log:\n%s", logs.String())
+	}
+
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A reader stopped by Close is not a failure: no cause, no warning.
+	logs.Reset()
+	h2, err := Open(WithPoolSize(1), WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if c := h2.state.drainErr.Load(); c != nil {
+		t.Fatalf("Close recorded a reader failure: %v", c)
+	}
+	if strings.Contains(logs.String(), "completion reader stopped") {
+		t.Fatalf("Close logged a reader failure:\n%s", logs.String())
 	}
 }

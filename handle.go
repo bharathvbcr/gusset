@@ -140,8 +140,11 @@ type handleState struct {
 	// no completion can ever be delivered, so a new submission or waiter is
 	// refused instead of parking forever.
 	drainExited atomic.Bool
-	mu          sync.Mutex
-	cgoMu       sync.RWMutex
+	// drainErr is why drainPipe stopped, when it stopped with the handle
+	// still open. Stored before drainExited; see closedErr.
+	drainErr atomic.Pointer[drainExitError]
+	mu       sync.Mutex
+	cgoMu    sync.RWMutex
 	// pending maps a ticket to its waiter's channel. deliver, and drainPipe's
 	// exit when it sends "handle closed", set the entry to nil as they send;
 	// the waiter deletes it once it has collected (see collectLocked), so a
@@ -312,12 +315,20 @@ func drainPipe(s *handleState) {
 	for {
 		ticket, inlineData, inline, err := tr.next()
 		if err != nil {
-			// Pipe closed on handle shutdown or EOF
+			// Close sets closed before it stops the reader, so an error with
+			// the handle still open is the reader failing, not being stopped.
+			waiterErr := errDrainClosed
+			var exit *drainExitError
+			if !s.closed.Load() {
+				exit = &drainExitError{prefix: ErrClosed.Error(), cause: err}
+				s.drainErr.Store(exit)
+				waiterErr = &drainExitError{prefix: errDrainClosed.Error(), cause: err}
+			}
 			s.mu.Lock()
 			for t, ch := range s.pending {
 				if ch != nil { // nil: already delivered, its waiter is collecting
 					s.pending[t] = nil
-					ch <- callResult{err: errDrainClosed}
+					ch <- callResult{err: waiterErr}
 				}
 			}
 			toFree := s.takeUnclaimedLocked()
@@ -329,6 +340,10 @@ func drainPipe(s *handleState) {
 			s.abandoned = make(map[uint64]struct{})
 			s.mu.Unlock()
 
+			if exit != nil {
+				slog.Warn("gusset: completion reader stopped while the handle was open; "+
+					"its waiters and every later call fail with ErrClosed", "err", exit.cause)
+			}
 			for _, id := range toFree {
 				_ = s.bufFree(id)
 			}
@@ -832,7 +847,7 @@ func (s *handleState) deliver(ticket uint64, res callResult, takeID uint64) {
 // so the error is not permission to treat the engine's memory as freed.
 func (h *Handle) Close() error {
 	if h == nil || h.state == nil {
-		return errors.New("gusset: handle is nil")
+		return ErrNilHandle
 	}
 	h.cleanup.Stop()
 	err := h.state.close()
@@ -995,6 +1010,16 @@ func (s *handleState) discardTake(takeID uint64) {
 	}
 }
 
+// closedErr is the refusal for a handle that is closed or whose completion
+// reader has stopped: ErrClosed, carrying the reader's failure when it stopped
+// on its own while the handle was open (see drainExitError).
+func (s *handleState) closedErr() error {
+	if e := s.drainErr.Load(); e != nil {
+		return e
+	}
+	return ErrClosed
+}
+
 func (s *handleState) releaseSemLocked(ticket uint64) {
 	if _, ok := s.semTickets[ticket]; ok {
 		delete(s.semTickets, ticket)
@@ -1007,10 +1032,10 @@ func (s *handleState) releaseSemLocked(ticket uint64) {
 // Invariant: callers park on the Go semaphore, never blocking on an OS thread (I4).
 func (h *Handle) Call(ctx context.Context, in []byte) ([]byte, error) {
 	if h == nil || h.state == nil {
-		return nil, errors.New("gusset: handle is nil")
+		return nil, ErrNilHandle
 	}
 	if ctx == nil {
-		return nil, errors.New("gusset: nil context")
+		return nil, ErrNilContext
 	}
 	res, err := h.state.call(ctx, in)
 	runtime.KeepAlive(h)
@@ -1039,13 +1064,13 @@ func (s *handleState) call(ctx context.Context, in []byte) ([]byte, error) {
 // output when done with it; AddCleanup is a backstop on each, not a plan.
 func (h *Handle) CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error) {
 	if h == nil || h.state == nil {
-		return nil, errors.New("gusset: handle is nil")
+		return nil, ErrNilHandle
 	}
 	if ctx == nil {
-		return nil, errors.New("gusset: nil context")
+		return nil, ErrNilContext
 	}
 	if in == nil {
-		return nil, errors.New("gusset: buffer is nil")
+		return nil, ErrNilBuffer
 	}
 	if in.state == nil {
 		return nil, errors.New("gusset: buffer is not initialized")
@@ -1067,10 +1092,10 @@ func (h *Handle) CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error) {
 // Submit submits a job asynchronously (accepts either []byte or *Buffer) and returns a ticket.
 func (h *Handle) Submit(ctx context.Context, in any) (uint64, error) {
 	if h == nil || h.state == nil {
-		return 0, errors.New("gusset: handle is nil")
+		return 0, ErrNilHandle
 	}
 	if ctx == nil {
-		return 0, errors.New("gusset: nil context")
+		return 0, ErrNilContext
 	}
 	ticket, err := h.state.submit(ctx, in)
 	runtime.KeepAlive(h)
@@ -1092,7 +1117,7 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 		return s.submitInput(ctx, v, nil)
 	case *Buffer:
 		if v == nil {
-			return 0, errors.New("gusset: buffer is nil")
+			return 0, ErrNilBuffer
 		}
 		return s.submitInput(ctx, nil, v)
 	case nil:
@@ -1108,7 +1133,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 	// answer ErrPoisoned, sending a caller whose policy is "on poison, close
 	// and reopen" back to close a handle it had already closed.
 	if s.closed.Load() || s.drainExited.Load() {
-		return 0, ErrClosed
+		return 0, s.closedErr()
 	}
 	if s.poisoned.Load() {
 		return 0, errHandlePoisoned
@@ -1119,7 +1144,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 
 	if buf == nil {
 		if len(raw) > inlineResultBytes {
-			return 0, errors.New("gusset: []byte input exceeds 4096-byte copy limit; use NewBuffer")
+			return 0, ErrInputTooLarge
 		}
 		rawInput = raw
 	} else {
@@ -1153,7 +1178,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 			// (SubmitWait 2 -> 3 allocs/op).
 			data := v.data
 			if len(data) > inlineResultBytes {
-				return 0, errors.New("gusset: buffer without a Rust id exceeds the 4096-byte copy limit")
+				return 0, errBufferInputTooLarge
 			}
 			rawInput = data
 		}
@@ -1175,7 +1200,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	case <-s.drainDone:
-		return 0, ErrClosed
+		return 0, s.closedErr()
 	}
 
 	// In Go, select chooses pseudo-randomly when multiple channels are ready.
@@ -1190,7 +1215,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 	// a job whose completion nobody would ever read.
 	if s.closed.Load() || s.drainExited.Load() {
 		<-s.sem
-		return 0, ErrClosed
+		return 0, s.closedErr()
 	}
 	if s.poisoned.Load() {
 		<-s.sem
@@ -1241,10 +1266,10 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 // Wait waits for completion of an asynchronously submitted job ticket.
 func (h *Handle) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	if h == nil || h.state == nil {
-		return nil, errors.New("gusset: handle is nil")
+		return nil, ErrNilHandle
 	}
 	if ctx == nil {
-		return nil, errors.New("gusset: nil context")
+		return nil, ErrNilContext
 	}
 	res, err := h.state.wait(ctx, ticket)
 	runtime.KeepAlive(h)
@@ -1260,10 +1285,10 @@ func (h *Handle) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
 // acts as a safety net if the buffer is garbage collected.
 func (h *Handle) WaitBuffer(ctx context.Context, ticket uint64) (*Buffer, error) {
 	if h == nil || h.state == nil {
-		return nil, errors.New("gusset: handle is nil")
+		return nil, ErrNilHandle
 	}
 	if ctx == nil {
-		return nil, errors.New("gusset: nil context")
+		return nil, ErrNilContext
 	}
 	buf, err := h.state.waitBuffer(ctx, ticket)
 	if buf != nil {
@@ -1272,13 +1297,6 @@ func (h *Handle) WaitBuffer(ctx context.Context, ticket uint64) (*Buffer, error)
 	runtime.KeepAlive(h)
 	return buf, err
 }
-
-// ErrUnknownTicket reports a ticket this handle is not waiting on: never submitted
-// here, already awaited, or issued by a different handle.
-var ErrUnknownTicket = errors.New("gusset: unknown or already-awaited ticket")
-
-// ErrTicketBusy reports that another goroutine is already waiting on this ticket.
-var ErrTicketBusy = errors.New("gusset: ticket already has a waiter")
 
 func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	res, takeID, err := s.waitInternal(ctx, ticket)
@@ -1372,7 +1390,7 @@ func (s *handleState) waitInternal(ctx context.Context, ticket uint64) (callResu
 
 	if s.closed.Load() || s.drainExited.Load() {
 		s.mu.Unlock()
-		return callResult{}, 0, ErrClosed
+		return callResult{}, 0, s.closedErr()
 	}
 
 	// Refuse a ticket this handle is not holding.

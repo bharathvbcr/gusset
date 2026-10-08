@@ -375,11 +375,25 @@ func Init() error {
 
 // Shutdown shuts down the Gusset runtime.
 func Shutdown(drainMS uint32) error {
-	code := C.gusset_shutdown(C.uint32_t(drainMS))
-	if code != C.FFI_OK {
-		return &Error{Code: int(code), Msg: shutdownIncompleteMsg}
+	return shutdownError(int(C.gusset_shutdown(C.uint32_t(drainMS))))
+}
+
+const shutdownPanicMsg = "shutdown panicked; drain state unknown"
+
+// shutdownError maps gusset_shutdown's return code. Only FFI_ERR means the
+// drain budget expired: every non-OK code used to become that message, so a
+// panic caught inside shutdown read as ErrShutdownIncomplete.
+func shutdownError(code int) error {
+	switch code {
+	case FFI_OK:
+		return nil
+	case FFI_ERR:
+		return &Error{Code: code, Msg: shutdownIncompleteMsg}
+	case FFI_PANIC:
+		return &Error{Code: code, Msg: shutdownPanicMsg}
+	default:
+		return &Error{Code: code, Msg: fmt.Sprintf("shutdown failed with unexpected code %d", code)}
 	}
-	return nil
 }
 
 // HandleOpen opens a new Rust handle.
@@ -511,7 +525,8 @@ func Take(h unsafe.Pointer, ticket uint64) (uint64, []byte, error) {
 	return uint64(bufID), slice, nil
 }
 
-// Cancel cancels a task by ticket.
+// Cancel cancels a task by ticket. A nil error does not mean the ticket was
+// live: gusset_cancel does not report whether it found one.
 func Cancel(h unsafe.Pointer, ticket uint64) error {
 	var st C.FfiStatus
 	code := C.gusset_cancel((*C.GussetHandle)(h), C.uint64_t(ticket), &st)
@@ -521,7 +536,7 @@ func Cancel(h unsafe.Pointer, ticket uint64) error {
 	return nil
 }
 
-// CancelAll cancels all tasks on handle.
+// CancelAll cancels all tasks on handle. How many it cancelled is not reported.
 func CancelAll(h unsafe.Pointer) error {
 	var st C.FfiStatus
 	code := C.gusset_cancel_all((*C.GussetHandle)(h), &st)

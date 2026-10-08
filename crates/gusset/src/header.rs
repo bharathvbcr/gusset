@@ -65,6 +65,31 @@ pub enum CancelReason {
     DeadlineExceeded,
 }
 
+/// The canonical message for a cancelled job: `cancelled: Explicit` or
+/// `cancelled: DeadlineExceeded`.
+///
+/// Go maps exactly these strings to `context.Canceled` and
+/// `context.DeadlineExceeded`. An engine that stops on a failed
+/// [`JobContext::check`] can return `ctx.check()?` (through the `String`
+/// conversion below) and get them for free; the runtime also reports any engine
+/// error returned after a failed check as the cancel itself, so wording of the
+/// engine's own is never what decides how Go classifies it.
+impl std::fmt::Display for CancelReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self {
+            CancelReason::Explicit => "Explicit",
+            CancelReason::DeadlineExceeded => "DeadlineExceeded",
+        };
+        write!(f, "cancelled: {}", reason)
+    }
+}
+
+impl From<CancelReason> for String {
+    fn from(reason: CancelReason) -> Self {
+        reason.to_string()
+    }
+}
+
 /// Context for a job executing in the worker pool.
 #[derive(Debug, Clone)]
 pub struct JobContext {

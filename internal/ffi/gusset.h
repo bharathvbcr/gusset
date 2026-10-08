@@ -132,16 +132,21 @@ void gusset_abi_layout(AbiLayout* out);
  * entries into each non-null pointer and returns the full field count. */
 uint32_t gusset_abi_fields(uint32_t* offsets, uint32_t* sizes, uint32_t cap);
 int32_t gusset_init(void);
+/* FFI_OK: drained. FFI_ERR: drain budget expired with work in flight.
+ * FFI_PANIC: shutdown itself panicked; drain state unknown. */
 int32_t gusset_shutdown(uint32_t drain_ms);
 int32_t gusset_handle_open(uint32_t pool_size, int32_t pipe_write_fd, GussetHandle** out_handle, FfiStatus* status);
 int32_t gusset_handle_close(GussetHandle* handle, FfiStatus* status);
 int32_t gusset_submit(GussetHandle* handle, const CallHeader* header, const uint8_t* input_ptr, size_t input_len, uint64_t buffer_id, uint64_t* out_ticket, FfiStatus* status);
 int32_t gusset_take(GussetHandle* handle, uint64_t ticket, uint64_t* out_buf_id, uint8_t** out_ptr, size_t* out_len, FfiStatus* status);
+/* FFI_OK whether or not the ticket still had a live job: whether it was
+ * found is not reported. */
 int32_t gusset_cancel(GussetHandle* handle, uint64_t ticket, FfiStatus* status);
 /* Attaches the completion ring. *out_ring owns the ring memory, which stays
  * valid after gusset_handle_close until gusset_ring_release(*out_ring). */
 int32_t gusset_handle_ring(GussetHandle* handle, const GussetRing** out_ring, const uint8_t** out_shared, const uint8_t** out_slots, uint64_t* out_capacity, FfiStatus* status);
 void gusset_ring_release(const GussetRing* ring);
+/* FFI_OK; how many jobs were cancelled is not reported. */
 int32_t gusset_cancel_all(GussetHandle* handle, FfiStatus* status);
 void gusset_status_free(FfiStatus* status);
 void gusset_alloc_stats(AllocStats* out);

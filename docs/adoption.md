@@ -83,8 +83,11 @@ use gusset_core::{set_engine_handler, JobContext};
 #[no_mangle]
 pub extern "C" fn myservice_engine_init() {
     set_engine_handler(|ctx: &JobContext, input: &[u8]| -> Result<Vec<u8>, String> {
-        // Cooperative cancellation between work units (I3, R9).
-        ctx.check().map_err(|e| format!("cancelled: {:?}", e))?;
+        // Cooperative cancellation between work units (I3, R9). `?` converts
+        // the CancelReason into the message Go maps to context.Canceled /
+        // context.DeadlineExceeded. An Err returned after a failed check is
+        // reported as the cancel whatever its text, so your own wording works too.
+        ctx.check()?;
 
         // Validate at the boundary. Return Err for bad input; never panic and
         // never `from_utf8_unchecked`.

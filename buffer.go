@@ -55,7 +55,7 @@ type bufferCleanupInfo struct {
 // Suitable for inputs larger than 4 KiB to avoid double copying across FFI.
 func (h *Handle) NewBuffer(n int) (*Buffer, error) {
 	if h == nil || h.state == nil {
-		return nil, errors.New("gusset: handle is nil")
+		return nil, ErrNilHandle
 	}
 	buf, err := h.state.newBuffer(n)
 	if buf != nil {

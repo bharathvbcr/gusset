@@ -7,7 +7,7 @@
 
 #[cfg(gusset_allocator_api)]
 use gusset::BufferAlloc;
-use gusset::{set_engine_handler, CancelReason, JobContext, JobOutput};
+use gusset::{set_engine_handler, JobContext, JobOutput};
 
 /// Whether opcode 13 (output built in `BufferAlloc` memory) is compiled in.
 ///
@@ -31,12 +31,15 @@ pub fn init_example_engine() {
                     // keeps LLVM from vectorizing it; this shape runs the same
                     // kernel about 2x faster and still observes a cancel
                     // within one 4 KiB chunk.
+                    //
+                    // `?` converts the CancelReason into the runtime's canonical
+                    // message, the one Go maps to context.DeadlineExceeded and
+                    // context.Canceled. The runtime also re-checks the context
+                    // when an engine returns Err, so an engine using its own
+                    // wording is still reported as cancelled.
                     let mut acc = 0u64;
                     for chunk in input[1..].chunks(4096) {
-                        ctx.check().map_err(|e| match e {
-                            CancelReason::Explicit => "cancelled explicitly".to_string(),
-                            CancelReason::DeadlineExceeded => "deadline exceeded".to_string(),
-                        })?;
+                        ctx.check()?;
                         // 4096 * 255^2 < 2^32: a chunk sums exactly in u32, which
                         // packs twice as many lanes per vector as u64.
                         let chunk_sum: u32 = chunk.iter().map(|&b| (b as u32) * (b as u32)).sum();
