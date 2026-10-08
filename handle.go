@@ -33,9 +33,11 @@ type callResult struct {
 type Option func(*handleConfig)
 
 type handleConfig struct {
-	poolSize        uint32
-	poolSizeInvalid bool
-	callFlags       uint32
+	poolSize uint32
+	// poolSizeErr is why the last WithPoolSize value was refused, nil when it
+	// was valid. Open returns it.
+	poolSizeErr error
+	callFlags   uint32
 	// pipeOnly skips the shared-memory completion ring, so every completion
 	// crosses the pipe. Unexported: it exists for tests and A/B benchmarks.
 	pipeOnly      bool
@@ -54,15 +56,19 @@ const MaxPoolSize = 1024
 //
 // Values above MaxPoolSize are not silently clamped: Open returns an error, because
 // a caller who asked for 10,000 workers and quietly received 1024 would keep the
-// wrong capacity model.
+// wrong capacity model. Values below 1 are refused too, with an error that says
+// so: 0 is not "use the default".
 func WithPoolSize(n int) Option {
 	return func(c *handleConfig) {
-		if n < 1 || n > MaxPoolSize {
-			c.poolSizeInvalid = true
-			return
+		switch {
+		case n < 1:
+			c.poolSizeErr = fmt.Errorf("gusset: pool_size must be at least 1 (got %d)", n)
+		case n > MaxPoolSize:
+			c.poolSizeErr = fmt.Errorf("gusset: pool_size %d exceeds maximum %d (each worker is an OS thread with an 8 MiB stack)", n, MaxPoolSize)
+		default:
+			c.poolSizeErr = nil
+			c.poolSize = uint32(n)
 		}
-		c.poolSizeInvalid = false
-		c.poolSize = uint32(n)
 	}
 }
 
@@ -87,7 +93,9 @@ func WithDiagnosticEngine() Option {
 
 // WithBufferBudget caps the bytes of live buffers allocated with NewBuffer on
 // this handle; NewBuffer beyond it returns ErrBufferBudget. 0 (the default)
-// means unlimited.
+// means unlimited. A negative budget is refused by Open rather than read as
+// unlimited: a caller who asked for a cap and got the sign wrong would
+// otherwise get no cap at all, silently.
 //
 // Rust memory is invisible to Go's GC pacer and each *Buffer is a tiny Go
 // object, so a caller that loops on NewBuffer without Free can reach an OOM
@@ -96,9 +104,6 @@ func WithDiagnosticEngine() Option {
 // CallBuffer) are not charged: refusing them would lose finished work.
 func WithBufferBudget(bytes int64) Option {
 	return func(c *handleConfig) {
-		if bytes < 0 {
-			bytes = 0
-		}
 		c.bufferBudget = bytes
 	}
 }
@@ -205,8 +210,11 @@ func Open(opts ...Option) (*Handle, error) {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	if cfg.poolSizeInvalid || cfg.poolSize > MaxPoolSize {
-		return nil, errors.New("gusset: pool_size exceeds maximum 1024 (each worker is an OS thread with an 8 MiB stack)")
+	if cfg.poolSizeErr != nil {
+		return nil, cfg.poolSizeErr
+	}
+	if cfg.bufferBudget < 0 {
+		return nil, fmt.Errorf("gusset: buffer budget must not be negative (got %d); 0 means unlimited", cfg.bufferBudget)
 	}
 
 	r, w, err := os.Pipe()

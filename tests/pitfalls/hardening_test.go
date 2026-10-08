@@ -3,6 +3,8 @@ package pitfalls_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"runtime"
 	"runtime/metrics"
 	"strings"
@@ -295,6 +297,94 @@ func TestPitfall_PoolSizeOverflowIsRefusedNotTruncated(t *testing.T) {
 		if !strings.Contains(err.Error(), "pool_size") {
 			t.Fatalf("WithPoolSize(%d): expected the error to name pool_size, got: %v", n, err)
 		}
+	}
+}
+
+// TestPitfall_PoolSizeRefusalNamesTheActualProblem pins one message per
+// invalid case.
+//
+// WithPoolSize(0) and WithPoolSize(-1) were refused with "pool_size exceeds
+// maximum 1024", which sent a caller who passed zero looking for a number that
+// was too large. Each refusal now says what was wrong with the value given.
+func TestPitfall_PoolSizeRefusalNamesTheActualProblem(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{0, "pool_size must be at least 1 (got 0)"},
+		{-1, "pool_size must be at least 1 (got -1)"},
+		{gusset.MaxPoolSize + 1, "pool_size 1025 exceeds maximum 1024"},
+		{1 << 40, "pool_size 1099511627776 exceeds maximum 1024"},
+	}
+	for _, c := range cases {
+		h, err := gusset.Open(gusset.WithPoolSize(c.n), gusset.WithDiagnosticEngine())
+		if err == nil {
+			_ = h.Close()
+			t.Fatalf("WithPoolSize(%d) must be refused", c.n)
+		}
+		if !strings.Contains(err.Error(), c.want) {
+			t.Errorf("WithPoolSize(%d): got %q, want it to say %q", c.n, err, c.want)
+		}
+		if c.n < 1 && strings.Contains(err.Error(), "exceeds") {
+			t.Errorf("WithPoolSize(%d): %q blames a ceiling the value is below", c.n, err)
+		}
+	}
+
+	// The last WithPoolSize wins, as before: a valid size after an invalid one
+	// opens.
+	h, err := gusset.Open(gusset.WithPoolSize(0), gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("a valid WithPoolSize after an invalid one was refused: %v", err)
+	}
+	_ = h.Close()
+}
+
+// TestPitfall_NegativeBufferBudgetIsRefused pins refuse-not-clamp for the
+// NewBuffer budget (DECISIONS 2026-09-20).
+//
+// WithBufferBudget(-1) used to become 0, which means unlimited: a caller who
+// computed a budget, got the sign wrong, and asked for a cap received no cap at
+// all, silently. Open now refuses it, and both settings of the option still
+// behave: a positive budget refuses the allocation that crosses it, and 0
+// leaves NewBuffer unlimited.
+func TestPitfall_NegativeBufferBudgetIsRefused(t *testing.T) {
+	for _, n := range []int64{-1, -(64 << 10), math.MinInt64} {
+		h, err := gusset.Open(gusset.WithBufferBudget(n), gusset.WithDiagnosticEngine())
+		if err == nil {
+			_ = h.Close()
+			t.Fatalf("WithBufferBudget(%d) opened a handle; a negative budget must be refused", n)
+		}
+		want := fmt.Sprintf("buffer budget must not be negative (got %d)", n)
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("WithBufferBudget(%d): got %q, want it to say %q", n, err, want)
+		}
+	}
+
+	capped, err := gusset.Open(gusset.WithBufferBudget(64<<10), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("a positive budget was refused: %v", err)
+	}
+	defer capped.Close()
+	b, err := capped.NewBuffer(64 << 10)
+	if err != nil {
+		t.Fatalf("an allocation within the budget was refused: %v", err)
+	}
+	defer b.Free()
+	if _, err := capped.NewBuffer(1); !errors.Is(err, gusset.ErrBufferBudget) {
+		t.Fatalf("an allocation over the budget: got %v, want ErrBufferBudget", err)
+	}
+
+	unlimited, err := gusset.Open(gusset.WithBufferBudget(0), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("WithBufferBudget(0) was refused: %v", err)
+	}
+	defer unlimited.Close()
+	for i := 0; i < 2; i++ {
+		u, err := unlimited.NewBuffer(64 << 10)
+		if err != nil {
+			t.Fatalf("WithBufferBudget(0) is unlimited, but NewBuffer %d failed: %v", i, err)
+		}
+		defer u.Free()
 	}
 }
 
