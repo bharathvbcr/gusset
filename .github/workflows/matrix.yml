@@ -629,7 +629,7 @@ jobs:
           set -euo pipefail
           : > old.txt
           : > new.txt
-          for round in $(seq 10); do
+          for _ in $(seq 10); do
             (cd "$RUNNER_TEMP/base/bench" && "$RUNNER_TEMP/old.test" -test.run '^$' -test.bench . -test.benchtime=1s -test.count=1) >> old.txt
             (cd bench && "$RUNNER_TEMP/new.test" -test.run '^$' -test.bench . -test.benchtime=1s -test.count=1) >> new.txt
           done
