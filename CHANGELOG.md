@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased] - 2026-10-08 · Every certified benchmark is charted
+
+No library, ABI or Go API change. `DECISIONS.md` 2026-10-08 records the rule.
+
+- **`tools/benchplot` draws the rest of the committed results (`gallery.go`).** Seven new charts in `docs/img/`: Gusset's own suite on darwin (`darwin-suite.svg`) and, before and after, on the Linux VM (`vm-suite.svg`); the VM's threads, resident memory and wall time under concurrency (`vm-threads.svg`, `vm-memory.svg`, `vm-scaling-time.svg`); and peak threads at 512 in flight on both hosts (`thread-pressure.svg`). Every file goes through `mustLoad`, so one without a provenance header is fatal, and `make docs-check` fails when a chart drifts. The three existing charts regenerate byte-identical.
+- **`docs/benchmarks.md` (new)** shows the charts and lists every `Benchmark*` function in the tree against the chart that covers it, or the reason none does: refused by a check, no provenance header, or never recorded. It is linked from the README and `docs/choosing.md`.
+- **`linux-amd64-vm/transport-after.txt` is not charted, and the check was not loosened.** Its arms disagree by 11% about how long the same Rust loop takes, over the 10% `calibrationTolerance`. The README had quoted ratios from it as hand-typed figures; those bullets are replaced by the charts and a pointer, and the VM README now marks that table as not certified. Re-record with `make bench-crossover` on that host.
+- **`ThreadPressure` bars are single runs** (`-count=1`, because a thread count is only attributable to the first transport sampled in a process). The chart and `docs/benchmarks.md` say a gap of a few threads is not resolved.
+
+## [Unreleased] - 2026-10-08 · Tests and CI that measured nothing now measure
+
+- **`internal/isolate` (new, internal; the Go entry-point count stays 13).** A spike of whether one `Handle` contract can front both the in-process and an out-of-process mode: `Serve` runs a `*gusset.Handle` in a worker process, `Proc` is the host side over length-prefixed JSON frames, and both satisfy one `Caller` interface with parity tests. A worker killed by SIGKILL or SIGABRT fails its in-flight tickets and every later call with an error matching `ErrPoisoned`. The `Buffer` surface is not carried (`ErrBufferUnsupported`). `DECISIONS.md` and `docs/ipc.md` record the finding.
+- **The churn tests count threads and descriptors on darwin.** They read only `/proc`, so on macOS every thread and descriptor comparison was -1 against -1, a pass that measured nothing. `countOSThreads` now uses `ps -M` and `countFDs` falls back to `/dev/fd`; a platform that still cannot count skips instead of passing. A new churn test poisons a handle, closes it and opens a fresh one repeatedly, and requires goroutines, threads, descriptors, the Go heap and Rust live bytes back at a warm baseline.
+- **One set of Rust test helpers (`tests/common/mod.rs`) replaces per-file copies** (eight `make_pipes`, four ticket readers, three `Must` traits). `read_ticket` waits at most five seconds, so a lost ticket fails with a message rather than hanging the binary until CI's job timeout.
+- **CI:** the interleaved benchmark loop's unused counter is named `_` (actionlint SC2034).
+
 ## [Unreleased] - 2026-10-08 · Repo tooling checks the tree and the file it was given
 
 From the 2026-10-07 audit. Each fix has a test that fails on the code before it. No library, ABI or README change.

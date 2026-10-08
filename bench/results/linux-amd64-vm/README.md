@@ -155,6 +155,12 @@ The allocation left on `Call` is the result slice returned to the caller.
 
 ## Against one blocking cgo call per request (`transport-*.txt`, median of 6)
 
+> **Not certified.** `tools/benchplot` refuses `transport-after.txt`: its arms
+> disagree by 11% about how long 100,000 iterations of the same Rust loop take,
+> over the 10% tolerance, so the arms did not run under the same conditions. The
+> table below is hand-typed from that file and has no chart. Re-record it with
+> `make bench-crossover` on this host before relying on the ratios.
+
 The same integer loop on both transports (`rs_spin` and diagnostic mode 11), so
 the difference is transport alone. The `×` columns are Gusset time over raw-cgo
 time.

@@ -565,10 +565,8 @@ func threadChart(raw, gus map[string][]benchfile.Sample, concs []int) string {
 // The cost is the thread count itself — scheduler pressure, creation latency,
 // and Go's 10,000-thread ceiling — so showing the modest memory curve next to
 // the steep thread curve is what keeps the claim honest.
-func memChart(raw, gus map[string][]benchfile.Sample, concs []int) string {
-	c := newChart(760, 400,
-		"Peak resident memory under the same load",
-		"Measured with ps(1), not derived from a stack size. The thread cost is mostly not a memory cost.")
+func memChart(raw, gus map[string][]benchfile.Sample, concs []int, title, sub string) string {
+	c := newChart(760, 400, title, sub)
 
 	maxY := 0.0
 	for _, n := range concs {
@@ -641,7 +639,14 @@ func main() {
 	files := map[string]string{
 		"crossover.svg": crossoverChart(tm, works),
 		"threads.svg":   threadChart(rm, gm, concs),
-		"memory.svg":    memChart(rm, gm, concs),
+		"memory.svg": memChart(rm, gm, concs,
+			"Peak resident memory under the same load",
+			"Measured with ps(1), not derived from a stack size. The thread cost is mostly not a memory cost."),
+	}
+	// The rest of the certified results: the main suite, the linux VM rounds,
+	// ThreadPressure. See gallery.go.
+	for name, body := range galleryCharts() {
+		files[name] = body
 	}
 
 	// The adoption guide's tables, from the same medians as the charts beside
@@ -678,7 +683,7 @@ func main() {
 		os.Exit(1)
 	}
 	if *check {
-		fmt.Printf("benchplot: docs/img matches %s\n", resultsDir)
+		fmt.Printf("benchplot: docs/img matches %s and %s\n", resultsDir, vmResultsDir)
 	}
 }
 

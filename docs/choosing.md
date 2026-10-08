@@ -9,7 +9,8 @@ Every figure here is drawn from committed benchmark output by
 [`tools/benchplot`](../tools/benchplot), the same way the README's table is drawn
 by `tools/benchdoc`. `make docs-check` fails if a chart and its data disagree.
 The numbers come from one machine — Apple M5 Pro, 18 cores, darwin/arm64, Go
-1.27.1, Rust 1.98.0. Re-run `make bench-crossover && make bench-scaling` on
+1.27.1, Rust 1.98.0. [Benchmarks, plotted](benchmarks.md) charts the rest of the
+committed results, including the Linux VM. Re-run `make bench-crossover && make bench-scaling` on
 yours; the shapes should hold, the constants will not.
 
 ---

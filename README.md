@@ -310,15 +310,18 @@ The table and charts above come from the darwin-arm64 host. They predate the
 completion-path work recorded in
 [`bench/results/linux-amd64-vm/`](bench/results/linux-amd64-vm/README.md):
 spin-then-park, inline completion records, and the shared-memory ring. The
-figures below are the tables in that directory, not a new measurement:
+charts below are drawn from the certified files in that directory, not from a new
+measurement. Before is the original `main`; after is spin-then-park.
 
-- **Serial no-op `Call`:** 90.3 µs on the old main, 10.6 µs after
-  spin-then-park (`main-*.txt`), then 3.73 µs with the ring (`ring-*.txt`,
-  against 7.46 µs on the commit just before it).
-- **Against a blocking cgo call:** after spin-then-park, 1.1–2.2× for work of
-  10 µs and up, where it had been as high as 8.6× (`transport-*.txt`).
-- **Threads:** 11 OS threads at every concurrency level from 32 to 2048
-  in-flight requests, against raw cgo's 30–47.
+![Gusset's suite on the Linux VM, before and after](docs/img/vm-suite.svg)
+
+![OS threads on the Linux VM](docs/img/vm-threads.svg)
+
+The shared-memory ring (`ring-*.txt`) and the crossover against blocking cgo on
+that host (`transport-*.txt`) are not charted: the first was run by hand, without
+the provenance header, and the second is refused by `benchplot`'s calibration
+check. [Benchmarks, plotted](docs/benchmarks.md) says why and lists every
+benchmark in the tree.
 
 The measurement the design rests on. A blocking cgo call parks an M inside Rust
 for its whole duration, so the thread count tracks **concurrency**; Gusset's
@@ -335,6 +338,11 @@ that case rather than printing an inherited number as a measurement.
 What those threads cost in resident memory — which is tens of megabytes, not the
 gigabytes the thread count invites you to assume. Reserved address space is the
 number that grows; it is not RAM.
+
+**[Benchmarks, plotted](docs/benchmarks.md)** has the rest of the committed
+results as charts: Gusset's own suite on both recorded hosts, the Linux VM's
+before and after, and thread pressure. It also lists every benchmark in the tree
+and which ones have no chart, with the reason.
 
 **[Should you adopt Gusset?](docs/choosing.md)** turns these charts into a
 decision: the two measurements that settle it, what an average, commercial or

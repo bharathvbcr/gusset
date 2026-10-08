@@ -212,6 +212,7 @@ gusset/
   tools/gussetvet/        # custom go vet analyzer enforcing R4 & R5
   tools/gussetseal/       # seals a second Rust staticlib (R14)
   tools/benchdoc/         # benchstat-driven README generator
+  tools/benchplot/        # draws docs/img/*.svg from certified bench/results (docs/benchmarks.md)
   bench/                  # Go benchmarks & committed benchstat results
   tests/pitfalls/         # living pitfall & adversarial test suite
   tests/panic_zoo/        # 5-case uncatchable panic reproduction suite
