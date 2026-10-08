@@ -494,6 +494,25 @@ pub fn ensure_pipe_capacity(fd: i32, bytes: usize) -> std::result::Result<(), St
     Ok(())
 }
 
+/// Checks that `fd` is an open descriptor without changing anything about it.
+///
+/// `Handle::open` validates the completion descriptor with this before any
+/// side effect, so a closed descriptor is refused before a thread exists and
+/// a refused open leaves the caller's descriptor exactly as it was.
+pub fn check_open(fd: i32) -> Result<()> {
+    if fd < 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "invalid file descriptor",
+        ));
+    }
+    // SAFETY: F_GETFL only reads the descriptor's status flags.
+    if unsafe { libc::fcntl(fd, libc::F_GETFL) } < 0 {
+        return Err(Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Sets the given file descriptor to non-blocking mode (O_NONBLOCK).
 pub fn set_nonblocking(fd: i32) -> Result<()> {
     if fd < 0 {

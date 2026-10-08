@@ -225,8 +225,15 @@ fn handles_release_descriptors_threads_and_mappings() {
     // and create nothing that outlives the call.
     for _ in 0..rounds {
         // Pool above the ceiling: refused before any thread exists.
+        // It must not change the descriptor it never took, either.
         let (r, w) = make_pipe();
         assert!(Handle::open(MAX_POOL_SIZE as u32 + 1, w).is_err());
+        let flags = unsafe { libc::fcntl(w, libc::F_GETFL) };
+        assert_eq!(
+            flags & libc::O_NONBLOCK,
+            0,
+            "a refused open left the caller's descriptor O_NONBLOCK"
+        );
         close(w);
         close(r);
 

@@ -987,6 +987,10 @@ impl Handle {
     /// Returns `Err` for a pool size above [`MAX_POOL_SIZE`] rather than attempting
     /// the spawn: refusing loudly beats discovering the ceiling as a partial spawn
     /// failure halfway through creating thousands of threads.
+    ///
+    /// `pipe_write_fd` stays the caller's until `open` succeeds. A refusal closes
+    /// nothing and leaves its status flags as they were; on success Gusset owns
+    /// it and has made it non-blocking (and NOSIGPIPE on Darwin).
     pub fn open(pool_size: u32, pipe_write_fd: i32) -> Result<Arc<Self>, String> {
         install_panic_hook();
 
@@ -996,19 +1000,22 @@ impl Handle {
             pool_size as usize
         };
 
+        // Every argument is checked before anything changes. The descriptor is
+        // the caller's until the pool is up, so a refusal must leave it exactly
+        // as it was handed in: set_nonblocking used to run first, and an open
+        // refused for its pool size still left the caller's pipe O_NONBLOCK
+        // (and NOSIGPIPE on Darwin).
         if pipe_write_fd < 0 {
             return Err("pipe_write_fd must be non-negative".to_string());
         }
-
-        sys::set_nonblocking(pipe_write_fd)
-            .map_err(|e| format!("failed to set non-blocking on pipe write fd: {}", e))?;
-
         if pool_size > MAX_POOL_SIZE {
             return Err(format!(
                 "pool_size {} exceeds maximum {} (each worker is an OS thread with an 8 MiB stack)",
                 pool_size, MAX_POOL_SIZE
             ));
         }
+        sys::check_open(pipe_write_fd)
+            .map_err(|e| format!("pipe write fd {} is not open: {}", pipe_write_fd, e))?;
         // I4 keeps unread tickets at or under pool_size, which is only a
         // "the pipe never fills" guarantee if the pipe holds that many. Linux
         // shrinks new pipes to one page (512 tickets) once a user passes
@@ -1019,13 +1026,13 @@ impl Handle {
         // Inline completion records (up to INLINE_RECORD_MAX bytes each) need
         // pool_size of those. When the pipe cannot grow that far, fall back to
         // 8-byte tickets for every result rather than refuse the pool.
-        let inline_ok = if pipe_write_fd < 0 {
-            true
-        } else {
-            size_completion_pipe(pool_size, cfg!(target_os = "linux"), |bytes| {
-                sys::ensure_pipe_capacity(pipe_write_fd, bytes)
-            })?
-        };
+        //
+        // Growing the pipe is the one change made before the pool is up. It only
+        // ever adds capacity, so a later failure leaves the caller a pipe that
+        // holds more, never one that behaves differently.
+        let inline_ok = size_completion_pipe(pool_size, cfg!(target_os = "linux"), |bytes| {
+            sys::ensure_pipe_capacity(pipe_write_fd, bytes)
+        })?;
         #[cfg(test)]
         let inline_ok = inline_ok && !tests::force_ticket_only();
 
@@ -1063,6 +1070,13 @@ impl Handle {
         // descriptor after the spawn cannot race a completion write.
         let pool: &Handle = &handle;
         pool.spawn_workers(pool_size)?;
+
+        // Only now that nothing else can fail does the descriptor change mode.
+        // Workers write it only after the store below, so nothing writes it
+        // blocking in between. Should this fail, dropping `handle` joins the
+        // workers and closes nothing: the descriptor is not published yet.
+        sys::set_nonblocking(pipe_write_fd)
+            .map_err(|e| format!("failed to set non-blocking on pipe write fd: {}", e))?;
 
         // Take ownership of the completion pipe only now that opening has
         // succeeded. On any error path above, the descriptor stays the caller's and
@@ -2040,6 +2054,67 @@ mod tests {
             still_the_same_pipe(w, r),
             "open() failed but closed the caller's completion descriptor: ownership \
              must transfer only once the pool is fully up"
+        );
+        assert_fd_flags_untouched(w, "an open that failed spawning its workers");
+
+        // SAFETY: both descriptors are still owned by this test.
+        unsafe {
+            libc::close(w);
+            libc::close(r);
+        }
+    }
+
+    /// Fails if `fd` carries O_NONBLOCK, or (on Darwin) F_SETNOSIGPIPE: the two
+    /// flags `open` sets on a descriptor it takes ownership of.
+    fn assert_fd_flags_untouched(fd: i32, what: &str) {
+        // SAFETY: F_GETFL on a descriptor the caller owns reads its status flags.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert!(flags >= 0, "F_GETFL failed on the caller's descriptor");
+        assert_eq!(
+            flags & libc::O_NONBLOCK,
+            0,
+            "{what} left the caller's descriptor O_NONBLOCK: a refused open must not \
+             mutate a descriptor it never took"
+        );
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        ))]
+        {
+            // XNU's F_GETNOSIGPIPE (sys/fcntl.h); libc exports only SO_NOSIGPIPE.
+            const F_GETNOSIGPIPE: libc::c_int = 74;
+            // SAFETY: as above, a read of one descriptor flag.
+            let nosigpipe = unsafe { libc::fcntl(fd, F_GETNOSIGPIPE) };
+            assert_eq!(
+                nosigpipe, 0,
+                "{what} left the caller's descriptor NOSIGPIPE"
+            );
+        }
+    }
+
+    /// An `open` refused for its arguments leaves the caller's descriptor as it
+    /// was handed in.
+    ///
+    /// `open` used to set O_NONBLOCK (and NOSIGPIPE on Darwin) before checking
+    /// the pool size, so a refused open still changed the blocking mode of a
+    /// descriptor whose ownership never transferred, and the caller went on
+    /// writing to it with EAGAIN it had not asked for.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn refused_open_does_not_mutate_the_callers_descriptor() {
+        let (r, w) = make_pipe();
+
+        let refused = Handle::open(MAX_POOL_SIZE as u32 + 1, w);
+        match refused {
+            Ok(_) => panic!("a pool above MAX_POOL_SIZE was accepted"),
+            Err(e) => assert!(e.contains("exceeds maximum"), "unexpected refusal: {e}"),
+        }
+        assert_fd_flags_untouched(w, "an open refused for its pool size");
+        assert!(
+            still_the_same_pipe(w, r),
+            "a refused open closed the caller's descriptor"
         );
 
         // SAFETY: both descriptors are still owned by this test.
