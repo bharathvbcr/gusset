@@ -336,7 +336,7 @@ pub fn install_sigaltstack() -> Option<SigAltStackGuard> {
 }
 
 /// How long a stalled completion write waits before `write_ticket` gives up,
-/// and before `write_completion` (pool/mod.rs) logs that the reader is stuck.
+/// and before `write_completion` (pool/completion.rs) logs that the reader is stuck.
 ///
 /// Production workers do not use `write_ticket`. They call `write_completion`,
 /// which retries until the write lands, the handle closes, or the pipe reports

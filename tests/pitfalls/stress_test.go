@@ -101,7 +101,7 @@ func TestBug_PanicLocationWorkerThread(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Mode 1: triggers panic!("plain panic") in default_dispatch (crates/gusset/src/pool/mod.rs)
+	// Mode 1: triggers panic!("plain panic") in diagnostic_dispatch (crates/gusset/src/pool/diagnostic.rs)
 	_, err = h.Call(ctx, []byte{1})
 	if err == nil {
 		t.Fatal("expected panic error, got nil")
@@ -114,13 +114,13 @@ func TestBug_PanicLocationWorkerThread(t *testing.T) {
 	errStr := err.Error()
 	t.Logf("caught worker panic error: %s", errStr)
 
-	// Must contain the actual file (crates/gusset/src/pool/mod.rs or pool/mod.rs)
+	// Must contain the actual file (crates/gusset/src/pool/diagnostic.rs)
 	// and NOT the fake "gusset.rs" dummy location.
 	if strings.Contains(errStr, "at gusset.rs") {
 		t.Fatalf("panic location was lost/faked as 'gusset.rs': %s", errStr)
 	}
-	if !strings.Contains(errStr, "pool/mod.rs") && !strings.Contains(errStr, "pool") {
-		t.Fatalf("expected real panic location in pool/mod.rs, got: %s", errStr)
+	if !strings.Contains(errStr, "pool/diagnostic.rs") {
+		t.Fatalf("expected real panic location in pool/diagnostic.rs, got: %s", errStr)
 	}
 }
 

@@ -7,7 +7,7 @@
 //!
 //!     register_engine(op, |_ctx, _input| Ok(JobOutput::Buffer(input_id)))
 //!
-//! `large_ok_result_is_promoted_off_the_cgo_thread` in pool::tests asserts that
+//! `large_ok_result_is_promoted_off_the_cgo_thread` in pool::tests::submit asserts that
 //! Gusset's own echo does not alias, which says the hazard was understood — but
 //! nothing refused it, so the assertion covered one engine rather than the
 //! contract. The worker now turns it into a returned error.
