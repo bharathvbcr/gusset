@@ -13,10 +13,10 @@ import (
 // Invariant: callers park on the Go semaphore, never blocking on an OS thread (I4).
 func (h *Handle) Call(ctx context.Context, in []byte) ([]byte, error) {
 	if h == nil || h.state == nil {
-		return nil, errors.New("gusset: handle is nil")
+		return nil, ErrNilHandle
 	}
 	if ctx == nil {
-		return nil, errors.New("gusset: nil context")
+		return nil, ErrNilContext
 	}
 	res, err := h.state.call(ctx, in)
 	runtime.KeepAlive(h)
@@ -45,13 +45,13 @@ func (s *handleState) call(ctx context.Context, in []byte) ([]byte, error) {
 // output when done with it; AddCleanup is a backstop on each, not a plan.
 func (h *Handle) CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error) {
 	if h == nil || h.state == nil {
-		return nil, errors.New("gusset: handle is nil")
+		return nil, ErrNilHandle
 	}
 	if ctx == nil {
-		return nil, errors.New("gusset: nil context")
+		return nil, ErrNilContext
 	}
 	if in == nil {
-		return nil, errors.New("gusset: buffer is nil")
+		return nil, ErrNilBuffer
 	}
 	if in.state == nil {
 		return nil, errors.New("gusset: buffer is not initialized")
@@ -81,10 +81,10 @@ func (h *Handle) CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error) {
 // before the Go heap looks large.
 func (h *Handle) Submit(ctx context.Context, in any) (uint64, error) {
 	if h == nil || h.state == nil {
-		return 0, errors.New("gusset: handle is nil")
+		return 0, ErrNilHandle
 	}
 	if ctx == nil {
-		return 0, errors.New("gusset: nil context")
+		return 0, ErrNilContext
 	}
 	ticket, err := h.state.submit(ctx, in)
 	runtime.KeepAlive(h)
@@ -106,7 +106,7 @@ func (s *handleState) submit(ctx context.Context, in any) (uint64, error) {
 		return s.submitInput(ctx, v, nil)
 	case *Buffer:
 		if v == nil {
-			return 0, errors.New("gusset: buffer is nil")
+			return 0, ErrNilBuffer
 		}
 		return s.submitInput(ctx, nil, v)
 	case nil:
@@ -122,7 +122,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 	// answer ErrPoisoned, sending a caller whose policy is "on poison, close
 	// and reopen" back to close a handle it had already closed.
 	if s.closed.Load() || s.drainExited.Load() {
-		return 0, ErrClosed
+		return 0, s.closedErr()
 	}
 	if s.poisoned.Load() {
 		return 0, errHandlePoisoned
@@ -133,7 +133,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 
 	if buf == nil {
 		if len(raw) > inlineResultBytes {
-			return 0, errors.New("gusset: []byte input exceeds 4096-byte copy limit; use NewBuffer")
+			return 0, ErrInputTooLarge
 		}
 		rawInput = raw
 	} else {
@@ -167,7 +167,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 			// (SubmitWait 2 -> 3 allocs/op).
 			data := v.data
 			if len(data) > inlineResultBytes {
-				return 0, errors.New("gusset: buffer without a Rust id exceeds the 4096-byte copy limit")
+				return 0, errBufferInputTooLarge
 			}
 			rawInput = data
 		}
@@ -189,7 +189,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	case <-s.drainDone:
-		return 0, ErrClosed
+		return 0, s.closedErr()
 	}
 
 	// In Go, select chooses pseudo-randomly when multiple channels are ready.
@@ -204,7 +204,7 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 	// a job whose completion nobody would ever read.
 	if s.closed.Load() || s.drainExited.Load() {
 		<-s.sem
-		return 0, ErrClosed
+		return 0, s.closedErr()
 	}
 	if s.poisoned.Load() {
 		<-s.sem

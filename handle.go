@@ -56,8 +56,11 @@ type handleState struct {
 	// no completion can ever be delivered, so a new submission or waiter is
 	// refused instead of parking forever.
 	drainExited atomic.Bool
-	mu          sync.Mutex
-	cgoMu       sync.RWMutex
+	// drainErr is why drainPipe stopped, when it stopped with the handle
+	// still open. Stored before drainExited; see closedErr.
+	drainErr atomic.Pointer[drainExitError]
+	mu       sync.Mutex
+	cgoMu    sync.RWMutex
 	// pending maps a ticket to its waiter's channel. deliver, and drainPipe's
 	// exit when it sends "handle closed", set the entry to nil as they send;
 	// the waiter deletes it once it has collected (see collectLocked), so a
@@ -222,7 +225,7 @@ func Open(opts ...Option) (*Handle, error) {
 // so the error is not permission to treat the engine's memory as freed.
 func (h *Handle) Close() error {
 	if h == nil || h.state == nil {
-		return errors.New("gusset: handle is nil")
+		return ErrNilHandle
 	}
 	h.cleanup.Stop()
 	err := h.state.close()

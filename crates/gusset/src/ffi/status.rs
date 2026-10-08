@@ -76,26 +76,18 @@ impl FfiStatus {
         }
     }
 
-    /// Constructs a BAD_ARG error status.
+    /// Constructs a BAD_ARG error status, with no source location.
+    ///
+    /// Only a caught panic carries a location. This and [`FfiStatus::poisoned`]
+    /// used to name `ffi.rs` and `handle.rs` — files the crate does not have —
+    /// at this module's own line, and Go printed that to users.
     pub fn bad_arg(msg: &str) -> Self {
-        Self::new_err(
-            FFI_BAD_ARG,
-            msg.as_bytes(),
-            c"ffi.rs".as_ptr().cast::<u8>(),
-            6,
-            line!(),
-        )
+        Self::new_err(FFI_BAD_ARG, msg.as_bytes(), ptr::null(), 0, 0)
     }
 
-    /// Constructs a POISONED error status.
+    /// Constructs a POISONED error status, with no source location.
     pub fn poisoned(msg: &str) -> Self {
-        Self::new_err(
-            FFI_POISONED,
-            msg.as_bytes(),
-            c"handle.rs".as_ptr().cast::<u8>(),
-            9,
-            line!(),
-        )
+        Self::new_err(FFI_POISONED, msg.as_bytes(), ptr::null(), 0, 0)
     }
 
     /// Replaces an initialised status, releasing the message it still owns.

@@ -36,23 +36,75 @@ var (
 	// historical "gusset: handle is closed"; a waiter released by the reader
 	// sees "gusset: handle closed", which also matches with errors.Is.
 	ErrClosed = errors.New("gusset: handle is closed")
+
+	// Argument refusals. Each was built inline with errors.New, so telling
+	// "input too large, use NewBuffer" from any other failure meant matching
+	// the text. The texts are unchanged.
+
+	// ErrNilHandle is returned by every method called on a nil *Handle.
+	ErrNilHandle = errors.New("gusset: handle is nil")
+	// ErrNilContext is returned when a nil context.Context is passed.
+	ErrNilContext = errors.New("gusset: nil context")
+	// ErrNilBuffer is returned when a nil *Buffer is passed as input.
+	ErrNilBuffer = errors.New("gusset: buffer is nil")
+	// ErrInputTooLarge matches an inline input over the 4096-byte copy
+	// limit (R16). Larger payloads travel in a Buffer from NewBuffer.
+	ErrInputTooLarge = errors.New("gusset: []byte input exceeds 4096-byte copy limit; use NewBuffer")
+
+	// ErrUnknownTicket reports a ticket this handle is not waiting on: never
+	// submitted here, already awaited, or issued by a different handle.
+	ErrUnknownTicket = errors.New("gusset: unknown or already-awaited ticket")
+	// ErrTicketBusy reports that another goroutine is already waiting on this
+	// ticket.
+	ErrTicketBusy = errors.New("gusset: ticket already has a waiter")
 )
 
 // errDrainClosed is the error a waiter gets when the completion reader ends
 // its ticket. It keeps the text those waiters always saw, so substring
 // matchers written against it still work, and unwraps to ErrClosed. One
 // value, not one per waiter: drainPipe builds it under mu.
-var errDrainClosed error = &closedError{msg: "gusset: handle closed"}
+var errDrainClosed error = &textError{msg: "gusset: handle closed", base: ErrClosed}
 
 // errBufferClosed is Submit's refusal of an input buffer whose handle — the
 // one being called — closed between the handle check and the buffer check.
 // The text is the one that site always returned.
-var errBufferClosed error = &closedError{msg: "gusset: buffer is freed or closed"}
+var errBufferClosed error = &textError{msg: "gusset: buffer is freed or closed", base: ErrClosed}
 
-type closedError struct{ msg string }
+// errBufferInputTooLarge is the copy-limit refusal for a Go-heap Buffer (id 0),
+// whose bytes travel inline like a []byte. Its own text, ErrInputTooLarge's
+// identity.
+var errBufferInputTooLarge error = &textError{
+	msg:  "gusset: buffer without a Rust id exceeds the 4096-byte copy limit",
+	base: ErrInputTooLarge,
+}
 
-func (e *closedError) Error() string { return e.msg }
-func (e *closedError) Unwrap() error { return ErrClosed }
+// textError keeps a site's historical text while matching a sentinel with
+// errors.Is.
+type textError struct {
+	msg  string
+	base error
+}
+
+func (e *textError) Error() string { return e.msg }
+func (e *textError) Unwrap() error { return e.base }
+
+// drainExitError is what waiters, and every later call, get when the
+// completion reader stopped on its own while the handle was still open: a
+// corrupt ring or pipe record, or a read error nobody asked for. It unwraps to
+// ErrClosed and to the cause. Waiters used to get errDrainClosed alone, later
+// calls ErrClosed alone, and the cause was dropped without a log line, so a
+// handle that stopped working said nothing about why. prefix keeps the text
+// each site always returned — errDrainClosed's for a released waiter,
+// ErrClosed's for a later call — for substring matchers.
+type drainExitError struct {
+	prefix string
+	cause  error
+}
+
+func (e *drainExitError) Error() string {
+	return e.prefix + ": completion reader stopped: " + e.cause.Error()
+}
+func (e *drainExitError) Unwrap() []error { return []error{ErrClosed, e.cause} }
 
 // errHandlePoisoned is ErrPoisoned with a message; errors.Is matches by code.
 // The bare sentinel printed as "gusset error [3]: ".
@@ -198,11 +250,13 @@ func DrainLogs(buf []byte) int {
 // budget, then Close each handle: the cancel has already landed, so the join
 // is short.
 //
-// Returns nil when every work unit finished inside the budget. A non-nil error
-// means work was still in flight at the deadline and says so rather than
-// reporting a success the caller cannot rely on. Cancellation is cooperative:
-// an engine that never calls JobContext::check cannot be drained at all, so
-// that error is the expected outcome for one, not a malfunction.
+// Returns nil when every work unit finished inside the budget. An error
+// matching [ErrShutdownIncomplete] means work was still in flight at the
+// deadline and says so rather than reporting a success the caller cannot rely
+// on. Cancellation is cooperative: an engine that never calls JobContext::check
+// cannot be drained at all, so that error is the expected outcome for one, not
+// a malfunction. An error matching [ErrPanic] means the shutdown itself
+// panicked and was caught; how much work drained is then unknown.
 //
 // Process-wide and one-way. The refusal latch is global to the process and is
 // cleared only by re-initialising the runtime, which package init does once. A

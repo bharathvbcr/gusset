@@ -240,7 +240,7 @@ pub const MAX_BUFFER_BYTES: usize = sys::MAX_BUFFER_BYTES;
 /// Each worker is a real OS thread with an 8 MiB stack, so an unbounded pool size
 /// is an unbounded thread and address-space request driven straight from a caller
 /// argument. It also bounds the number of completion tickets that can be in flight
-/// behind the completion pipe, which is what keeps `write_ticket` from ever facing
+/// behind the completion pipe, which is what keeps `write_completion` from ever facing
 /// a full pipe under the documented bounded-concurrency contract (I4, R11).
 pub const MAX_POOL_SIZE: usize = 1024;
 
@@ -513,8 +513,9 @@ impl Handle {
 
     /// Cancels a specific job by ticket (I3).
     ///
-    /// Returns whether a live flag was found. A caller that cancels an unknown or
-    /// already-completed ticket learns so instead of being told nothing.
+    /// Returns whether a live flag was found. A Rust caller that cancels an
+    /// unknown or already-completed ticket learns so instead of being told
+    /// nothing; the C export `gusset_cancel` does not pass the answer on.
     pub fn cancel(&self, ticket: u64) -> bool {
         let flags = lock_recover(&self.cancel_flags);
         match flags.get(&ticket) {

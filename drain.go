@@ -2,6 +2,7 @@ package gusset
 
 import (
 	"errors"
+	"log/slog"
 
 	"github.com/bharathvbcr/gusset/internal/ffi"
 )
@@ -24,12 +25,20 @@ func drainPipe(s *handleState) {
 	for {
 		ticket, inlineData, inline, err := tr.next()
 		if err != nil {
-			// Pipe closed on handle shutdown or EOF
+			// Close sets closed before it stops the reader, so an error with
+			// the handle still open is the reader failing, not being stopped.
+			waiterErr := errDrainClosed
+			var exit *drainExitError
+			if !s.closed.Load() {
+				exit = &drainExitError{prefix: ErrClosed.Error(), cause: err}
+				s.drainErr.Store(exit)
+				waiterErr = &drainExitError{prefix: errDrainClosed.Error(), cause: err}
+			}
 			s.mu.Lock()
 			for t, ch := range s.pending {
 				if ch != nil { // nil: already delivered, its waiter is collecting
 					s.pending[t] = nil
-					ch <- callResult{err: errDrainClosed}
+					ch <- callResult{err: waiterErr}
 				}
 			}
 			toFree := s.takeUnclaimedLocked()
@@ -41,6 +50,10 @@ func drainPipe(s *handleState) {
 			s.abandoned = make(map[uint64]struct{})
 			s.mu.Unlock()
 
+			if exit != nil {
+				slog.Warn("gusset: completion reader stopped while the handle was open; "+
+					"its waiters and every later call fail with ErrClosed", "err", exit.cause)
+			}
 			for _, id := range toFree {
 				_ = s.bufFree(id)
 			}

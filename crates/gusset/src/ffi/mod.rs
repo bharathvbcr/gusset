@@ -10,7 +10,7 @@ use crate::header::CallHeader;
 use crate::pool::ring::Ring;
 use crate::pool::{Handle, JobResult};
 use alloc::{get_alloc_stats, AllocStats};
-use guard::{ffi_guard_code, install_panic_hook, FfiError};
+use guard::{extract_panic_payload, ffi_guard_code, install_panic_hook, FfiError};
 use static_assertions::{assert_eq_align, assert_eq_size};
 use status::{FfiStatus, FFI_BAD_ARG, FFI_ERR, FFI_OK, FFI_PANIC, FFI_POISONED};
 use std::mem::{align_of, size_of};
@@ -305,11 +305,20 @@ pub unsafe extern "C" fn gusset_abi_fields(offsets: *mut u32, sizes: *mut u32, c
 #[no_mangle]
 pub unsafe extern "C" fn gusset_init() -> i32 {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(test)]
+        fault::trip();
         install_panic_hook();
         crate::pool::rearm();
     })) {
         Ok(()) => FFI_OK,
-        Err(_) => FFI_ERR,
+        // FFI_PANIC, as every other export reports a caught panic. The payload
+        // goes through extract_panic_payload: dropping it here as `Err(_)` let a
+        // payload whose destructor panics unwind out of `extern "C"`.
+        Err(payload) => {
+            let msg = extract_panic_payload(payload);
+            log_event(&format!("gusset: init panicked: {}", msg));
+            FFI_PANIC
+        }
     }
 }
 
@@ -320,7 +329,9 @@ pub unsafe extern "C" fn gusset_init() -> i32 {
 /// clean drain and `FFI_ERR` when work was still in flight at the deadline —
 /// cancellation is cooperative, so a work unit that never calls
 /// `JobContext::check` cannot be drained, and the caller is told rather than
-/// handed a success it can't rely on.
+/// handed a success it can't rely on. A panic caught inside the shutdown itself
+/// returns `FFI_PANIC`: the drain state is then unknown, which is not the same
+/// as a budget that expired, and the two used to share `FFI_ERR`.
 ///
 /// # Safety
 ///
@@ -328,6 +339,10 @@ pub unsafe extern "C" fn gusset_init() -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn gusset_shutdown(drain_ms: u32) -> i32 {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Before pool::shutdown: a test that arms the fault must not leave the
+        // process-wide shutdown latch set for every other test in the binary.
+        #[cfg(test)]
+        fault::trip();
         let remaining = crate::pool::shutdown(std::time::Duration::from_millis(drain_ms as u64));
         if remaining == 0 {
             FFI_OK
@@ -340,7 +355,11 @@ pub unsafe extern "C" fn gusset_shutdown(drain_ms: u32) -> i32 {
         }
     })) {
         Ok(code) => code,
-        Err(_) => FFI_ERR,
+        Err(payload) => {
+            let msg = extract_panic_payload(payload);
+            log_event(&format!("gusset: shutdown panicked: {}", msg));
+            FFI_PANIC
+        }
     }
 }
 
@@ -518,34 +537,28 @@ pub unsafe extern "C" fn gusset_take(
                     ptr::write(out_len, len);
                     Ok(())
                 }
-                JobResult::Err(msg) => Err(FfiError {
-                    code: FFI_ERR,
-                    msg,
-                    file: Some("gusset.rs"),
-                    line: line!(),
-                }),
+                // No location: an engine error has none the runtime knows, and
+                // this export's own line is not where it came from.
+                JobResult::Err(msg) => Err(FfiError::from(msg)),
                 JobResult::Panic { msg, file, line } => Err(FfiError {
                     code: FFI_PANIC,
                     msg: format!("PANIC: {}", msg),
                     file,
                     line,
                 }),
-                JobResult::Cancelled(reason) => Err(FfiError {
-                    code: FFI_ERR,
-                    // A cancel flag set by gusset_shutdown reads as Explicit to
-                    // the engine. Reported that way, Go mapped it to
-                    // context.Canceled although the caller's context was live;
-                    // "Shutdown" lets it surface as ErrShutdown instead.
-                    msg: if reason == crate::header::CancelReason::Explicit
+                // A cancel flag set by gusset_shutdown reads as Explicit to the
+                // engine. Reported that way, Go mapped it to context.Canceled
+                // although the caller's context was live; "Shutdown" lets it
+                // surface as ErrShutdown instead.
+                JobResult::Cancelled(reason) => Err(FfiError::from(
+                    if reason == crate::header::CancelReason::Explicit
                         && crate::pool::is_shutting_down()
                     {
                         "cancelled: Shutdown".to_string()
                     } else {
-                        format!("cancelled: {:?}", reason)
+                        String::from(reason)
                     },
-                    file: Some("gusset.rs"),
-                    line: line!(),
-                }),
+                )),
             }
         })
     };
@@ -554,6 +567,12 @@ pub unsafe extern "C" fn gusset_take(
 }
 
 /// 8. Cancels a specific job ticket (I3).
+///
+/// Returns `FFI_OK` whether or not the ticket still had a live cancel flag: the
+/// export does not report what [`Handle::cancel`] found. A ticket that already
+/// completed, was never submitted, or belongs to another handle is a no-op, and
+/// the caller learns nothing about which. Go cancels on `ctx.Done`, racing the
+/// completion it is about to collect anyway, so it has no use for the answer.
 ///
 /// # Safety
 ///
@@ -582,6 +601,9 @@ pub unsafe extern "C" fn gusset_cancel(
 }
 
 /// 9. Cancels all pending jobs on the handle (I3).
+///
+/// Returns `FFI_OK` without reporting how many flags were set: the count from
+/// [`Handle::cancel_all`] is not exposed across the boundary.
 ///
 /// # Safety
 ///
@@ -929,19 +951,28 @@ mod fault {
     use std::sync::Mutex;
     use std::thread::{self, ThreadId};
 
-    /// The thread whose next guarded export body panics (R7 keeps this out of
+    /// The threads whose next guarded export body panics (R7 keeps this out of
     /// `thread_local!`; the test calls the export on the arming thread).
-    static ARMED_BY: Mutex<Option<ThreadId>> = Mutex::new(None);
+    ///
+    /// A set, not one slot: tests run in parallel, and a second test arming
+    /// replaced the first's thread, so the first export ran unfaulted. For
+    /// `gusset_shutdown` that meant a real shutdown latching the whole binary.
+    static ARMED_BY: Mutex<Vec<ThreadId>> = Mutex::new(Vec::new());
 
     /// Makes the next guarded export body on this thread panic, once.
     pub(super) fn arm() {
-        *ARMED_BY.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread::current().id());
+        let id = thread::current().id();
+        let mut armed = ARMED_BY.lock().unwrap_or_else(|e| e.into_inner());
+        if !armed.contains(&id) {
+            armed.push(id);
+        }
     }
 
     pub(super) fn trip() {
+        let id = thread::current().id();
         let mut armed = ARMED_BY.lock().unwrap_or_else(|e| e.into_inner());
-        if *armed == Some(thread::current().id()) {
-            *armed = None;
+        if let Some(pos) = armed.iter().position(|t| *t == id) {
+            armed.swap_remove(pos);
             drop(armed);
             panic!("injected fault inside a guarded export");
         }
@@ -1063,5 +1094,38 @@ mod export_panic_poisons_tests {
             // SAFETY: `r` is the read end this test opened.
             unsafe { libc::close(r) };
         }
+    }
+}
+
+/// A panic caught inside `gusset_shutdown` or `gusset_init` is reported as
+/// `FFI_PANIC`. Both returned `FFI_ERR`, and for shutdown that is the
+/// drain-budget-expired code, so Go told the caller "work still in flight" when
+/// the truth was "shutdown itself failed; drain state unknown".
+///
+/// The fault trips before `pool::shutdown` runs, so this never sets the
+/// process-wide shutdown latch under the other tests in this binary.
+#[cfg(test)]
+mod lifecycle_panic_tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_inside_shutdown_is_not_reported_as_budget_expiry() {
+        fault::arm();
+        // SAFETY: no pointer arguments.
+        let rc = unsafe { gusset_shutdown(0) };
+        assert_eq!(rc, FFI_PANIC, "a caught shutdown panic must be FFI_PANIC");
+        assert_ne!(rc, FFI_ERR, "FFI_ERR means the drain budget expired");
+        assert!(
+            !crate::pool::is_shutting_down(),
+            "the injected fault must stop shutdown before it latches"
+        );
+    }
+
+    #[test]
+    fn a_panic_inside_init_is_reported_as_a_panic() {
+        fault::arm();
+        // SAFETY: no pointer arguments.
+        let rc = unsafe { gusset_init() };
+        assert_eq!(rc, FFI_PANIC);
     }
 }

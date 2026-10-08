@@ -81,7 +81,17 @@ fn execute_unit(weak: &Weak<Handle>, mut unit: WorkUnit) -> JobResult {
             }
             None => JobResult::Err("handle is closed".to_string()),
         },
-        Ok(Err(err)) => JobResult::Err(err),
+        // An engine that stops because `ctx.check()` failed reports it in its
+        // own words ("deadline exceeded"), and Go classifies a cancel only by the
+        // runtime's exact message. Re-checking here makes the runtime, not the
+        // engine's wording, decide: the documented I3 pattern now surfaces as
+        // context.DeadlineExceeded / context.Canceled. An unrelated engine error
+        // that lands after the deadline is reported as the deadline — the
+        // caller's deadline had passed either way, and Go's ctx says the same.
+        Ok(Err(err)) => match unit.ctx.check() {
+            Err(reason) => JobResult::Cancelled(reason),
+            Ok(()) => JobResult::Err(err),
+        },
         Err(payload) => caught_panic(weak, payload, |msg| msg),
     }
 }

@@ -69,6 +69,16 @@ func (s *handleState) discardTake(takeID uint64) {
 	}
 }
 
+// closedErr is the refusal for a handle that is closed or whose completion
+// reader has stopped: ErrClosed, carrying the reader's failure when it stopped
+// on its own while the handle was open (see drainExitError).
+func (s *handleState) closedErr() error {
+	if e := s.drainErr.Load(); e != nil {
+		return e
+	}
+	return ErrClosed
+}
+
 func (s *handleState) releaseSemLocked(ticket uint64) {
 	if _, ok := s.semTickets[ticket]; ok {
 		delete(s.semTickets, ticket)

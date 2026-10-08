@@ -39,7 +39,7 @@ pub(super) fn diagnostic_allocated(ctx: &JobContext, input: &[u8]) -> Result<Job
     const CHUNK: usize = 1 << 16;
     let mut i = 0usize;
     while i < len {
-        ctx.check().map_err(|r| format!("cancelled: {:?}", r))?;
+        ctx.check()?;
         let n = CHUNK.min(len - i);
         // Fallible growth: an infallible push that cannot allocate aborts the
         // process, Go included (see BufferAlloc).
@@ -87,7 +87,7 @@ pub fn diagnostic_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, St
                 100
             };
             for _ in 0..iterations {
-                ctx.check().map_err(|e| format!("cancelled: {:?}", e))?;
+                ctx.check()?;
                 thread::sleep(std::time::Duration::from_millis(10));
             }
             Ok(vec![5, 0])
@@ -184,7 +184,7 @@ pub fn diagnostic_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, St
             // inner fold vectorizes (see the example engine's opcode 10).
             let mut acc = 0u64;
             for chunk in input[1..].chunks(4096) {
-                ctx.check().map_err(|e| format!("cancelled: {:?}", e))?;
+                ctx.check()?;
                 // 4096 * 255^2 < 2^32: a chunk sums exactly in u32, which
                 // packs twice as many lanes per vector as u64. The widest
                 // vector unit is chosen at run time (sys::sum_squares_chunk).

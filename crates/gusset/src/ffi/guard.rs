@@ -4,9 +4,8 @@
 use super::status::{FfiStatus, FFI_ERR, FFI_OK, FFI_PANIC};
 use std::panic::{catch_unwind, set_hook, take_hook, AssertUnwindSafe};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 
 /// Panic location with static lifetime guarantees (R3).
 #[derive(Debug, Clone, Copy)]
@@ -71,8 +70,14 @@ pub fn take_panic_location() -> Option<PanicLocation> {
 ///
 /// Records source location keyed by thread id for the firewall to read.
 pub fn install_panic_hook() {
-    static INSTALLED: AtomicBool = AtomicBool::new(false);
-    if !INSTALLED.swap(true, Ordering::SeqCst) {
+    // A `Once`, not a flag swapped before the hook exists: with the flag, a
+    // second caller (another handle opening, gusset_init) returned while the
+    // first was still between swap and set_hook, and a panic in that window
+    // was caught with no location. `call_once_force` blocks concurrent callers
+    // until the hook is in, and retries after a failed attempt rather than
+    // poisoning every later call.
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once_force(|_| {
         // Record the location, then call the hook we replaced. libtest prints
         // assertion failures through its hook; replacing it outright made every
         // Rust test that opened a handle fail with no message.
@@ -101,7 +106,7 @@ pub fn install_panic_hook() {
                 previous(info);
             }
         }));
-    }
+    });
 }
 
 /// Number of panic locations currently remembered. Test and diagnostic use.
@@ -196,13 +201,18 @@ pub struct FfiError {
     pub line: u32,
 }
 
+/// An `FFI_ERR` with no source location.
+///
+/// Only a caught panic has a location worth reporting. This used to stamp a
+/// file named `gusset.rs`, which does not exist, with this function's own line,
+/// and Go printed it to users as "(at gusset.rs:204)".
 impl From<String> for FfiError {
     fn from(msg: String) -> Self {
         Self {
             code: FFI_ERR,
             msg,
-            file: Some("gusset.rs"),
-            line: line!(),
+            file: None,
+            line: 0,
         }
     }
 }
@@ -256,9 +266,11 @@ where
                 // status message, cutting wherever that lands.
                 let msg = truncate_payload(ffi_err.msg);
                 let bytes = msg.as_bytes();
+                // No location is a null file, not a placeholder name: the
+                // field is read as a path in this crate.
                 let (file_ptr, file_len) = match ffi_err.file {
                     Some(f) => (f.as_ptr(), f.len()),
-                    None => (c"unknown".as_ptr().cast::<u8>(), 7),
+                    None => (ptr::null(), 0),
                 };
                 unsafe {
                     ptr::write(
@@ -278,7 +290,7 @@ where
                 let (file_ptr, file_len, line) = if let Some(l) = loc {
                     (l.file.as_ptr(), l.file.len(), l.line)
                 } else {
-                    (c"unknown".as_ptr().cast::<u8>(), 7, 0)
+                    (ptr::null(), 0, 0)
                 };
                 unsafe {
                     ptr::write(
@@ -382,6 +394,46 @@ mod tests {
         let bytes = unsafe { std::slice::from_raw_parts(st.msg, st.msg_len) };
         assert!(bytes.len() <= MAX_PANIC_PAYLOAD_BYTES + "... [truncated]".len());
         assert!(std::str::from_utf8(bytes).is_ok());
+        unsafe { gusset_status_free(&mut st) };
+    }
+
+    /// A status names a source location only when it has a real one. Engine
+    /// errors, bad arguments and poison used to carry `gusset.rs`, `ffi.rs` and
+    /// `handle.rs` — none of which exist — and Go printed "(at gusset.rs:204)".
+    #[test]
+    fn only_a_caught_panic_carries_a_source_location() {
+        fn assert_no_location(st: &FfiStatus, what: &str) {
+            assert!(st.file.is_null(), "{what}: file must be null");
+            assert_eq!(st.file_len, 0, "{what}: file_len");
+            assert_eq!(st.line, 0, "{what}: line");
+        }
+
+        let mut st = FfiStatus::ok();
+        let _: Result<(), i32> =
+            unsafe { ffi_guard_code(&mut st, || Err(FfiError::from("engine said no"))) };
+        assert_eq!(st.code, FFI_ERR);
+        assert_no_location(&st, "engine error");
+        unsafe { gusset_status_free(&mut st) };
+
+        let mut st = FfiStatus::bad_arg("handle is null");
+        assert_no_location(&st, "bad_arg");
+        unsafe { gusset_status_free(&mut st) };
+
+        let mut st = FfiStatus::poisoned("handle is poisoned");
+        assert_no_location(&st, "poisoned");
+        unsafe { gusset_status_free(&mut st) };
+
+        // The panic path still reports where it happened: this file.
+        install_panic_hook();
+        let mut st = FfiStatus::ok();
+        let _: Result<(), i32> =
+            unsafe { ffi_guard_code(&mut st, || -> Result<(), FfiError> { panic!("located") }) };
+        assert_eq!(st.code, FFI_PANIC);
+        assert!(!st.file.is_null(), "a caught panic must keep its location");
+        let file = unsafe { std::slice::from_raw_parts(st.file, st.file_len) };
+        let file = String::from_utf8_lossy(file);
+        assert!(file.ends_with("ffi/guard.rs"), "panic location: {file}");
+        assert!(st.line > 0);
         unsafe { gusset_status_free(&mut st) };
     }
 }

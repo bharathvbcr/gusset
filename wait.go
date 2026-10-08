@@ -11,10 +11,10 @@ import (
 // Wait waits for completion of an asynchronously submitted job ticket.
 func (h *Handle) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	if h == nil || h.state == nil {
-		return nil, errors.New("gusset: handle is nil")
+		return nil, ErrNilHandle
 	}
 	if ctx == nil {
-		return nil, errors.New("gusset: nil context")
+		return nil, ErrNilContext
 	}
 	res, err := h.state.wait(ctx, ticket)
 	runtime.KeepAlive(h)
@@ -30,10 +30,10 @@ func (h *Handle) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
 // acts as a safety net if the buffer is garbage collected.
 func (h *Handle) WaitBuffer(ctx context.Context, ticket uint64) (*Buffer, error) {
 	if h == nil || h.state == nil {
-		return nil, errors.New("gusset: handle is nil")
+		return nil, ErrNilHandle
 	}
 	if ctx == nil {
-		return nil, errors.New("gusset: nil context")
+		return nil, ErrNilContext
 	}
 	buf, err := h.state.waitBuffer(ctx, ticket)
 	if buf != nil {
@@ -42,13 +42,6 @@ func (h *Handle) WaitBuffer(ctx context.Context, ticket uint64) (*Buffer, error)
 	runtime.KeepAlive(h)
 	return buf, err
 }
-
-// ErrUnknownTicket reports a ticket this handle is not waiting on: never submitted
-// here, already awaited, or issued by a different handle.
-var ErrUnknownTicket = errors.New("gusset: unknown or already-awaited ticket")
-
-// ErrTicketBusy reports that another goroutine is already waiting on this ticket.
-var ErrTicketBusy = errors.New("gusset: ticket already has a waiter")
 
 func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	res, takeID, err := s.waitInternal(ctx, ticket)
@@ -140,7 +133,7 @@ func (s *handleState) claimLocked(ticket uint64) (res callResult, takeID uint64,
 	}
 
 	if s.closed.Load() || s.drainExited.Load() {
-		return callResult{}, 0, false, ErrClosed
+		return callResult{}, 0, false, s.closedErr()
 	}
 
 	// Refuse a ticket this handle is not holding.
@@ -185,7 +178,7 @@ func (s *handleState) claimLocked(ticket uint64) (res callResult, takeID uint64,
 // that waiter's. Once Close has begun it returns ErrClosed.
 func (h *Handle) Discard(ticket uint64) error {
 	if h == nil || h.state == nil {
-		return errors.New("gusset: handle is nil")
+		return ErrNilHandle
 	}
 	err := h.state.discard(ticket)
 	runtime.KeepAlive(h)
@@ -198,7 +191,7 @@ func (s *handleState) discard(ticket uint64) error {
 	// ticket and then nil for the same ticket once its completion landed.
 	// Close frees every result itself; there is nothing for Discard to do.
 	if s.closed.Load() {
-		return ErrClosed
+		return s.closedErr()
 	}
 	s.mu.Lock()
 	_, takeID, done, err := s.claimLocked(ticket)
