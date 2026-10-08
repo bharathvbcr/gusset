@@ -27,8 +27,17 @@ func Markers(name string) (begin, end string) {
 // way the generator cannot reason about, and writing the block somewhere
 // arbitrary would leave two copies of the numbers, one of them stale. That is
 // the failure this package exists to prevent, so it fails instead.
+//
+// A marker appearing more than once is refused for the same reason: only the
+// first block would be rewritten, and the second would keep its old numbers.
 func Replace(doc, path, name, body string) (string, error) {
 	begin, end := Markers(name)
+	for _, m := range []string{begin, end} {
+		if n := strings.Count(doc, m); n > 1 {
+			return "", fmt.Errorf("%s has %s more than once (%d times); keep exactly one "+
+				"generated block so no stale copy survives regeneration", path, m, n)
+		}
+	}
 	start := strings.Index(doc, begin)
 	stop := strings.Index(doc, end)
 	switch {

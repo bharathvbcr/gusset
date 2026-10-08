@@ -125,6 +125,71 @@ func f() { C.gusset_cancel(); C.gusset_cancel_all() }
 	}
 }
 
+// The R4 and R5-callback scans used to walk ".", not the tree targetDir belongs
+// to. install.sh runs `gussetvet "$SCRIPT_DIR/internal/ffi"` from wherever the
+// installer was started, so both scans checked an unrelated directory and
+// passed. Run from an empty directory against a module with one violation of
+// each, and the run must fail on both.
+func TestScansTheTargetsModuleFromAnyDirectory(t *testing.T) {
+	mod := t.TempDir()
+	write(t, mod, "go.mod", "module example.com/adopter\n\ngo 1.26\n")
+	ffi := filepath.Join(mod, "internal", "ffi")
+	if err := os.MkdirAll(ffi, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, ffi, "exports.txt", "gusset_a\n")
+	write(t, ffi, "ffi.go", `package ffi
+/*
+#cgo noescape gusset_a
+#cgo nocallback gusset_a
+*/
+import "C"
+func A() { C.gusset_a() }
+`)
+	write(t, mod, "leak.go", `package adopter
+import "C"
+import "unsafe"
+func g(p unsafe.Pointer) { C.free(p) }
+//export goCallback
+func goCallback() {}
+`)
+
+	t.Chdir(t.TempDir())
+	var stdout, stderr strings.Builder
+	if code := run(ffi, &stdout, &stderr); code == 0 {
+		t.Fatalf("passed while run from outside the module:\n%s", stdout.String())
+	}
+	got := stderr.String()
+	for _, want := range []string{"leak.go:4: R4", "leak.go:5: R5"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+// With no go.mod above targetDir there is no tree to scan; reporting R4 as
+// passed having walked nothing is the failure this tool exists to prevent.
+func TestRefusesATargetOutsideAnyModule(t *testing.T) {
+	ffi := t.TempDir()
+	write(t, ffi, "exports.txt", "gusset_a\n")
+	write(t, ffi, "ffi.go", `package ffi
+/*
+#cgo noescape gusset_a
+#cgo nocallback gusset_a
+*/
+import "C"
+func A() { C.gusset_a() }
+`)
+	t.Chdir(t.TempDir())
+	var stdout, stderr strings.Builder
+	if code := run(ffi, &stdout, &stderr); code == 0 {
+		t.Fatalf("passed with no module to scan:\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "go.mod") {
+		t.Errorf("error does not say what was missing: %s", stderr.String())
+	}
+}
+
 func TestR5RefusesExportedGoCallbacks(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "cb.go", `package p

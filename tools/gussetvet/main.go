@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,53 +21,64 @@ func main() {
 	if len(os.Args) > 1 {
 		targetDir = os.Args[1]
 	}
+	os.Exit(run(targetDir, os.Stdout, os.Stderr))
+}
 
+// run checks targetDir and returns the process exit status.
+func run(targetDir string, stdout, stderr io.Writer) int {
 	exportsFile := filepath.Join(targetDir, "exports.txt")
 	exports, err := readLines(exportsFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gussetvet: failed to read %s: %v\n", exportsFile, err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "gussetvet: failed to read %s: %v\n", exportsFile, err)
+		return 1
 	}
 
 	violations, err := checkDirectives(targetDir, exports)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gussetvet: %v; R5 was not checked\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "gussetvet: %v; R5 was not checked\n", err)
+		return 1
 	}
 
-	crossFree, err := checkAllocatorSymmetry(".")
+	root, err := moduleRoot(targetDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gussetvet: R4 scan failed: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "gussetvet: %v; R4 and the R5 callback scan were not run\n", err)
+		return 1
+	}
+
+	crossFree, err := checkAllocatorSymmetry(root)
+	if err != nil {
+		fmt.Fprintf(stderr, "gussetvet: R4 scan failed: %v\n", err)
+		return 1
 	}
 	violations = append(violations, crossFree...)
 
-	callbacks, err := checkNoCallbacks(".")
+	callbacks, err := checkNoCallbacks(root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gussetvet: R5 callback scan failed: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "gussetvet: R5 callback scan failed: %v\n", err)
+		return 1
 	}
 	violations = append(violations, callbacks...)
 
 	wrappers, err := checkWrappers(targetDir, exports)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gussetvet: R1 wrapper scan failed: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "gussetvet: R1 wrapper scan failed: %v\n", err)
+		return 1
 	}
 	violations = append(violations, wrappers...)
 
 	if len(violations) > 0 {
-		fmt.Fprintln(os.Stderr, "gussetvet: violations found:")
+		fmt.Fprintln(stderr, "gussetvet: violations found:")
 		for _, v := range violations {
-			fmt.Fprintf(os.Stderr, "  - %s\n", v)
+			fmt.Fprintf(stderr, "  - %s\n", v)
 		}
-		os.Exit(1)
+		return 1
 	}
 
-	fmt.Println("gussetvet: R5 checks passed (all exports carry noescape and nocallback)")
-	fmt.Println("gussetvet: R4 checks passed (no C.free or preamble free() on Rust-owned memory)")
-	fmt.Println("gussetvet: R5 checks passed (no //export callbacks from C into Go)")
-	fmt.Println("gussetvet: R1 checks passed (every export has a Go wrapper)")
+	fmt.Fprintln(stdout, "gussetvet: R5 checks passed (all exports carry noescape and nocallback)")
+	fmt.Fprintf(stdout, "gussetvet: R4 checks passed (no C.free or preamble free() on Rust-owned memory under %s)\n", root)
+	fmt.Fprintf(stdout, "gussetvet: R5 checks passed (no //export callbacks from C into Go under %s)\n", root)
+	fmt.Fprintln(stdout, "gussetvet: R1 checks passed (every export has a Go wrapper)")
+	return 0
 }
 
 // checkDirectives enforces R5 on the cgo preamble of each non-test file in dir:
@@ -140,6 +152,30 @@ func checkDirectives(dir string, exports []string) ([]string, error) {
 		return nil, fmt.Errorf("no cgo preamble with #cgo lines in %s", dir)
 	}
 	return violations, nil
+}
+
+// moduleRoot returns the directory of the nearest go.mod at or above dir: the
+// tree the R4 and R5-callback scans walk.
+//
+// Derived from targetDir rather than the working directory. Those scans used to
+// walk ".", so `gussetvet /path/to/repo/internal/ffi` run from anywhere but the
+// repository root — which is how install.sh runs it — checked an unrelated
+// directory and reported R4 and R5 as passed.
+func moduleRoot(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve %s: %w", dir, err)
+	}
+	for d := abs; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(filepath.Join(d, "go.mod")); err == nil {
+			return d, nil
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("cannot stat %s: %w", filepath.Join(d, "go.mod"), err)
+		}
+		if filepath.Dir(d) == d {
+			return "", fmt.Errorf("no go.mod at or above %s, so there is no module to scan", abs)
+		}
+	}
 }
 
 // crossFreeAllowed lists the paths permitted to call C.free.
@@ -288,9 +324,9 @@ func preambleLines(file *ast.File) []preambleLine {
 	return out
 }
 
-// walkGo parses every non-test .go file under root, skipping build output and
-// dependency trees. Test files are included: a cross-free in a test corrupts
-// the heap just as well.
+// walkGo parses every .go file under root, test files included, skipping build
+// output, dependency trees and testdata. Test files count: a cross-free in a
+// test corrupts the heap just as well.
 func walkGo(root string, visit func(rel string, fset *token.FileSet, file *ast.File)) error {
 	fset := token.NewFileSet()
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {

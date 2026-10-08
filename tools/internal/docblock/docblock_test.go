@@ -83,6 +83,26 @@ func TestReplaceRefusesReversedMarkers(t *testing.T) {
 	}
 }
 
+// A second block would be left untouched while the first was regenerated: two
+// copies of the numbers, one of them stale — the failure the package exists to
+// prevent, reached through duplicated markers instead of missing ones.
+func TestReplaceRefusesDuplicateMarkers(t *testing.T) {
+	for name, d := range map[string]string{
+		"two blocks":   doc + "\n<!-- BENCHDOC:BEGIN -->\nstale copy\n<!-- BENCHDOC:END -->\n",
+		"second BEGIN": "<!-- BENCHDOC:BEGIN -->\na\n<!-- BENCHDOC:BEGIN -->\nb\n<!-- BENCHDOC:END -->\n",
+		"second END":   "<!-- BENCHDOC:BEGIN -->\na\n<!-- BENCHDOC:END -->\nb\n<!-- BENCHDOC:END -->\n",
+	} {
+		_, err := Replace(d, "README.md", "BENCHDOC", "body")
+		if err == nil {
+			t.Errorf("%s: accepted; a second block would stay stale", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "README.md") || !strings.Contains(err.Error(), "more than once") {
+			t.Errorf("%s: error does not name the file and the duplicate: %v", name, err)
+		}
+	}
+}
+
 func TestMarkers(t *testing.T) {
 	begin, end := Markers("BENCHPLOT")
 	if begin != "<!-- BENCHPLOT:BEGIN -->" || end != "<!-- BENCHPLOT:END -->" {

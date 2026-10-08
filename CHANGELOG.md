@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased] - 2026-10-08 · Repo tooling checks the tree and the file it was given
+
+From the 2026-10-07 audit. Each fix has a test that fails on the code before it. No library, ABI or README change.
+
+- **gussetvet scans the module that holds its target, not the working directory.** R4 and the R5 callback scan walked `"."`, so `gussetvet /repo/internal/ffi` run from anywhere else — `install.sh` does exactly that — checked an unrelated tree and reported both as passed. Both scans now walk the nearest `go.mod` at or above the target, and a target outside any module is an error. `main` is now a testable `run`, and the `walkGo` doc no longer claims test files are skipped.
+- **benchdoc takes a results file: `benchdoc [-check] <results-file>`.** With more than one file in `bench/results` it asked for one to be passed explicitly, but read no arguments, so it could not run at all.
+- **benchdoc no longer drops benchmarks.** Rows whose names did not start with `Gusset` or `Channel` were skipped without a word, despite the promise that an unmapped benchmark shows up under its raw name. Only a numeric `-N` suffix is stripped now (`size-large` was cut to `size`), and a section for a custom metric no longer inherits the previous unit and overwrites the allocs/op column. `parseBenchstat` has table tests.
+- **docblock refuses a BEGIN or END marker that appears more than once.** Only the first block was rewritten, leaving a second copy of the numbers stale.
+
 ## [Unreleased] - 2026-10-08 · A serial call's handoff no longer wakes a thread
 
 - **A lone in-flight call reaches its caller without the scheduler (I4).** The drain reader yielded with `runtime.Gosched` on every poll of the completion ring, and each yield with a P idle and no thread spinning woke a thread with a system call (`pthread_cond_signal` on darwin); the waiter then parked on its channel, and the delivery that readied it paid another. Polled through a job, the wakes grew a serial `Call`'s overhead with the job's length: profiled over 200k serial calls on an M5 Pro, `runtime.wakep` cost 1.5 µs per call at ~0.7 µs jobs and 5.9 µs at ~7 µs jobs, 78% of it from the reader's own yields, while a Rust-only round trip stayed flat at ~3 µs. With at most one call in flight and more than one P, the waiter now polls its buffered result channel for up to 50 µs before parking, and the reader polls without yielding, yielding once after a delivery that readied a goroutine. With one P, or more than one call in flight, both behave as before. `TestSerialCall_HandsOffWithoutScheduling` counts sampled scheduler transitions over 4000 serial calls: 16k–30k before, 0–10 after. Exploratory interleaved min-of-5 on a loaded M5 Pro (not recorded through `bench/record.sh`; the machine was below its 60% idle floor): serial ~0.7 µs jobs −42%, ~7 µs jobs −30% (1.89x → 1.36x raw cgo), `CallNoop` −10% to −20%, `CallParallel` and the parallel crossover unchanged.
