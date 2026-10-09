@@ -323,14 +323,15 @@ const waiterSpin = ticketReaderSpin
 // critical path; the reader then has to yield its P to run it. A send into
 // the buffered channel of a waiter that is still polling does neither. Only
 // a lone call polls, so a parallel load parks exactly as before and spends no
-// extra core, and only with more than one P: with one, the reader cannot run
-// until this goroutine stops, so a poll would only delay the result it waits
-// for.
+// extra core, and only with a P to spare beside this one and the reader's
+// (quietAt): with one P the reader cannot run until this goroutine stops, so a
+// poll would only delay the result it waits for, and with two the pair held
+// both and nothing else ran.
 //
 // ok is false when the window ran out or ctx ended; the caller then waits
 // as before, and its select sees ctx.
 func (s *handleState) pollResult(ctx context.Context, ch chan callResult) (res callResult, ok bool) {
-	if len(s.sem) != 1 || !s.multiP.Load() {
+	if len(s.sem) != 1 || !s.quietProcs.Load() {
 		return callResult{}, false
 	}
 	done := ctx.Done()
