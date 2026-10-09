@@ -153,12 +153,14 @@ const gomaxprocsRefresh = 10 * time.Millisecond
 // and the quiet handoff is only cheap while a third is left for everything
 // else. With two Ps they held both: a goroutine sleeping 200 us between
 // serial Calls woke 0.3-3.5 ms late at the median on an M5 Pro, against
-// 3-8 us yielding, and under a Linux 2-CPU quota serial Calls themselves
-// slowed (2.6-5.1 us against 2.0 us), the two pollers and the Rust worker
-// contending for two CPUs. With three, that goroutine woke as late as in a
-// process making no Calls (40 us against 32 us on darwin, ~0.9 ms against
-// ~1 ms on Linux, whose idle Ps sleep in millisecond epoll waits), and serial
-// Calls kept the quiet handoff's gain.
+// 2-8 us yielding, and under a Linux 2-CPU quota serial Calls themselves
+// slowed (2.6-5.6 us against 2.0-2.7 us), the two pollers and the Rust worker
+// contending for two CPUs. With three, that goroutine woke about as late as
+// in a process making no Calls (38-43 us against 32 us on darwin, at most
+// 0.91 ms against 0.97 ms on Linux, whose idle Ps sleep in millisecond epoll
+// waits), and serial Calls kept the quiet handoff's gain: 29-42% faster than
+// with it reverted at GOMAXPROCS 3, 4 and 8, and no different at 2.
+// The record is bench/results/handoff-gomaxprocs/.
 const quietMinProcs = 3
 
 // quietAt reports whether a lone call's handoff runs quietly at procs Ps.

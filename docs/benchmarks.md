@@ -84,7 +84,7 @@ comparison.
 
 | Benchmark | Where it is defined | Chart |
 | --- | --- | --- |
-| `GussetCallNoop`, `GussetCallParallel`, `GussetSubmitWait`, `GussetBufferLarge`, `GussetBufferLargeZeroCopy`, `ChannelHop` | `bench/bench_test.go` | darwin suite, VM suite |
+| `GussetCallNoop`, `GussetCallParallel`, `GussetSubmitWait`, `GussetBufferLarge`, `GussetBufferLargeZeroCopy`, `ChannelHop` | `bench/bench_test.go` | darwin suite, VM suite. `GussetCallNoop` at GOMAXPROCS 2-8 across three builds: tables only, see below |
 | `CrossoverSerial`, `CrossoverParallel` | `bench/seed/go/crossover_test.go` | crossover (darwin). **VM: refused, see below** |
 | `ThreadScaling` | `bench/seed/go/crossover_test.go` | threads, memory (darwin); threads, memory, wall time (VM) |
 | `ThreadPressure` | `bench/seed/go/crossover_test.go` | peak threads at 512 |
@@ -106,6 +106,17 @@ The VM crossover therefore has no chart, and the table of it in
 [`bench/results/linux-amd64-vm/README.md`](../bench/results/linux-amd64-vm/README.md)
 is hand-typed from the same file; treat it with the same suspicion until it is
 re-recorded.
+
+**Refused by a check: `handoff-gomaxprocs/crossover-serial-*.txt`.** Serial
+`CrossoverSerial/Gusset` at GOMAXPROCS 2, 3, 4 and 8 for three builds, recorded
+in 30 interleaved processes. Each process calibrates its own job time into the
+name, which wobbles by a microsecond between them (`10000it-6us`,
+`10000it-7us`), so `tools/internal/benchfile` reads the arm as uneven. The rows
+pair once that part of the name is stripped, and
+[`bench/results/handoff-gomaxprocs/README.md`](../bench/results/handoff-gomaxprocs/README.md)
+gives the command and the benchstat tables. Its sibling
+`serial-call-*.txt` passes every check; neither is charted yet, because the
+gallery has no chart for one benchmark across builds and GOMAXPROCS values.
 
 **No provenance header.** These were run by hand, so nothing certifies that the
 machine was idle: `inline-*`, `ring-*`, `waitchan-*`, `seed-micro`, `simd` and

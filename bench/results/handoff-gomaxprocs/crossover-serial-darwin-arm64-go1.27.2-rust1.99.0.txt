@@ -1,0 +1,547 @@
+# gusset-bench: v1
+# gusset-bench-recorded: 2026-10-09T18:22:48Z
+# gusset-bench-host: Mac-3784.lan
+# gusset-bench-uname: Darwin 27.0.0 arm64
+# gusset-bench-package: each variant's directory, .
+# gusset-bench-arms: CrossoverSerial/Gusset/^(1000|10000)it
+# gusset-bench-benchtime: 1s
+# gusset-bench-count: 10
+# gusset-bench-cpu: 2,3,4,8
+# gusset-bench-order: 10 rounds; each round ran every arm once (-count=1) in every variant, in the order listed
+# gusset-bench-variant-head: 159d352, 0 tracked path(s) modified, /private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/head/bench/seed/go
+# gusset-bench-variant-reverted: 159d352, 5 tracked path(s) modified, /private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/reverted/bench/seed/go
+# gusset-bench-variant-fixed: 4114abe, 0 tracked path(s) modified, /Users/bharath/Code/devtools/gusset/.gitpulse/worktrees/perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/bench/seed/go
+# gusset-bench-cpu-idle-before: 84.77
+# gusset-bench-cpu-idle-after: 78.5
+# gusset-bench-min-idle: 60
+# gusset-bench-exclusive: yes
+variant: head
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/head/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-694ns-2         	  522607	      2186 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-694ns-3         	  494804	      2493 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-694ns-4         	  308194	      6961 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-694ns-8         	  330235	      3790 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  124614	     13337 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  120189	     11162 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  116019	     10431 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  115615	     11762 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	12.071s
+variant: head
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/head/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-2         	  480012	      3086 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-3         	  340128	      3003 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-4         	  321840	      3208 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-8         	  292473	      4568 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  120354	      9946 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  122131	      9791 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  123330	      9810 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  126706	      9355 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	10.379s
+variant: head
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/head/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-2         	  462526	      2525 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-3         	  517971	      2452 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-4         	  531586	      2298 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-8         	  502610	      2878 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   97521	     14860 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  121263	      9361 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  124232	      9431 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  132979	      9265 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	11.724s
+variant: head
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/head/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-2         	  550428	      2086 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-3         	  556688	      2480 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-4         	  555640	      2135 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-8         	  547105	      2203 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-6us-2          	  126368	     10184 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-6us-3          	  127896	      9829 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-6us-4          	  116216	      9681 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-6us-8          	  121882	      9542 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	10.451s
+variant: head
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/head/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-2         	  486924	      2184 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-3         	  558032	      2152 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-4         	  560131	      2198 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-8         	  542288	      2212 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  118800	      9078 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  130554	      9144 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  131379	      9211 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  128739	      9205 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	10.063s
+variant: head
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/head/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-693ns-2         	  533881	      2395 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-693ns-3         	  466078	      2669 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-693ns-4         	  456075	      2750 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-693ns-8         	  464132	      2699 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  121460	      9680 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  122623	      9661 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  124206	      9655 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  123951	      9842 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	10.560s
+variant: head
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/head/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-2         	  455449	      8719 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-3         	  420434	      3312 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-4         	  375176	      2817 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-8         	  413005	      2561 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  100446	     18486 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  106237	     12418 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	   99465	     11399 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  112052	     11034 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	15.753s
+variant: head
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/head/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-691ns-2         	  550520	      1998 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-691ns-3         	  605434	      2013 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-691ns-4         	  591031	      2186 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-691ns-8         	  584598	      2086 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  139928	     10417 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  114439	      9236 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  135925	     14436 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  132022	     10189 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	11.309s
+variant: head
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/head/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-696ns-2         	  535189	      2249 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-696ns-3         	  543907	      4566 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-696ns-4         	  470520	      2480 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-696ns-8         	  354861	      3064 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  107764	     12723 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  121660	      9893 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  125383	      9783 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  126346	      9904 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	11.683s
+variant: head
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/head/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-666ns-2         	  574063	      2010 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-666ns-3         	  614247	      2013 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-666ns-4         	  593149	      2435 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-666ns-8         	  468242	      3344 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-6us-2          	   83664	     17840 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-6us-3          	  107664	     12089 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-6us-4          	   97272	     12799 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-6us-8          	  112174	     15600 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	12.545s
+variant: reverted
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/reverted/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-701ns-2         	  253108	      4254 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-701ns-3         	  244615	      4745 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-701ns-4         	  264116	      4171 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-701ns-8         	  325801	      3893 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   93337	     11573 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	   99655	     12212 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	   75286	     13668 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	   83437	     13710 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	10.043s
+variant: reverted
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/reverted/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-2         	  339158	      3613 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-3         	  345444	      4023 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-4         	  317558	      3938 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-8         	  330912	      4045 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   97575	     11833 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	   94842	     11638 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  107354	     14295 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	   71588	     20880 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	12.212s
+variant: reverted
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/reverted/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-695ns-2         	  328118	      3861 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-695ns-3         	  297338	      4040 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-695ns-4         	  322724	      3851 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-695ns-8         	  322324	      3958 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   79249	     15969 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  106916	     11235 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  107707	     11212 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  106471	     11199 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	11.742s
+variant: reverted
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/reverted/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-2         	  340129	      3840 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-3         	  353733	      4049 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-4         	  293989	      3810 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-8         	  304951	      4031 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  101841	     11610 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  104600	     13386 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	   95745	     12064 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	   97434	     11815 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	11.778s
+variant: reverted
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/reverted/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-2         	  312058	      3646 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-3         	  326833	      3700 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-4         	  329832	      3645 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-8         	  323253	      3730 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  109515	     11819 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	   95280	     13794 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	   81344	     14135 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	   83865	     13963 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	10.613s
+variant: reverted
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/reverted/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-703ns-2         	  303038	      4151 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-703ns-3         	  193988	      5357 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-703ns-4         	  248852	      6648 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-703ns-8         	  173671	      7121 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   61908	     18576 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	   71851	     17330 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	   68964	     14868 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	   91482	     12502 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	10.877s
+variant: reverted
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/reverted/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-708ns-2         	  198580	      5813 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-708ns-3         	  171013	      7393 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-708ns-4         	  158613	      6943 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-708ns-8         	  178656	      7018 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   64030	     19876 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	   63135	     19194 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	   63520	     19240 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	   62446	     18772 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	11.994s
+variant: reverted
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/reverted/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-701ns-2         	  341612	      3662 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-701ns-3         	  328915	      3630 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-701ns-4         	  317216	      3710 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-701ns-8         	  333334	      4112 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   81328	     13091 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  103441	     13034 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	   85941	     12758 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	   97110	     12657 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	10.688s
+variant: reverted
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/reverted/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-715ns-2         	  254622	      4712 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-715ns-3         	  212636	      5904 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-715ns-4         	  204504	      5682 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-715ns-8         	  234781	      5356 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   91885	     14027 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	   67782	     19376 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  113670	     13020 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	   70413	     18096 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	13.111s
+variant: reverted
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset--gitpulse-worktrees-perf-regression-a4d4cd8-s-quiet-mode-han-c4d130b1/c4d130b1-590b-4cd8-aa0f-3e6322063843/scratchpad/reverted/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-2         	  295866	      4033 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-3         	  350175	      3870 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-4         	  329978	      3640 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-8         	  319834	      3756 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  107094	     11777 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	   87150	     13852 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	   89419	     14844 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	   84816	     14698 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	11.779s
+variant: fixed
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-692ns-2         	  312412	      3624 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-692ns-3         	  525390	      2243 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-692ns-4         	  581136	      2101 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-692ns-8         	  463638	      2335 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   80680	     13381 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  113617	      9324 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  121662	      9616 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  125228	     10116 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	9.967s
+variant: fixed
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-738ns-2         	  194496	      5342 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-738ns-3         	  364908	      3117 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-738ns-4         	  500631	      2853 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-738ns-8         	  437096	      2384 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   89962	     12204 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  122745	      9788 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  104677	      9575 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  120984	      9755 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	9.927s
+variant: fixed
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-2         	  330428	      3772 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-3         	  569052	      2201 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-4         	  535753	      2226 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-690ns-8         	  531168	      2916 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  106209	     12029 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  130940	      9057 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  133372	      9044 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  134702	      9108 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	10.925s
+variant: fixed
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-2         	  303914	      4151 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-3         	  492469	      2840 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-4         	  510921	      2478 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-8         	  531318	      2325 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  101725	     11270 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  131394	      9334 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  126795	      9510 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  126850	      9284 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	10.636s
+variant: fixed
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-713ns-2         	  262125	      4631 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-713ns-3         	  341007	      3289 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-713ns-4         	  373203	      3197 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-713ns-8         	  390255	      3218 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   95161	     13212 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  117952	     10272 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  114817	      9724 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  123909	      9840 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	10.370s
+variant: fixed
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-701ns-2         	  289243	      4457 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-701ns-3         	  499424	      2255 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-701ns-4         	  558230	      2482 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-701ns-8         	  458968	      2327 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  105772	     18374 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	   95396	     13049 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  130069	     10523 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  119298	      9983 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	11.378s
+variant: fixed
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-2         	  303585	      4582 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-3         	  427412	      3108 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-4         	  375699	      2978 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-698ns-8         	  516613	      2458 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   88196	     13953 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  130027	      9488 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  127930	      9452 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  126535	      9394 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	10.733s
+variant: fixed
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-696ns-2         	  255531	      4584 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-696ns-3         	  493888	      2385 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-696ns-4         	  563269	      2275 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-696ns-8         	  525439	      2364 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   91954	     13632 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  131444	      9727 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	   89306	     11892 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  133639	      9033 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	10.462s
+variant: fixed
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-746ns-2         	  189285	      5613 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-746ns-3         	  588279	      2044 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-746ns-4         	  602245	      2141 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-746ns-8         	  568066	      2161 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	  112682	     11252 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  137104	      8603 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  141261	      8653 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  132886	      8710 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	11.263s
+variant: fixed
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/1000it-711ns-2         	  236768	      4775 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-711ns-3         	  342007	      3454 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-711ns-4         	  399550	      4145 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-711ns-8         	  363775	      3288 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-2          	   87840	     13477 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-3          	  114910	     12705 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-4          	  110206	     10605 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-8          	  122384	     11052 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	11.135s

@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased] - 2026-10-09 · The quiet handoff leaves a P for everyone else
+
+From the 2026-10-09 audit (`gs-perf-quiet-handoff-gomaxprocs2`). No ABI or Go API change.
+
+- **A lone call's handoff runs quietly only at GOMAXPROCS >= 3 (I4).** `a4d4cd8` let the waiter poll its result channel and the drain reader poll the ring without yielding whenever GOMAXPROCS was above one. Neither loop passes through the scheduler, so at GOMAXPROCS=2 they held both Ps: a goroutine sleeping 200 µs beside serial Calls woke 2.2-3.5 ms late at the median on an M5 Pro (max 21-25 ms), against 2-4 µs with `a4d4cd8` reverted, and under a Linux 2-CPU quota serial Calls themselves slowed, the two pollers and the Rust worker contending for two CPUs. The shared gate (`multiP`, now `quietProcs` behind `quietMinProcs` in `drain.go`) leaves one P for everything else; below it the handoff is the one before `a4d4cd8`. `TestSerialCall_LeavesAPForOtherGoroutines` fails on the code before this and passes after; `TestQuietProcs_FollowsGOMAXPROCS` covers both sides of the threshold, including a GOMAXPROCS change while a handle is open.
+- **The first certified record of `a4d4cd8`'s effect** (`bench/results/handoff-gomaxprocs/`): head, `a4d4cd8` reverted and the fix, interleaved over 10 rounds at GOMAXPROCS 2, 3, 4 and 8. At 2 the fix is no different from reverted (p = 0.97 on `GussetCallNoop`; minima within 3%); at 3, 4 and 8 it is no different from head and 37-42% faster than reverted. On this 18-core host head is faster at 2 because the Rust worker has a core of its own; that is given up for the goroutines it starved.
+- **`bench/record.sh` takes `RECORD_VARIANTS` and `RECORD_CPU`.** The first records several builds of the same benchmarks in one recording, interleaved by round and labelled with a `variant:` line for `benchstat -col variant`; the second passes `-cpu`. Both are off by default.
+
 ## [Unreleased] - 2026-10-08 · Every certified benchmark is charted
 
 No library, ABI or Go API change. `DECISIONS.md` 2026-10-08 records the rule.
