@@ -314,12 +314,14 @@ func (tr *ticketReader) fill(p []byte) (int, error) {
 // runtime.wakep at ~0.7 us jobs and 5.9 us at ~7 us jobs, 78% of it from the
 // reader's own yields.
 //
-// So for a lone call on several Ps the poll does not yield: its waiter
-// polls for the result itself (waitInternal), and drainPipe yields once after
-// a delivery that readied someone. With one P nothing else runs until the
-// reader yields, and that yield wakes no thread because no P is idle. Under
-// parallel load quiet polling held up the callers the reader readies (0.7 us
-// and 7 us jobs on 18 Ps regressed), so it yields there as before.
+// So for a lone call with a P to spare (quietAt) the poll does not yield: its
+// waiter polls for the result itself (waitInternal), and drainPipe yields once
+// after a delivery that readied someone. With one P nothing else runs until
+// the reader yields, and that yield wakes no thread because no P is idle; with
+// two, the quiet reader and its polling waiter held both and every other
+// goroutine waited for a preemption. Under parallel load quiet polling held up
+// the callers the reader readies (0.7 us and 7 us jobs on 18 Ps regressed), so
+// it yields there as before.
 func (tr *ticketReader) pollPause() {
 	if tr.yieldsEachPoll() {
 		runtime.Gosched()

@@ -52,6 +52,20 @@
 #   BENCHTIME  passed to -benchtime (e.g. 1s, 5x)
 #   COUNT      passed to -count
 #   ARM...     one -bench regex per arm; each runs in its own process
+#
+# Two optional environment variables, both off by default:
+#
+#   RECORD_CPU       passed to -cpu (e.g. 2,3,4,8). Each benchmark runs once per
+#                    GOMAXPROCS value and carries it as its -N name suffix.
+#   RECORD_VARIANTS  space-separated NAME=DIR pairs: builds of the same
+#                    benchmarks to compare, one checkout each, with DIR in place
+#                    of RECORD_DIR. COUNT becomes a number of rounds, and each
+#                    round runs every arm once (-count=1) in every variant, so
+#                    a drift in the machine's clock or load lands on all of
+#                    them alike rather than on whichever ran last. The output
+#                    is still grouped by arm, then by variant, with each block
+#                    behind a `variant: NAME` configuration line, which is what
+#                    `benchstat -col variant` splits on.
 
 set -eu
 
@@ -70,6 +84,35 @@ shift 3
 # _test.go files; `make bench` records the main module's own benchmarks instead.
 RECORD_DIR=${RECORD_DIR:-bench/seed/go}
 RECORD_PKG=${RECORD_PKG:-.}
+RECORD_CPU=${RECORD_CPU:-}
+RECORD_VARIANTS=${RECORD_VARIANTS:-}
+
+# Checked before the lock is taken, so a typo costs nothing. A variant whose
+# directory is missing would otherwise fail in its first round, after the other
+# variants had already spent their time.
+WARM_DIR=$RECORD_DIR
+if [ -n "$RECORD_VARIANTS" ]; then
+	WARM_DIR=
+	for v in $RECORD_VARIANTS; do
+		name=${v%%=*}
+		dir=${v#*=}
+		if [ "$name" = "$v" ] || ! printf '%s\n' "$name" | grep -Eq '^[a-z][a-z0-9_-]*$'; then
+			echo "record: RECORD_VARIANTS entry '$v' is not NAME=DIR with a lower-case NAME" >&2
+			exit 2
+		fi
+		if [ ! -d "$dir" ]; then
+			echo "record: variant $name: no directory $dir" >&2
+			exit 2
+		fi
+		if [ -z "$WARM_DIR" ]; then
+			WARM_DIR=$dir
+		fi
+	done
+fi
+if [ -n "$RECORD_CPU" ] && ! printf '%s\n' "$RECORD_CPU" | grep -Eq '^[1-9][0-9]*(,[1-9][0-9]*)*$'; then
+	echo "record: RECORD_CPU '$RECORD_CPU' is not a comma-separated list of positive integers" >&2
+	exit 2
+fi
 
 LOCK=bench/results/.record.lock
 TMP=
@@ -265,28 +308,75 @@ echo "record: preflight ok — ${IDLE_BEFORE}% idle, no other benchmark running"
 # The warm-up runs the first arm and throws the numbers away: only its effect on
 # the clock is wanted. It is deliberately not a `-benchtime=1x` token run, which
 # would finish before the ramp it exists to trigger.
+CPU_FLAG=
+if [ -n "$RECORD_CPU" ]; then
+	CPU_FLAG=-cpu=$RECORD_CPU
+fi
+
 echo "record: warm-up (discarded) — $1"
-go test -C "$RECORD_DIR" -run '^$' -bench "$1" \
+go test -C "$WARM_DIR" -run '^$' -bench "$1" ${CPU_FLAG:+"$CPU_FLAG"} \
 	-benchtime=1s -count=1 "$RECORD_PKG" > "$TMP/warmup" 2>&1 || true
 
 # ---------------------------------------------------------------------------
 # 4. One process per arm, into per-arm temporary files.
+#
+# $TMP/parts lists those files in the order they are assembled.
 
-n=0
-for arm in "$@"; do
-	n=$((n + 1))
-	if [ "$n" -gt 1 ]; then
-		require_exclusive "between arms, before $arm"
-	fi
-	echo "record: arm $n/$# — $arm"
-	if ! go test -C "$RECORD_DIR" -run '^$' -bench "$arm" \
-		-benchtime="$BENCHTIME" -count="$COUNT" "$RECORD_PKG" > "$TMP/arm.$n" 2>&1; then
-		echo "record: arm $arm failed; no results written" >&2
-		cut -c1-200 < "$TMP/arm.$n" >&2
+# run_arm DIR ARM COUNT: one benchmark process into $TMP/run, or no results.
+run_arm() {
+	if ! go test -C "$1" -run '^$' -bench "$2" ${CPU_FLAG:+"$CPU_FLAG"} \
+		-benchtime="$BENCHTIME" -count="$3" "$RECORD_PKG" > "$TMP/run" 2>&1; then
+		echo "record: arm $2 failed in $1; no results written" >&2
+		cut -c1-200 < "$TMP/run" >&2
 		exit 1
 	fi
-	grep -E '^Benchmark' "$TMP/arm.$n" | cut -c1-120 || true
-done
+	grep -E '^Benchmark' "$TMP/run" | cut -c1-120 || true
+}
+
+: > "$TMP/parts"
+n=0
+if [ -z "$RECORD_VARIANTS" ]; then
+	for arm in "$@"; do
+		n=$((n + 1))
+		if [ "$n" -gt 1 ]; then
+			require_exclusive "between arms, before $arm"
+		fi
+		echo "record: arm $n/$# — $arm"
+		run_arm "$RECORD_DIR" "$arm" "$COUNT"
+		mv "$TMP/run" "$TMP/arm.$n"
+		echo "$TMP/arm.$n" >> "$TMP/parts"
+	done
+else
+	n=$#
+	runs=0
+	round=0
+	while [ "$round" -lt "$COUNT" ]; do
+		round=$((round + 1))
+		a=0
+		for arm in "$@"; do
+			a=$((a + 1))
+			j=0
+			for v in $RECORD_VARIANTS; do
+				j=$((j + 1))
+				name=${v%%=*}
+				runs=$((runs + 1))
+				if [ "$runs" -gt 1 ]; then
+					require_exclusive "between runs, before round $round of $arm in $name"
+				fi
+				echo "record: round $round/$COUNT — $arm — $name"
+				run_arm "${v#*=}" "$arm" 1
+				part="$TMP/arm.$a.$j"
+				if [ "$round" = "1" ]; then
+					echo "$part" >> "$TMP/parts"
+				fi
+				{
+					echo "variant: $name"
+					cat "$TMP/run"
+				} >> "$part"
+			done
+		done
+	done
+fi
 
 # ---------------------------------------------------------------------------
 # Postflight.
@@ -310,19 +400,31 @@ require_idle "after the last arm" "$IDLE_AFTER"
 	echo "# gusset-bench-recorded: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 	echo "# gusset-bench-host: $(uname -n)"
 	echo "# gusset-bench-uname: $(uname -srm)"
-	echo "# gusset-bench-package: $RECORD_DIR $RECORD_PKG"
+	if [ -n "$RECORD_VARIANTS" ]; then
+		echo "# gusset-bench-package: each variant's directory, $RECORD_PKG"
+	else
+		echo "# gusset-bench-package: $RECORD_DIR $RECORD_PKG"
+	fi
 	echo "# gusset-bench-arms: $*"
 	echo "# gusset-bench-benchtime: $BENCHTIME"
 	echo "# gusset-bench-count: $COUNT"
+	echo "# gusset-bench-cpu: ${RECORD_CPU:-default}"
+	if [ -n "$RECORD_VARIANTS" ]; then
+		echo "# gusset-bench-order: $COUNT rounds; each round ran every arm once (-count=1) in every variant, in the order listed"
+		for v in $RECORD_VARIANTS; do
+			dir=${v#*=}
+			rev=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo unknown)
+			mods=$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')
+			echo "# gusset-bench-variant-${v%%=*}: $rev, $mods tracked path(s) modified, $dir"
+		done
+	fi
 	echo "# gusset-bench-cpu-idle-before: $IDLE_BEFORE"
 	echo "# gusset-bench-cpu-idle-after: $IDLE_AFTER"
 	echo "# gusset-bench-min-idle: $MIN_IDLE"
 	echo "# gusset-bench-exclusive: yes"
-	i=0
-	while [ "$i" -lt "$n" ]; do
-		i=$((i + 1))
-		cat "$TMP/arm.$i"
-	done
+	while read -r part; do
+		cat "$part"
+	done < "$TMP/parts"
 } > "$TMP/out"
 
 mkdir -p "$(dirname "$OUT")"

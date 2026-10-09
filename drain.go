@@ -23,11 +23,11 @@ func drainPipe(s *handleState) {
 	// completion is always pending, and polling between them took a core the
 	// workers needed (1 ms parallel jobs +18% on 4 vCPUs).
 	tr.inFlight = func() bool { return len(s.sem) == 1 }
-	// At most one call in flight on several Ps is the case the poll is quiet
-	// for (see ticketReader.pollPause): a serial caller's next call comes
-	// while the reader still polls after the last. Otherwise the reader
-	// yields on every poll.
-	tr.yieldEachPoll = func() bool { return !s.multiP.Load() || len(s.sem) > 1 }
+	// At most one call in flight with a P to spare is the case the poll is
+	// quiet for (see ticketReader.pollPause and quietAt): a serial caller's
+	// next call comes while the reader still polls after the last. Otherwise
+	// the reader yields on every poll.
+	tr.yieldEachPoll = func() bool { return !s.quietProcs.Load() || len(s.sem) > 1 }
 	// handOff delivers a completion and, when that readied a goroutine the
 	// reader's polls will not yield to, yields to it now.
 	handOff := func(ticket uint64, res callResult, takeID uint64) {
@@ -41,7 +41,7 @@ func drainPipe(s *handleState) {
 		ticket, inlineData, inline, err := tr.next()
 		if err == nil && tr.lastTicket.Sub(procsAt) >= gomaxprocsRefresh {
 			procsAt = tr.lastTicket
-			s.multiP.Store(runtime.GOMAXPROCS(0) > 1)
+			s.quietProcs.Store(quietAt(runtime.GOMAXPROCS(0)))
 		}
 		if err != nil {
 			// Close sets closed before it stops the reader, so an error with
@@ -139,11 +139,32 @@ func drainPipe(s *handleState) {
 	}
 }
 
-// gomaxprocsRefresh is how often drainPipe re-reads GOMAXPROCS into multiP.
-// The runtime can change it while the process runs (container CPU limits),
-// and reading it takes the scheduler's global lock, so once per completion
-// is too often.
+// gomaxprocsRefresh is how often drainPipe re-reads GOMAXPROCS into
+// quietProcs. The runtime can change it while the process runs (container CPU
+// limits), and reading it takes the scheduler's global lock, so once per
+// completion is too often.
 const gomaxprocsRefresh = 10 * time.Millisecond
+
+// quietMinProcs is the fewest Ps a lone call's handoff runs quietly on: the
+// waiter polling its result (handleState.pollResult) and the reader polling
+// without yielding (ticketReader.pollPause).
+//
+// Neither loop passes through the scheduler, so together they hold two Ps,
+// and the quiet handoff is only cheap while a third is left for everything
+// else. With two Ps they held both: a goroutine sleeping 200 us between
+// serial Calls woke 0.3-3.5 ms late at the median on an M5 Pro, against
+// 2-8 us yielding, and under a Linux 2-CPU quota serial Calls themselves
+// slowed (2.6-5.6 us against 2.0-2.7 us), the two pollers and the Rust worker
+// contending for two CPUs. With three, that goroutine woke about as late as
+// in a process making no Calls (38-43 us against 32 us on darwin, at most
+// 0.91 ms against 0.97 ms on Linux, whose idle Ps sleep in millisecond epoll
+// waits), and serial Calls kept the quiet handoff's gain: 29-42% faster than
+// with it reverted at GOMAXPROCS 3, 4 and 8, and no different at 2.
+// The record is bench/results/handoff-gomaxprocs/.
+const quietMinProcs = 3
+
+// quietAt reports whether a lone call's handoff runs quietly at procs Ps.
+func quietAt(procs int) bool { return procs >= quietMinProcs }
 
 // deliver routes one completion: to its waiter, to the completed map for a
 // waiter yet to arrive, or straight to the bin when the owner has abandoned the
