@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased] - 2026-10-09 · Buffer ids are unique across handles
+
+From the 2026-10-09 audit. No export signature, ABI or Go API change.
+
+- **An engine can no longer return another handle's buffer as its output (I4).** Buffer ids came from a per-handle counter starting at 1, but the engine registry is one per process, so a Rust host's engine could hold handle A's buffer id and return it while running on handle B. B usually had a buffer under the same number: B claimed its own buffer as the output, B's caller received B's bytes with no error, and A's buffer was never handed back. Buffer ids now come from one process-wide counter (`NEXT_BUFFER_ID`), the same way tickets already did (`NEXT_TICKET`), so a foreign id is unknown on B and the call fails with "no such live buffer". Go hosts could not reach this: their engines never see a `Handle`. `a_foreign_handles_buffer_id_is_refused_as_an_output` fails on the code before it. Allocation now takes one shared atomic, as submission already did for tickets. Nothing was measured.
+- **One ceiling test for both id counters.** `buffer_ids_stop_at_the_ceiling_instead_of_wrapping` pushed the handle's own counter to `1 << 63` and expected a handle's first id to be 1. Neither holds now, and a process-wide counter cannot be pushed to the ceiling while other tests run in parallel. That test and the ticket ceiling test are now `ids_stop_at_the_ceiling_instead_of_wrapping`, which checks `reserve_id` on a local counter. Both counters reserve ids through `reserve_id`.
+
 ## [Unreleased] - 2026-10-08 · Every certified benchmark is charted
 
 No library, ABI or Go API change. `DECISIONS.md` 2026-10-08 records the rule.

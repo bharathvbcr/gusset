@@ -48,52 +48,16 @@ fn submit_does_not_leave_a_cancel_flag_when_the_sender_is_gone() {
     }
 }
 
-/// Advancing the id counter past the 63-bit ceiling wraps it onto ids that
-/// are still live. `fetch_add` does that even when the call then returns an
-/// error, so the next successful allocation reuses buffer 1.
+/// Advancing an id counter past the 63-bit ceiling wraps it onto ids that are
+/// still live: a wrapped buffer id reuses buffer 1, a wrapped ticket aliases
+/// an in-flight job and the completion pipe wakes the wrong waiter.
+/// `fetch_add` wraps even when the call then returns an error.
+///
+/// Buffer ids and tickets both come from process-wide counters, which a
+/// parallel test must not push to the ceiling, and both reserve through
+/// `reserve_id`, so the ceiling rule is tested there on a local counter.
 #[test]
-#[cfg_attr(miri, ignore)]
-fn buffer_ids_stop_at_the_ceiling_instead_of_wrapping() {
-    let _serialise = lock_recover(&INJECT_LOCK);
-    let (r, w) = make_pipe();
-    let handle = match Handle::open(1, w) {
-        Ok(h) => h,
-        Err(e) => panic!("open failed: {}", e),
-    };
-
-    let (live_id, _) = match handle.buf_alloc(32) {
-        Ok(v) => v,
-        Err(e) => panic!("first buffer must allocate: {}", e),
-    };
-    assert_eq!(live_id, 1, "ids start at 1; 0 means no buffer");
-
-    handle.next_buffer_id.store(1 << 63, Ordering::Relaxed);
-    if let Ok((id, _)) = handle.buf_alloc(32) {
-        panic!("id {id} is past the ceiling and must be refused");
-    }
-    assert_eq!(
-        handle.next_buffer_id.load(Ordering::Relaxed),
-        1 << 63,
-        "a refused id must not advance the counter; the next success would wrap onto buffer 1"
-    );
-    assert!(
-        handle.buf_get(live_id).is_ok(),
-        "the live buffer must still be the one issued before the ceiling"
-    );
-
-    handle.close().must("close");
-    unsafe {
-        libc::close(r);
-    }
-}
-
-/// Same ceiling for tickets. A wrapped ticket id aliases an in-flight job,
-/// so the completion pipe wakes the wrong waiter.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn ticket_ids_stop_at_the_ceiling_instead_of_wrapping() {
-    // Tickets come from a process-wide counter now, which a parallel test
-    // must not push to the ceiling; the ceiling rule lives in reserve_id.
+fn ids_stop_at_the_ceiling_instead_of_wrapping() {
     let counter = AtomicU64::new(ID_CEILING);
     assert!(
         reserve_id(&counter).is_err(),
@@ -102,7 +66,7 @@ fn ticket_ids_stop_at_the_ceiling_instead_of_wrapping() {
     assert_eq!(
         counter.load(Ordering::Relaxed),
         ID_CEILING,
-        "a refused id must not advance the counter"
+        "a refused id must not advance the counter; the next success would wrap onto id 1"
     );
     let counter = AtomicU64::new(ID_CEILING - 1);
     assert_eq!(reserve_id(&counter).ok(), Some(ID_CEILING - 1));
@@ -365,6 +329,86 @@ fn gusset_buf_alloc_marks_the_buffer_caller_held() {
     handle.close().must("close");
     unsafe {
         libc::close(r);
+    }
+}
+
+/// The engine registry is one per process, so an engine can hold a buffer id
+/// minted by another handle. With per-handle counters handle B also had a
+/// buffer under that number: B accepted the foreign id as its own output, B's
+/// caller received B's bytes with no error, and A's buffer was never returned.
+/// A foreign id must be unknown on every handle but its own.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_foreign_handles_buffer_id_is_refused_as_an_output() {
+    const OPCODE_RETURN_FOREIGN: u32 = 9202;
+    let _registry = lock_recover(&REGISTRY_TEST_LOCK);
+    register_engine(OPCODE_RETURN_FOREIGN, |_ctx, input: &[u8]| {
+        let mut raw = [0u8; 8];
+        let n = input.len().min(8);
+        raw[..n].copy_from_slice(&input[..n]);
+        Ok::<_, String>(JobOutput::Buffer(u64::from_le_bytes(raw)))
+    })
+    .must("register opcode");
+
+    let (ra, wa) = make_pipe();
+    let (rb, wb) = make_pipe();
+    let a = match Handle::open(1, wa) {
+        Ok(h) => h,
+        Err(e) => panic!("open a: {e}"),
+    };
+    let b = match Handle::open(1, wb) {
+        Ok(h) => h,
+        Err(e) => panic!("open b: {e}"),
+    };
+    let fill = |h: &Handle, byte: u8| match h.buf_alloc(4) {
+        Ok((id, ptr)) => {
+            // SAFETY: buf_alloc just returned a live 4-byte buffer.
+            unsafe { std::ptr::write_bytes(ptr, byte, 4) };
+            id
+        }
+        Err(e) => panic!("buf_alloc: {e}"),
+    };
+    let a_id = fill(&a, b'A');
+    let b_id = fill(&b, b'B');
+
+    let header = CallHeader {
+        reserved: OPCODE_RETURN_FOREIGN,
+        ..Default::default()
+    };
+    let ticket = match b.submit(header, &a_id.to_le_bytes(), 0) {
+        Ok(t) => t,
+        Err(e) => panic!("submit: {e}"),
+    };
+    assert_eq!(read_ticket(rb), ticket);
+
+    let contents = |h: &Handle, id: u64| match h.buf_get(id) {
+        // SAFETY: buf_get just confirmed the allocation is live.
+        Ok((p, len)) => unsafe { std::slice::from_raw_parts(p, len) }.to_vec(),
+        Err(e) => panic!("buffer {id} is gone: {e}"),
+    };
+    match b.take(ticket) {
+        Ok(JobResult::Err(msg)) => assert!(
+            msg.contains("no such live buffer"),
+            "refusal must say the id is not this handle's, got: {msg}"
+        ),
+        Ok(JobResult::Buffer(got)) => panic!(
+            "handle B accepted handle A's buffer id {a_id} as its output: B's caller \
+             got buffer {got} holding {:?}",
+            String::from_utf8_lossy(&contents(&b, got))
+        ),
+        Ok(other) => panic!("unexpected result {:?}", std::mem::discriminant(&other)),
+        Err(e) => panic!("take: {e}"),
+    }
+    assert_eq!(contents(&a, a_id), b"AAAA", "A's buffer was disturbed");
+    assert_eq!(contents(&b, b_id), b"BBBB", "B's buffer was disturbed");
+
+    let _ = a.buf_free(a_id);
+    let _ = b.buf_free(b_id);
+    a.close().must("close a");
+    b.close().must("close b");
+    unsafe {
+        libc::close(ra);
+        libc::close(rb);
     }
 }
 

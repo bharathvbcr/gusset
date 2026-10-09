@@ -1,7 +1,9 @@
 //! The Rust-owned buffer registry (R16).
 
 use super::sys::RawBuffer;
-use super::{lock_recover, reserve_id, Handle, JobResult, MAX_BUFFER_BYTES, MAX_INLINE_INPUT};
+use super::{
+    lock_recover, reserve_id, Handle, JobResult, MAX_BUFFER_BYTES, MAX_INLINE_INPUT, NEXT_BUFFER_ID,
+};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -80,7 +82,7 @@ impl Handle {
         if self.closed.load(Ordering::Acquire) {
             return Err("handle is closed".to_string());
         }
-        let id = reserve_id(&self.next_buffer_id)?;
+        let id = reserve_id(&NEXT_BUFFER_ID)?;
         let slot = build()?;
         let ptr = slot.buf.as_mut_ptr();
         lock_recover(&self.buffers).insert(id, slot);
