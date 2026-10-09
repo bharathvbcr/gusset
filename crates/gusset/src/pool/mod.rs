@@ -198,7 +198,6 @@ pub struct Handle {
     results: Mutex<IdMap<u64, JobResult>>,
     cancel_flags: Mutex<IdMap<u64, Arc<AtomicBool>>>,
     buffers: Mutex<IdMap<u64, BufferSlot>>,
-    next_buffer_id: AtomicU64,
     next_worker_id: AtomicU64,
     workers: Mutex<Vec<thread::JoinHandle<()>>>,
     receiver: Arc<JobQueue<WorkUnit>>,
@@ -265,6 +264,16 @@ pub const TAKE_OWNED_FLAG: u64 = 1 << 63;
 /// but its own handle, which is what `ErrUnknownTicket` promises. 2^63 tickets
 /// is ~292,000 years at a million submissions a second.
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
+
+/// Buffer-id counter shared by every handle in the process.
+///
+/// The engine registry is process-global, so a Rust host's engine can hold a
+/// buffer id minted by handle A and return it while running on handle B. With
+/// per-handle counters B usually had a buffer of that number too: B claimed
+/// its own buffer as the output, B's caller received B's bytes with no error,
+/// and A's buffer was never handed back. Unique ids make a foreign id unknown
+/// on every handle but the one that minted it, so `claim_output` refuses it.
+static NEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Reserves the next id, or refuses without advancing once the space is exhausted.
 fn reserve_id(counter: &AtomicU64) -> Result<u64, String> {
@@ -350,7 +359,6 @@ impl Handle {
             results: Mutex::new(IdMap::default()),
             cancel_flags: Mutex::new(IdMap::default()),
             buffers: Mutex::new(IdMap::default()),
-            next_buffer_id: AtomicU64::new(1),
             next_worker_id: AtomicU64::new(0),
             workers: Mutex::new(Vec::with_capacity(pool_size)),
             receiver,
