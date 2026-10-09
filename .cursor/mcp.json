@@ -18,6 +18,11 @@
       ],
       "command": "devmap",
       "type": "stdio"
+    },
+    "gitpulse": {
+      "args": [],
+      "command": "gitpulse-mcp",
+      "type": "stdio"
     }
   }
 }

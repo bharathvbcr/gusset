@@ -1,0 +1,16 @@
+---
+description: DevCouncil components, Manvi harness, GitPulse host integration
+alwaysApply: true
+---
+
+# Product stack
+
+DevCouncil is **components and modules**. **Manvi** wraps them into a coding-agent harness. **GitPulse** uses Manvi for policy, workbench, and agent hosting, and DevCouncil components (`devmap` CLI and crates, verification reads) for code intelligence.
+
+This application is integrated into that ecosystem:
+- **Code intelligence**: Navigated via DevMap (`devmap` CLI, MCP tools, store schema 26).
+- **Situation & coordination**: Monitored via GitPulse Insights (`gitpulse-mcp` protocol `2026-07-28`) for active changes, worktrees, and collision risks.
+- **Policy & agent harness**: Governed by Manvi policy ladders and agent execution.
+- **Tasks & gates**: DevCouncil tasks and verification are opt-in (`gates.mode`); interactive shell and writes are ungated.
+
+Prefer existing modules over independent reimplementations. Update one module at a time; do not assume the whole suite is required.
