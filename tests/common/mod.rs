@@ -13,9 +13,14 @@
 //! `crates/gusset-example/tests/*.rs`, and the pool unit tests in
 //! `crates/gusset/src/pool/tests/mod.rs`. A binary uses only some of these
 //! helpers, hence `dead_code`. The lib's `deny(unsafe_code)` reaches the copy
-//! the unit tests compile, hence `unsafe_code`.
+//! the unit tests compile, hence `unsafe_code`. `procfs` holds the
+//! `/proc/self` readers and the idle-thread baseline the resource-hygiene tests
+//! share; it exists on Linux only.
 
 #![allow(dead_code, unsafe_code)]
+
+#[cfg(target_os = "linux")]
+pub mod procfs;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

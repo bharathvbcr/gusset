@@ -469,56 +469,9 @@ fn respawn_and_failed_open_release_threads_and_mappings() {
         return;
     }
 
-    fn entries(path: &str) -> usize {
-        match std::fs::read_dir(path) {
-            Ok(d) => d.count(),
-            Err(e) => panic!("{path}: {e}"),
-        }
-    }
-    fn maps() -> Vec<String> {
-        match std::fs::read_to_string("/proc/self/maps") {
-            Ok(s) => s.lines().map(str::to_owned).collect(),
-            Err(e) => panic!("/proc/self/maps: {e}"),
-        }
-    }
-    // Bytes as well as lines. The kernel merges an anonymous mapping into
-    // a neighbour with the same protection, so a leak shaped like its
-    // neighbour adds no line at all: one leaked read-only page per
-    // lifetime passed the line count alone. The brk heap is malloc's,
-    // grows and trims with ordinary allocation, and is not a pool mapping.
-    fn mapped_bytes(maps: &[String]) -> usize {
-        maps.iter()
-            .filter(|line| !line.ends_with("[heap]"))
-            .map(|line| {
-                let range = line.split(' ').next().unwrap_or("");
-                let (lo, hi) = range.split_once('-').unwrap_or(("0", "0"));
-                match (usize::from_str_radix(lo, 16), usize::from_str_radix(hi, 16)) {
-                    (Ok(lo), Ok(hi)) if hi >= lo => hi - lo,
-                    _ => panic!("unparsable /proc/self/maps line: {line}"),
-                }
-            })
-            .sum()
-    }
-    let usage = || {
-        let maps = maps();
-        (
-            entries("/proc/self/fd"),
-            entries("/proc/self/task"),
-            maps.len(),
-            mapped_bytes(&maps),
-        )
-    };
-    let settled = |base: (usize, usize, usize, usize)| {
-        let mut now = usage();
-        for _ in 0..200 {
-            if now.0 <= base.0 && now.1 <= base.1 && now.2 <= base.2 && now.3 <= base.3 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            now = usage();
-        }
-        now
-    };
+    use common::procfs::{baseline, maps, settled, usage};
+    // Before any handle exists: the count the baseline waits to see again.
+    let idle_threads = usage().threads;
     let header = CallHeader {
         flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
         ..Default::default()
@@ -579,7 +532,7 @@ fn respawn_and_failed_open_release_threads_and_mappings() {
         lifetime();
         failed_open();
     }
-    let base = settled(usage());
+    let base = baseline(idle_threads);
     let base_maps = maps();
     for _ in 0..rounds {
         lifetime();
@@ -598,23 +551,16 @@ fn respawn_and_failed_open_release_threads_and_mappings() {
         .collect();
     eprintln!(
         "respawn hygiene over {rounds} lifetimes (3 respawns each, 1 after a failed \
-             spawn) and {rounds} partially spawned opens: (fds, threads, map lines, mapped \
-             bytes) baseline {base:?}, after respawns {after_respawns:?}, after failed opens \
-             {after_failed_opens:?}; mappings not in the baseline: {new_maps:#?}"
+             spawn) and {rounds} partially spawned opens: baseline {base:?}, after respawns \
+             {after_respawns:?}, after failed opens {after_failed_opens:?}; mappings not in the \
+             baseline: {new_maps:#?}"
     );
-    // Descriptors and threads return to exactly the baseline. Mappings may
-    // end below it, never above: glibc evicting a cached thread stack is
-    // a smaller address space, not a leak, and an equality check would
-    // fail on it.
-    let leaked = |after: (usize, usize, usize, usize)| {
-        after.0 != base.0 || after.1 != base.1 || after.2 > base.2 || after.3 > base.3
-    };
     assert!(
-        !leaked(after_respawns),
+        !after_respawns.leaked_since(base),
         "respawned workers leaked resources"
     );
     assert!(
-        !leaked(after_failed_opens),
+        !after_failed_opens.leaked_since(base),
         "partial opens leaked resources"
     );
 }

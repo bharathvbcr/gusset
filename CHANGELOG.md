@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased] - 2026-10-09 · The hygiene tests' baseline waits for the idle thread count
+
+No library, ABI or Go API change. Tests only.
+
+- **Resource-hygiene failures on Linux were a measurement race, not a leak (I4, I5).** CI run 37944107330 failed `resource_hygiene` with threads 3 then 2 and descriptors and mappings exact. The baseline was the first reading after the warm-up, kept once a second matched it. `/proc/self/task` lists a thread for a moment after `join` returns, so a just-joined worker or `gusset-close` joiner got counted in the baseline, and the next reading was one lower. A baseline that is too high would also hide a real one-thread leak. Both tests now record the thread count before any handle exists and take the baseline once `/proc/self/task` is back to it. If it is not back within 5 s, the baseline panics instead of measuring against a busy process. `respawn_and_failed_open_release_threads_and_mappings` had the same bug (the audit traces run 37860820816 to it). With a detached canary thread exiting 1.5 s after the warm-up, both tests fail 10/10 on the old baseline and pass 10/10 on the new one. `hygiene_baseline` (new binary) keeps that canary as a test.
+- **One owner for the `/proc/self` readers.** `count_dir`, `maps`, `mapped_bytes`, `Usage`, `baseline` and `settled` live in `tests/common/procfs.rs` (Linux only). Before, `resource_hygiene.rs` and the pool unit tests each had a copy. `drain_logs_boundaries.rs` now uses the log-ring drains in `tests/props/mod.rs` instead of its own `drain`/`drain_all`.
+- **`write_completion_gives_up_on_a_full_pipe_once_the_handle_closes` starts its clock before it spawns the 200 ms closer.** The closer could begin sleeping before `spawn` returned, so a slow spawn measured less than 200 ms even though the writer waited the whole time. The 2026-10-09 audit reports one such failure under TSan; a 150 ms delay injected after the spawn fails the old order and passes the new one.
+
 ## [Unreleased] - 2026-10-09 · Buffer ids are unique across handles
 
 From the 2026-10-09 audit. No export signature, ABI or Go API change.
