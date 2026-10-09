@@ -1,5 +1,7 @@
 # RFC: more than one Rust staticlib per Go binary (R14)
 
+[Documentation Hub](README.md) · [Adoption Guide §1b](adoption.md#1b-an-engine-that-cannot-join-the-umbrella) · [Supported Platforms](platforms.md)
+
 Status: **accepted**, `DECISIONS.md` 2026-10-08. Source: GP-FEAT-003.
 
 R14 used to read: *exactly one Rust `staticlib` per Go binary; adopters with

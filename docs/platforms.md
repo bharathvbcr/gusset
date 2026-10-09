@@ -1,5 +1,7 @@
 # Supported platforms
 
+[Documentation Hub](README.md) · [Why Gusset is Needed](why.md) · [Adoption Guide](adoption.md)
+
 Gusset is **unix-only**. `crates/gusset/src/lib.rs` fails the build with a named
 error on any non-unix target rather than letting it fail deep inside `pool::sys`
 with a pile of missing `libc` symbols.

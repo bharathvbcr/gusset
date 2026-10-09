@@ -1,5 +1,7 @@
 # Why Gusset is Needed: The Runtime Impedance Mismatch
 
+[Documentation Hub](README.md) · [Should You Adopt Gusset?](choosing.md) · [Adoption Guide](adoption.md)
+
 "Bindings exist" is not "this runs in production without taking the Go process down."
 
 Foreign Function Interface (FFI) generators like `cbindgen`, `cgo`, and `uniffi-bindgen-go` solve **type marshalling** and **function calling conventions**. They do not solve—and explicitly do not own—what happens when Go and Rust disagree on thread management, signal handling, memory limits, panic recovery, stack sizing, and monotonic clocks inside a single process.
@@ -187,7 +189,8 @@ sequenceDiagram
 | **Memory Accounting** | Go blind to Rust heap | Go blind to Rust heap | Pre-computed buffers | **Integrated**: `Counting<A>` + `AdviseMemoryLimit` |
 | **GC Pointer Safety** | Easy to violate R6 | Manages copies | Forces `GODEBUG=cgocheck=0` | **Strict**: Dual-path buffer model (R6 & R16 verified) |
 | **State Corruption** | Cascades or deadlocks | Unhandled | Unhandled | **Bulkhead**: Atomic handle poisoning (`ErrPoisoned`) |
-| **ABI Drift Detection** | Undetected heap corruption | Checked via hash | Unchecked | **ABI v2**: Verifies version, sizes & alignments at `init()` |
+| **ABI Drift Detection** | Undetected heap corruption | Checked via hash | Unchecked | **ABI v2 + Fields**: Verifies layout, sizes, alignments & named field offsets at `init()` |
+| **Multi-Engine Staticlibs** | Duplicate std symbols or silent std sharing | Unhandled | Unhandled | **R14 Sealed**: `gussetseal` isolates secondary archives; one Gusset runtime |
 
 ---
 

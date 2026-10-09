@@ -1,3 +1,23 @@
+// Package gusset implements the production runtime contract for running native
+// Rust engines inside Go services.
+//
+// Gusset provides the in-process runtime contract and hardening plate between Go
+// and Rust in production: a zero-panic firewall, bounded concurrency bulkhead,
+// cooperative deadline and cancellation propagation, handle poisoning, ABI
+// layout verification, allocator accounting, and completion notifications via
+// a shared-memory ring and non-blocking pipe.
+//
+// It is designed for workloads where a Go service embeds compute-intensive Rust
+// (tokenizers, parsers, search engines, vector indexes, crypto verifiers, or
+// ML kernels) in-process without risking process aborts from double panics,
+// thread exhaustion under concurrent request spikes, 128 KiB stack overflows
+// in Docker/Alpine (musl) containers, or silent container OOM kills due to
+// Go GC blindness to the foreign heap.
+//
+// Gusset is not a foreign function interface binding generator (like cbindgen
+// or uniffi-bindgen-go), not a cgo-free assembly trampoline (like purego or
+// asmcgocall), and not an out-of-process IPC bus. It is an in-process hardening
+// layer.
 package gusset
 
 import (

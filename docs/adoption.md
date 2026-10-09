@@ -1,5 +1,7 @@
 # Adopting Gusset
 
+[Documentation Hub](README.md) · [Should You Adopt Gusset?](choosing.md) · [Archive Sealing (R14)](rfc-r14.md) · [Supported Platforms](platforms.md)
+
 Everything here was derived by adopting Gusset in a real Go service that drives a
 real third-party Rust crate, not by writing down what ought to work. The worked
 example is DevCouncil's `go_orchestrator` and its `dc-glob` crate; the numbers at

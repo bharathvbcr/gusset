@@ -1,12 +1,26 @@
 # Gusset
 
-[![Website](https://img.shields.io/badge/website-gusset.vbcr.dev-B91C1C?style=flat&logo=safari&logoColor=white)](https://gusset.vbcr.dev/)
+<p align="center">
+  <a href="https://gusset.vbcr.dev/"><img src="https://img.shields.io/badge/website-gusset.vbcr.dev-B91C1C?style=flat&logo=safari&logoColor=white" alt="Website"></a>
+  <a href="https://github.com/bharathvbcr/gusset/actions/workflows/matrix.yml"><img src="https://github.com/bharathvbcr/gusset/actions/workflows/matrix.yml/badge.svg" alt="CI Matrix"></a>
+  <a href="https://pkg.go.dev/github.com/bharathvbcr/gusset"><img src="https://pkg.go.dev/badge/github.com/bharathvbcr/gusset.svg" alt="Go Reference"></a>
+  <a href="https://github.com/bharathvbcr/gusset/releases"><img src="https://img.shields.io/github/v/release/bharathvbcr/gusset?include_prereleases&sort=semver" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
+  <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20(glibc%20%26%20musl)-lightgrey" alt="Platforms">
+  <img src="https://img.shields.io/badge/stack-Go%201.26+%20%7C%20Rust%201.97+%20%7C%20C%20ABI-orange" alt="Tech Stack">
+</p>
 
-The runtime contract for running a Rust engine inside a Go service: panic firewall, bounded concurrency, deadlines, poisoned handles, ABI verification, allocator accounting, and the CI matrix that proves them.
+<p align="center">
+  <a href="https://gusset.vbcr.dev/"><strong>Explore the Live Interactive Architecture &amp; Benchmark Showcase (gusset.vbcr.dev) &rarr;</strong></a>
+</p>
 
-Gusset is **not** a binding generator, **not** a cgo-free calling path, and **not** an IPC transport. It is the hardening plate between Go and Rust in production.
+**The production runtime contract for running native Rust engines inside Go services.**
 
-> **Why Gusset?** Foreign Function Interface generators (`cgo`, `cbindgen`, `uniffi`) solve type marshalling, but leave the process vulnerable to thread exhaustion (>10k threads), musl 128 KiB stack overflows in Docker, double-panic `SIGABRT` aborts, and container OOM kills. See [Why Gusset is Needed](docs/why.md) for the complete engineering rationale and runtime collision analysis.
+Gusset provides the hardening layer between "bindings exist" and "this runs in production without taking the Go process down." It owns the zero-panic firewall, bounded concurrency bulkhead, deadline and cancellation propagation, poisoned handle containment, ABI layout verification, allocator accounting, and the comprehensive multi-OS CI matrix that proves them.
+
+Gusset is **not** a binding generator (`cbindgen`, `uniffi-bindgen-go`), **not** a cgo-free assembly trampoline (`purego`, `asmcgocall`), and **not** an out-of-process IPC bus. It is the in-process hardening plate between Go and Rust in production.
+
+> **Why Gusset?** Foreign Function Interface generators solve type marshalling, but leave the process vulnerable to thread exhaustion (>10,000 threads under load), musl 128 KiB thread stack overflows in Docker/Alpine containers, double-panic `SIGABRT` aborts, and silent container OOM kills (`GOMEMLIMIT` blindness). See [Why Gusset is Needed](docs/why.md) for the complete engineering rationale and runtime collision analysis.
 
 ---
 
@@ -76,6 +90,24 @@ flowchart TD
 4. **(I4) Bounded Concurrency:** In-flight calls per handle never exceed the configured pool size. Callers park on the Go semaphore, never on an OS thread in cgo. Pool size is capped at `gusset.MaxPoolSize` (1024); a larger request is refused, not clamped. On Linux the completion pipe is grown to hold one inline record per worker, or one 8-byte ticket per worker when it cannot, and `Open` is refused only when even the tickets will not fit. `Open` attaches a completion ring by default, so steady-state records live there and the pipe carries wake tokens and overflow.
 5. **(I5) Rust-Owned Stacks:** Heavy Rust work runs on Rust-spawned threads with an explicit 8 MiB stack, never on the caller's g0 stack (musl's default is 128 KiB). Each worker installs its own guard-paged `sigaltstack` (at least 64 KiB, larger where the kernel's signal frame needs it) so Go's signal handler can run on a Rust thread, and a failure to do so is logged rather than silently accepted. The alternate stack does not make a stack overflow survivable: the process still exits. Workers also block SIGPIPE, so a write to a closed pipe returns EPIPE instead of killing the process.
 6. **(I6) ABI Verification:** Go `init()` verifies ABI version, struct sizes, alignments, and the offset and size of every named field against Rust before the process starts serving — for all four `#[repr(C)]` types that cross the boundary, `AllocStats` included.
+
+---
+
+## Documentation & Guides
+
+| Guide | Description |
+| :--- | :--- |
+| **[Documentation Hub](docs/README.md)** | Full technical documentation index, architecture overview, and reading paths. |
+| **[Why Gusset is Needed](docs/why.md)** | The six runtime collisions between Go and Rust under production load, failure modes, and comparison matrix. |
+| **[Should You Adopt Gusset?](docs/choosing.md)** | Workload thresholds, measured crossover curves, thread pressure analysis, and when to use raw cgo. |
+| **[Adoption Guide](docs/adoption.md)** | Production adoption recipe, umbrella crate pattern, build tags, module-cache layout, and DevCouncil case study. |
+| **[Plotted Benchmarks](docs/benchmarks.md)** | Certified benchmark gallery, darwin and Linux VM comparison, methodology, and provenance gates. |
+| **[Production Integrations](docs/integrations.md)** | Real-world usage in DevCouncil (`dc-glob`), Manvi, and GitPulse, plus warm vs. cold process costs. |
+| **[Supported Platforms](docs/platforms.md)** | Unix target matrix (darwin, linux glibc/musl), the 128 KiB stack trap, and Windows port prerequisites. |
+| **[Static Archive Sealing (R14)](docs/rfc-r14.md)** | Multi-engine staticlib isolation with `tools/gussetseal` to prevent duplicate `std` collisions. |
+| **[Dynamic Linking & Codesigning](docs/dylib.md)** | `cdylib` builds, macOS hardened runtime, and Gatekeeper signing requirements. |
+| **[Out-of-Process IPC (Phase 4)](docs/ipc.md)** | Hardware GPU driver reset crash isolation (`gusset-ipc`) and `internal/isolate` prototype. |
+| **[Architecture Plan & Invariants (PLAN.md)](docs/PLAN.md)** | Phased milestones, core invariants (I1–I6), and hard boundary constraints (R1–R16). |
 
 ---
 
@@ -455,6 +487,22 @@ Gusset's design builds upon insights, hard-won lessons, and patterns from prior 
 - **[Stoolap](https://stoolap.io/blog/2026/04/08/calling-a-rust-library-from-go-with-cgo-disabled/)**: Established benchmark discipline demonstrating that engine compute, rather than FFI trampolines, dominates real workloads.
 - **[Tokio](https://tokio.rs/)**: Influenced Gusset's cooperative flag-based cancellation model across FFI rather than dropped futures.
 - **[Hystrix / resilience4j](https://github.com/Netflix/Hystrix)**: Inspired the in-process bulkhead pattern where caught panics latch handle poisoning (`ErrPoisoned`) to prevent cascading process failures.
+
+---
+
+## Topics, Tags & SEO
+
+### GitHub Topics & Tags
+`cgo` · `rust` · `golang` · `ffi` · `runtime-contract` · `concurrency` · `bulkhead` · `panic-firewall` · `zero-copy` · `memory-safety` · `systems-programming` · `devops` · `infrastructure` · `shared-memory` · `ring-buffer` · `musl` · `cross-language`
+
+### Repository About Description
+> Production runtime contract for running Rust engines inside Go services: panic firewall, bounded concurrency, deadlines, poisoned handles, ABI verification, and allocator accounting.
+
+### Search Engine Discovery & Indexing Keywords
+- **Go–Rust Interoperability in Production**: Calling Rust from Go safely, cgo best practices, cgo thread limits, cgo performance under load, in-process foreign engine hosting.
+- **Resilience & Bulkhead Patterns**: Preventing `fatal error: runtime: program exceeds 10000-thread limit`, Rust panic recovery without `SIGABRT`, `catch_unwind` FFI safety, handling embedded NUL bytes in panic payloads, permanent handle poisoning (`ErrPoisoned`).
+- **Memory & Resource Management**: Container OOM-kill prevention with `GOMEMLIMIT` and `debug.SetMemoryLimit`, zero-copy buffer passing between Go and Rust, 64-byte aligned buffers, allocator accounting with `Counting<A>` and `AdviseMemoryLimit`.
+- **Container Reliability**: Alpine Linux musl 128 KiB thread stack crash prevention, explicit 8 MiB worker stacks, guard-paged `sigaltstack`, staticlib linker conflicts and duplicate `rust_eh_personality` resolution via `gussetseal`.
 
 ---
 

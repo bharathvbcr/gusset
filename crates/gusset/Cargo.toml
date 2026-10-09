@@ -4,8 +4,14 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Go-Rust runtime contract: panic firewall, bounded concurrency, deadlines, poisoned handles, ABI verification"
+description = "Production runtime contract for running Rust engines inside Go services: panic firewall, bounded concurrency, deadlines, poisoned handles, ABI verification, allocator accounting"
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+keywords = ["cgo", "rust", "golang", "ffi", "concurrency"]
+categories = ["api-bindings", "os::unix-apis", "concurrency"]
 # Not a native library link: `links` is what lets the build script publish
 # `DEP_GUSSET_ALLOCATOR_API` to dependents, so an adopter gates its own
 # `BufferAlloc` code on exactly the answer this crate compiled with.

@@ -11,6 +11,9 @@ edition = "2021"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"
 authors = ["Bharath Chandra"]
+repository = "https://github.com/bharathvbcr/gusset"
+homepage = "https://gusset.vbcr.dev"
+documentation = "https://docs.rs/gusset"
 
 [profile.dev]
 panic = "unwind"

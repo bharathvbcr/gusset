@@ -1,5 +1,7 @@
 # Should you adopt Gusset?
 
+[Documentation Hub](README.md) · [Why Gusset is Needed](why.md) · [Adoption Guide](adoption.md) · [Benchmarks, Plotted](benchmarks.md)
+
 Short answer: **only if your Rust calls are slow enough and concurrent enough**,
 and only as a pinned dependency you are willing to read. This page gives you the
 two numbers that decide it, what each adoption tier actually has to do

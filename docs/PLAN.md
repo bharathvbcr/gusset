@@ -1,5 +1,7 @@
 # Go–Rust Runtime Contract: Build Plan
 
+[Documentation Hub](README.md) · [Why Gusset is Needed](why.md) · [Adoption Guide](adoption.md)
+
 As of 2026-09-20. Author: Bharath Chandra. Living copy: https://claude.ai/code/artifact/e46eb30a-a291-448c-9cdb-1b205044239e
 
 ## Thesis and scope
@@ -42,7 +44,7 @@ The Go package never parks an OS thread on Rust work: a call submits to the Rust
 | Component | Language | Responsibilities | Public surface (v0.1) |
 | --- | --- | --- | --- |
 | Runtime crate | Rust | `ffi_guard_code`, `FfiStatus` (ptr+len, never NUL-terminated), `gusset_status_free`, panic hook with location, ABI layout export, named field offsets, worker pool with explicit 8 MiB stack size, allocator stats, timeout and cancel checks | 17 exported functions, 4 `#[repr(C)]` types (`CallHeader`, `FfiStatus`, `AbiLayout`, `AllocStats`) |
-| Runtime package | Go | `Handle` with semaphore, timeout, poison state; `init()` ABI check including named field offsets; completion ring polled by the dispatch goroutine, with an `os.Pipe` whose write end Rust owns for wake tokens and overflow; `noescape` and `nocallback` on every export; allocator stats bridged to `debug.SetMemoryLimit` | `Open`, `Close`, `Call`, `CallBuffer`, `Submit`, `Wait` (and `WaitBuffer`), `NewBuffer` (with `Buffer.Free`), `Shutdown`, `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs` (12 public entry points; `WaitBuffer`, `CallBuffer`, and `Shutdown` logged in `DECISIONS.md`) |
+| Runtime package | Go | `Handle` with semaphore, timeout, poison state; `init()` ABI check including named field offsets; completion ring polled by the dispatch goroutine, with an `os.Pipe` whose write end Rust owns for wake tokens and overflow; `noescape` and `nocallback` on every export; allocator stats bridged to `debug.SetMemoryLimit` | `Open`, `Close`, `Call`, `CallBuffer`, `Submit`, `Wait` (and `WaitBuffer`), `Discard`, `NewBuffer` (with `Buffer.Free`), `Shutdown`, `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs` (13 public entry points; `WaitBuffer`, `CallBuffer`, and `Shutdown` logged in `DECISIONS.md` 2026-09-20; `Discard` logged in `DECISIONS.md` 2026-10-07) |
 | Header | C | Hand-maintained `internal/ffi/gusset.h`; verified by `tests/header_match.rs` parameter and return types against Rust exports | one `.h` file |
 | Example engine | Rust + Go | Reference engine that exercises every failure mode: panic, NUL in message, deadline miss, large allocation, deep recursion | reference for adopters (`crates/gusset-example`) |
 

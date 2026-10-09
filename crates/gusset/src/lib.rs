@@ -1,7 +1,16 @@
 //! Gusset: The Go-Rust runtime contract.
 //!
-//! Provides the panic firewall, bounded concurrency, deadlines, poisoned handles,
-//! ABI layout verification, allocator accounting, and cross-boundary signal safety.
+//! Gusset provides the in-process runtime contract and hardening plate for running
+//! native Rust engines inside Go services in production.
+//!
+//! It owns the zero-panic firewall (`catch_unwind` with embedded NUL safety),
+//! bounded concurrency worker pool (explicit 8 MiB stacks, `sigaltstack` protection,
+//! and SIGPIPE blocking), cooperative deadline and cancellation propagation,
+//! poisoned handle state machine, ABI layout and named-field offset verification,
+//! non-allocating allocator accounting (`Counting` and `AllocStats`), and
+//! completion notification (shared-memory completion ring with non-blocking pipe wake tokens).
+//!
+//! Gusset is unix-only by construction (linux-gnu, linux-musl, macos darwin).
 
 #![deny(
     unsafe_code,

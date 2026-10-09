@@ -1,4 +1,6 @@
-# Dynamic Library and Codesigning Guide (`docs/dylib.md`)
+# Dynamic Library and Codesigning Guide
+
+[Documentation Hub](README.md) · [Adoption Guide](adoption.md) · [Supported Platforms](platforms.md)
 
 Gusset links statically by default (`crate-type = ["staticlib"]`) across all platforms, which eliminates runtime dynamic loader configuration (`LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`), DLL search path hijacking, and dynamic linker version mismatch.
 

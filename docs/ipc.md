@@ -1,5 +1,7 @@
 # Phase 4: Out-of-Process Crash Isolation Architecture (`gusset-ipc`)
 
+[Documentation Hub](README.md) · [Why Gusset is Needed](why.md) · [Architecture Plan (PLAN.md)](PLAN.md)
+
 As of 2026-09-20.
 
 ## Overview

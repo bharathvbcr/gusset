@@ -1,5 +1,7 @@
 # Gusset in the other apps: DevCouncil, Manvi, GitPulse
 
+[Documentation Hub](README.md) · [Adoption Guide](adoption.md) · [Benchmarks, Plotted](benchmarks.md)
+
 Status as of 2026-09-27. The numbers were measured on a Linux VM and are listed at
 the end.
 

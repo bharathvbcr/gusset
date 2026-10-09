@@ -1,5 +1,7 @@
 # Benchmarks, plotted
 
+[Documentation Hub](README.md) · [Should You Adopt Gusset?](choosing.md) · [Adoption Guide](adoption.md)
+
 Every chart here is drawn by [`tools/benchplot`](../tools/benchplot) from raw
 `go test -bench` output committed under [`bench/results/`](../bench/results), and
 `make docs-check` fails if a chart and its data disagree. The values are printed
