@@ -7,7 +7,8 @@
 //! completion ring. `close` must give every one of them back, and so must each
 //! way `open` can fail. This drives thousands of handles through the success
 //! and failure paths and checks that `/proc/self/fd`, `/proc/self/task` and
-//! `/proc/self/maps` return to the baseline taken after a warm-up.
+//! `/proc/self/maps` return to the baseline taken after a warm-up, once the
+//! thread count is back to what it was before the first handle opened.
 //!
 //! Linux only (it reads `/proc/self`). One test in its own binary, so no other
 //! test's threads or descriptors move the counts while it measures.
@@ -17,77 +18,15 @@
 
 use gusset::header::{CallHeader, GUSSET_FLAG_DIAGNOSTIC_ENGINE};
 use gusset::pool::{Handle, MAX_POOL_SIZE};
-use std::time::Duration;
 
 #[path = "../../../tests/common/mod.rs"]
 mod common;
+use common::procfs::{baseline, maps, settled, usage, Usage};
 use common::{make_pipe, read_ticket};
 
 fn close(fd: i32) {
     unsafe {
         libc::close(fd);
-    }
-}
-
-fn count_dir(path: &str) -> usize {
-    match std::fs::read_dir(path) {
-        Ok(d) => d.count(),
-        Err(e) => panic!("read {path}: {e}"),
-    }
-}
-
-fn maps() -> Vec<String> {
-    match std::fs::read_to_string("/proc/self/maps") {
-        Ok(s) => s.lines().map(str::to_owned).collect(),
-        Err(e) => panic!("read /proc/self/maps: {e}"),
-    }
-}
-
-/// Bytes as well as lines. The kernel merges an anonymous mapping into a
-/// neighbour with the same protection, so a leak shaped like its neighbour
-/// adds no line at all. The brk heap is malloc's, grows and trims with
-/// ordinary allocation, and is not a handle's mapping.
-fn mapped_bytes(maps: &[String]) -> usize {
-    maps.iter()
-        .filter(|line| !line.ends_with("[heap]"))
-        .map(|line| {
-            let range = line.split(' ').next().unwrap_or("");
-            let (lo, hi) = range.split_once('-').unwrap_or(("0", "0"));
-            match (usize::from_str_radix(lo, 16), usize::from_str_radix(hi, 16)) {
-                (Ok(lo), Ok(hi)) if hi >= lo => hi - lo,
-                _ => panic!("unparsable /proc/self/maps line: {line}"),
-            }
-        })
-        .sum()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Usage {
-    fds: usize,
-    threads: usize,
-    maps: usize,
-    mapped_bytes: usize,
-}
-
-impl Usage {
-    /// Descriptors and threads come back exactly. Mappings may end below the
-    /// baseline, never above: glibc evicting a cached thread stack shrinks the
-    /// address space without anything leaking.
-    fn leaked_since(self, base: Usage) -> bool {
-        self.fds != base.fds
-            || self.threads != base.threads
-            || self.maps > base.maps
-            || self.mapped_bytes > base.mapped_bytes
-    }
-}
-
-fn usage() -> Usage {
-    let maps = maps();
-    Usage {
-        fds: count_dir("/proc/self/fd"),
-        threads: count_dir("/proc/self/task"),
-        maps: maps.len(),
-        mapped_bytes: mapped_bytes(&maps),
     }
 }
 
@@ -106,20 +45,6 @@ fn pin_malloc_arenas() {
         let ok = unsafe { libc::mallopt(libc::M_ARENA_MAX, 1) };
         assert_eq!(ok, 1, "mallopt(M_ARENA_MAX, 1) failed");
     }
-}
-
-/// Thread exit is asynchronous to `join` returning only in the kernel's
-/// bookkeeping of `/proc/self/task`; give it a moment before comparing.
-fn settled(base: Usage) -> Usage {
-    let mut now = usage();
-    for _ in 0..200 {
-        if !now.leaked_since(base) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-        now = usage();
-    }
-    now
 }
 
 /// One full lifetime: open, run jobs on every worker, attach a ring (and be
@@ -171,6 +96,8 @@ fn handles_release_descriptors_threads_and_mappings() {
         .and_then(|v| v.into_string().ok())
         .and_then(|v| v.parse::<usize>().ok());
     let rounds = quick.unwrap_or(2000);
+    // Before any handle exists: the count the baseline waits to see again.
+    let idle_threads = usage().threads;
     pin_malloc_arenas();
 
     // Warm-up: glibc's cache of freed thread stacks is process-lifetime and
@@ -179,7 +106,7 @@ fn handles_release_descriptors_threads_and_mappings() {
         one_lifetime(4, false);
         one_lifetime(4, true);
     }
-    let base = settled(usage());
+    let base = baseline(idle_threads);
     let base_maps = maps();
 
     // What one open handle holds, so the report shows what was released.

@@ -12,27 +12,15 @@
 
 #![allow(unsafe_code)]
 
-use gusset::ffi::{gusset_drain_logs, log_event};
+use gusset::ffi::log_event;
 
-fn drain(cap: usize) -> Vec<u8> {
-    let mut buf = vec![0u8; cap];
-    let mut written = usize::MAX;
-    unsafe { gusset_drain_logs(buf.as_mut_ptr(), buf.len(), &mut written) };
-    assert!(
-        written <= cap,
-        "drain reported {written} bytes into a {cap}-byte buffer"
-    );
-    buf.truncate(written);
-    buf
-}
+mod props;
 
-fn drain_all() {
-    while !drain(1 << 16).is_empty() {}
-}
+use props::{drain_everything, drain_real as drain};
 
 #[test]
 fn drain_returns_whole_lines_and_whole_characters() {
-    drain_all();
+    drain_everything();
 
     // 3-byte characters: a cut at an arbitrary byte count lands mid-character
     // two times out of three.

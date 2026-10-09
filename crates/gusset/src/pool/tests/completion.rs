@@ -35,6 +35,10 @@ fn write_completion_gives_up_on_a_full_pipe_once_the_handle_closes() {
     let fd = AtomicI32::new(w);
     let closed = Arc::new(AtomicBool::new(false));
 
+    // Before the spawn: the closer's 200 ms starts when it runs, which can be
+    // before `spawn` returns here, so a clock started after it could read
+    // less than 200 ms with the writer having waited the whole time.
+    let started = Instant::now();
     let closer = {
         let closed = Arc::clone(&closed);
         thread::spawn(move || {
@@ -42,7 +46,6 @@ fn write_completion_gives_up_on_a_full_pipe_once_the_handle_closes() {
             closed.store(true, Ordering::Release);
         })
     };
-    let started = Instant::now();
     let result = write_completion(&lock, &fd, &closed, 42, &42u64.to_ne_bytes());
     let elapsed = started.elapsed();
     closer.join().must("closer");

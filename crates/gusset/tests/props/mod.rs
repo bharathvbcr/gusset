@@ -2,7 +2,8 @@
 //! the seeded-loop tests in this directory (`boundary_props.rs`,
 //! `log_ring_props.rs`) and the libFuzzer targets under `fuzz/`, which include
 //! this file by path. Every checker takes raw fuzz bytes and panics on a
-//! violated property.
+//! violated property. `drain_logs_boundaries.rs` takes its log-ring drains
+//! from here too.
 //!
 //! What crosses the boundary here, and why each property matters:
 //!
@@ -192,7 +193,9 @@ impl LogModel {
     }
 }
 
-fn drain_real(cap: usize) -> Vec<u8> {
+/// One `gusset_drain_logs` into a `cap`-byte buffer: the bytes it reported
+/// writing, after checking it reported no more than `cap`.
+pub fn drain_real(cap: usize) -> Vec<u8> {
     let mut buf = vec![0xEEu8; cap.max(1)];
     let mut written = usize::MAX;
     unsafe { gusset_drain_logs(buf.as_mut_ptr(), cap, &mut written) };
@@ -201,7 +204,8 @@ fn drain_real(cap: usize) -> Vec<u8> {
     buf
 }
 
-fn drain_everything() {
+/// Empties the process-global log ring.
+pub fn drain_everything() {
     while !drain_real(1 << 17).is_empty() {}
 }
 
