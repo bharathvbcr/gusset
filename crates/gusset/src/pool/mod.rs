@@ -173,7 +173,7 @@ pub enum JobResult {
 /// Every mutex here guards a plain collection, so a panic while one is held leaves
 /// the collection structurally valid. *Skipping* the guarded operation does not:
 /// a dropped result leaves the Go caller waiting on that ticket forever, a skipped
-/// `sender.take()` leaves `close` blocked in `join`, and a lost cancel flag disables
+/// `cancel_all` leaves `close` blocked in `join`, and a lost cancel flag disables
 /// cancellation without telling anyone. Recovering is strictly safer than treating
 /// "could not lock" the same as "done".
 fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -194,7 +194,11 @@ pub struct Handle {
     pipe_write_lock: Mutex<()>,
     poisoned: AtomicBool,
     closed: AtomicBool,
-    sender: Mutex<Option<QueueSender<WorkUnit>>>,
+    /// No mutex of its own: `close` closes the queue, whose push refuses a
+    /// closed queue under the queue's lock. Wrapping it in one serialized every
+    /// submit behind the cancel-flag and queue locks it held, and under
+    /// parallel load that was most of the time Rust threads waited on a mutex.
+    sender: QueueSender<WorkUnit>,
     results: Mutex<IdMap<u64, JobResult>>,
     cancel_flags: Mutex<IdMap<u64, Arc<AtomicBool>>>,
     buffers: Mutex<IdMap<u64, BufferSlot>>,
@@ -355,7 +359,7 @@ impl Handle {
             pipe_write_lock: Mutex::new(()),
             poisoned: AtomicBool::new(false),
             closed: AtomicBool::new(false),
-            sender: Mutex::new(Some(sender)),
+            sender,
             results: Mutex::new(IdMap::default()),
             cancel_flags: Mutex::new(IdMap::default()),
             buffers: Mutex::new(IdMap::default()),
@@ -475,37 +479,30 @@ impl Handle {
             input_buffer_id: buffer_id,
         };
 
-        // try_send under the sender lock. `send` blocks when the queue is full,
-        // and holding the lock across that block stops `close` from disconnecting
-        // the workers. Cloning the sender and sending after the lock drops keeps
-        // the channel alive across `close`, so `join` waits on a recv that will
-        // not see a disconnect. A full queue is a contract break (the Go
-        // semaphore is the bound); refuse it instead of blocking.
+        // The flag goes in before the send, and comes out again if the send is
+        // refused, so a failed submit leaves no flag for `in_flight` to count.
+        // A queued unit's flag is therefore always registered, and `close`,
+        // which closes the queue before `cancel_all`, cancels every unit that
+        // made it in. A full queue is a contract break (the Go semaphore is the
+        // bound): `try_send` refuses it rather than blocking the cgo thread.
         {
-            let sender_guard = lock_recover(&self.sender);
-            let sender = match sender_guard.as_ref() {
-                Some(s) => s,
-                None => return Err("handle is closed".to_string()),
-            };
-            {
-                let mut flags = lock_recover(&self.cancel_flags);
-                flags.insert(ticket, Arc::clone(&cancel_flag));
-                // begin_shutdown sets SHUTTING_DOWN and then cancels every
-                // flag under this lock. A submit that passed the check above
-                // before the store, but inserts after that cancel_all, would
-                // run uncancelled and eat the whole drain budget. Under the
-                // lock, the store is visible here if cancel_all already ran.
-                if is_shutting_down() {
-                    cancel_flag.store(true, Ordering::Release);
-                }
+            let mut flags = lock_recover(&self.cancel_flags);
+            flags.insert(ticket, Arc::clone(&cancel_flag));
+            // begin_shutdown sets SHUTTING_DOWN and then cancels every
+            // flag under this lock. A submit that passed the check above
+            // before the store, but inserts after that cancel_all, would
+            // run uncancelled and eat the whole drain budget. Under the
+            // lock, the store is visible here if cancel_all already ran.
+            if is_shutting_down() {
+                cancel_flag.store(true, Ordering::Release);
             }
-            if let Err(err) = sender.try_send(unit) {
-                lock_recover(&self.cancel_flags).remove(&ticket);
-                return Err(match err {
-                    PushError::Full(_) => "submission queue is full".to_string(),
-                    PushError::Closed(_) => "handle is closed".to_string(),
-                });
-            }
+        }
+        if let Err(err) = self.sender.try_send(unit) {
+            lock_recover(&self.cancel_flags).remove(&ticket);
+            return Err(match err {
+                PushError::Full(_) => "submission queue is full".to_string(),
+                PushError::Closed(_) => "handle is closed".to_string(),
+            });
         }
 
         Ok(ticket)

@@ -132,9 +132,9 @@ impl Handle {
             return Ok(());
         }
 
-        // 1. Disconnect sender so workers unblock from pop(). Skipping this
+        // 1. Close the queue so workers unblock from pop(). Skipping this
         // would leave every worker parked forever and hang the join.
-        lock_recover(&self.sender).take();
+        self.sender.close();
 
         // 2. Signal cooperative cancellation to all active jobs.
         self.cancel_all();

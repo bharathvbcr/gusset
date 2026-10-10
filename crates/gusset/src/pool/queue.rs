@@ -214,14 +214,21 @@ impl<T> JobQueue<T> {
     }
 }
 
-/// The sending half. Dropping it closes the queue, like dropping the last
-/// `SyncSender`: workers drain what is queued, then see `None`.
+/// The sending half. Closing it, or dropping it, closes the queue, like
+/// dropping the last `SyncSender`: workers drain what is queued, then see
+/// `None`, and every later `try_send` is refused as [`PushError::Closed`].
 pub struct QueueSender<T>(Arc<JobQueue<T>>);
 
 impl<T> QueueSender<T> {
     /// Queues `item` without blocking.
     pub fn try_send(&self, item: T) -> Result<(), PushError<T>> {
         self.0.push(item)
+    }
+
+    /// Closes the queue. Idempotent. `push` reads `closed` under the state
+    /// lock, so a send either queued its unit before this or is refused.
+    pub fn close(&self) {
+        self.0.close();
     }
 }
 

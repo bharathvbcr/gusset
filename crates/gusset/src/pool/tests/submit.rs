@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// behind. `in_flight` is the flag count; `gusset_shutdown` waits on it, so a
 /// leaked flag after a failed send makes a clean drain impossible.
 ///
-/// The production path inserts the flag and then looks up the sender. If the
-/// sender is already gone, that insert is a leak the worker will never clear.
+/// The production path inserts the flag and then sends. If the queue is
+/// already closed, that insert is a leak the worker will never clear unless
+/// the refused send takes it back out.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn submit_does_not_leave_a_cancel_flag_when_the_sender_is_gone() {
@@ -22,7 +23,7 @@ fn submit_does_not_leave_a_cancel_flag_when_the_sender_is_gone() {
         Err(e) => panic!("open failed: {}", e),
     };
 
-    lock_recover(&handle.sender).take();
+    handle.sender.close();
 
     let header = CallHeader {
         flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
@@ -444,6 +445,95 @@ fn submit_rejects_inline_input_over_4kib() {
     }
 
     handle.close().must("close");
+    // SAFETY: the read end is still owned by this test; close() took the write end.
+    unsafe {
+        libc::close(r);
+    }
+}
+
+/// Submits racing `close` either queue a unit the workers finish, or are
+/// refused and leave no cancel flag behind (I3, I4).
+///
+/// `submit` registers the flag before its send and takes it back out when the
+/// send is refused; `close` closes the queue before it cancels every flag and
+/// joins the workers. Whatever the interleaving, once `close` has returned no
+/// flag is left for `in_flight` (which `gusset_shutdown` waits on) and no
+/// later submit is accepted.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn submits_racing_close_leave_no_flag_and_none_is_accepted_after() {
+    let (r, w) = make_pipe();
+    let handle = match Handle::open(2, w) {
+        Ok(h) => h,
+        Err(e) => panic!("open failed: {}", e),
+    };
+    // SAFETY: fcntl on the read end this test owns. Completions are drained so
+    // a full pipe never holds a worker in its write backoff.
+    unsafe {
+        libc::fcntl(r, libc::F_SETFL, libc::O_NONBLOCK);
+    }
+    let header = CallHeader {
+        flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+        ..Default::default()
+    };
+    let closed = std::sync::atomic::AtomicBool::new(false);
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let accepted_after = AtomicU64::new(0);
+    let accepted = AtomicU64::new(0);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut sink = [0u8; 4096];
+            while !stop.load(Ordering::Acquire) {
+                // SAFETY: reading into a stack buffer from a descriptor this test owns.
+                let n = unsafe { libc::read(r, sink.as_mut_ptr().cast(), sink.len()) };
+                if n <= 0 {
+                    std::thread::yield_now();
+                }
+            }
+        });
+        for _ in 0..4 {
+            scope.spawn(|| loop {
+                let was_closed = closed.load(Ordering::Acquire);
+                match handle.submit(header, &[0u8], 0) {
+                    Ok(_) if was_closed => {
+                        accepted_after.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(_) => {
+                        accepted.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(e) if e.contains("closed") => {
+                        if was_closed {
+                            break;
+                        }
+                    }
+                    // The bounded queue filled ahead of two workers: try again.
+                    Err(e) if e.contains("full") => std::thread::yield_now(),
+                    Err(e) => panic!("unexpected submit error: {e}"),
+                }
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        handle.close().must("close");
+        closed.store(true, Ordering::Release);
+        assert_eq!(
+            handle.in_flight(),
+            0,
+            "a cancel flag outlived close; gusset_shutdown would wait on it"
+        );
+        // Each submitter stops at its first refusal after close returned. The
+        // workers are joined, so nothing writes the pipe any more.
+        stop.store(true, Ordering::Release);
+    });
+    assert!(
+        accepted.load(Ordering::Relaxed) > 0,
+        "the race never ran: no submit was accepted before close"
+    );
+    assert_eq!(
+        accepted_after.load(Ordering::Relaxed),
+        0,
+        "a submit was accepted after close returned"
+    );
+    assert_eq!(handle.in_flight(), 0, "a refused submit left a cancel flag");
     // SAFETY: the read end is still owned by this test; close() took the write end.
     unsafe {
         libc::close(r);
