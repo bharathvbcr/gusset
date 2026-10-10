@@ -62,11 +62,14 @@ mod on {
             let seed = input[4];
             let mut out: Vec<u8, BufferAlloc> = Vec::new_in(BufferAlloc);
             // Grow in odd steps so realloc paths run, then leave spare capacity.
+            // One iterator carries on across chunks: restarting the pattern and
+            // skipping to each chunk is quadratic in a debug build.
+            let mut bytes = pattern(len, seed);
             let mut i = 0;
             while i < len {
                 let n = (len - i).min(3 * 1024 + 7);
                 out.try_reserve(n).map_err(|e| e.to_string())?;
-                out.extend(pattern(len, seed).skip(i).take(n));
+                out.extend(bytes.by_ref().take(n));
                 i += n;
             }
             LAST_PTR.store(out.as_ptr() as usize, Ordering::SeqCst);
