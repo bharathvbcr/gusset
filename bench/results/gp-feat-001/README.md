@@ -138,15 +138,62 @@ Min of 10: base 1360 ns, cand 1368 ns.
 awk '/^variant:/{v=$2} /^BenchmarkGusset/{k=$1" "v; x=$3+0; if(!(k in m)||x<m[k])m[k]=x} END{for(k in m) print k, m[k]}' r9-*.txt
 ```
 
+### Rejected: G6 and the inline-by-value result
+
+None of these landed. Each is kept on a local branch so the code behind each
+record stays readable. Variants per file, in recording order (all recorded
+with the same 10-round interleaving):
+
+| file | variants | branch |
+| --- | --- | --- |
+| `g6-*.txt` (76.3% -> 75.2% idle) | `base` = `05484e2`, `s0` = take id on `callResult`, `b` = deliver collects for a Call and returns its permit, `a` = Call registers its waiter under the `semTickets` hold, `c` = result channels recycled through a channel | `g6-step0-takeid`, `g6-rejected-b-a-c` |
+| `g6b-*.txt` (92.4% -> 92.3% idle) | `base`, `s0`, `bp` = B' (deliver collects, the waiter returns the permit), `bpc` = B' + `c` | `g6-rejected-bprime-recycle` |
+| `inline-*.txt` (79.9% -> 97.3% idle) | `base`, `inl` = an inline result carried by value on `callResult`, sliced by the waiter instead of the drain reader | `g6-rejected-inline` |
+
+```
+benchstat -ignore ld -col 'variant@(base s0 b a c)' -filter '.unit:sec/op' g6-darwin-arm64-go1.27.2-rust1.99.0.txt
+benchstat -ignore ld -col 'variant@(base s0 bp bpc)' -filter '.unit:sec/op' g6b-darwin-arm64-go1.27.2-rust1.99.0.txt
+benchstat -ignore ld -col 'variant@(base inl)' -filter '.unit:sec/op' inline-darwin-arm64-go1.27.2-rust1.99.0.txt
+```
+
+| candidate | CallParallel vs base | CallNoop vs base | verdict |
+| --- | --- | --- | --- |
+| s0, take id on `callResult` | ~ (p=0.97; p=0.80) | ~ | rejected: no gain (it deletes a map and the popped-0 bug class, but did not win) |
+| B, deliver collects + returns the permit | +16.4% (p=0.015) | ~ | rejected: slower |
+| A on B | +18.2% (p=0.005) | ~ | rejected: slower |
+| c on A on B | +10.9% (p=0.035) | ~ | rejected: slower |
+| B', the waiter returns the permit | +18.7% (p=0.000) | ~ | rejected: slower |
+| c on B' | +15.0% (p=0.002); vs B' ~ (p=0.12) | ~ | rejected: slower |
+| inline result by value | ~ (p=0.91) | ~ (p=0.99) | rejected: no gain |
+
+Every round of B' sat at 3.4-4.0 µs against base's 2.6-3.8 µs, so it is a
+shift, not an occasional collapse. That rules out what B and B' were built on.
+G6 targeted `handleState.mu` because the mutex profile put most of its delay
+at the waiter's collect (`wait.go:253`). Removing that acquisition made
+throughput worse whether the drain reader or the waiter returned the permit.
+Moving the inline result's allocation off the drain reader changed nothing,
+which argues against the reader being the throughput limit at all. The
+mutex profile's delay attribution therefore does not identify the
+bottleneck. One unverified reading: the waiter's extra hold of mu acted as
+backpressure, and without it more submitters reach the Rust submit path's
+pthread mutexes at once (`cancel_flags`, `JobQueue::push`), where a wait goes
+to the kernel. An execution trace (`go test -trace`) of CallParallel on base
+and on B' would test that before any further attempt on these locks.
+
+While building `c`, `TestReusedWaitChansUnderCloseAndDrainExit` found that
+drainPipe's exit set `drainExited` only after answering waiters, so a waiter
+that returns without retaking mu could report ErrClosed on a handle still
+reading as open. Today every waiter retakes mu, so nothing on this branch can
+reach it; the reorder is in `g6-rejected-bprime-recycle` for anyone who
+builds on that path.
+
 ## Next
 
 In profile order, each needing its own A/B:
 
-- **G6**: `handleState.mu` at `wait.go:253`, `submit.go:246` and
-  `drain.go:218`, the top lock overall. Registering a `Call`'s waiter in the
-  same critical section as its `semTickets` insert removes one acquisition per
-  call. It changes when the permit is owned (I4), so it is a change to review,
-  not a trim.
+- **Find the real limit first.** G6 (above) shows the mutex profile is the
+  wrong guide here. Take an execution trace of CallParallel and see which
+  goroutines or threads are runnable but waiting, and where.
 - **Rust `cancel_flags`**: a per-submit insert and a per-job remove on one
   mutex. A slab sized to the queue (`pool_size * 2`) is the audit's candidate.
 - **R11 / `JobQueue::push`**: now visible at 114 samples.
