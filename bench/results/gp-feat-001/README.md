@@ -140,15 +140,15 @@ awk '/^variant:/{v=$2} /^BenchmarkGusset/{k=$1" "v; x=$3+0; if(!(k in m)||x<m[k]
 
 ### Rejected: G6 and the inline-by-value result
 
-None of these landed. Each is kept on a local branch so the code behind each
+None of these landed. Each is kept on a local tag so the code behind each
 record stays readable. Variants per file, in recording order (all recorded
 with the same 10-round interleaving):
 
-| file | variants | branch |
+| file | variants | tag |
 | --- | --- | --- |
-| `g6-*.txt` (76.3% -> 75.2% idle) | `base` = `05484e2`, `s0` = take id on `callResult`, `b` = deliver collects for a Call and returns its permit, `a` = Call registers its waiter under the `semTickets` hold, `c` = result channels recycled through a channel | `g6-step0-takeid`, `g6-rejected-b-a-c` |
-| `g6b-*.txt` (92.4% -> 92.3% idle) | `base`, `s0`, `bp` = B' (deliver collects, the waiter returns the permit), `bpc` = B' + `c` | `g6-rejected-bprime-recycle` |
-| `inline-*.txt` (79.9% -> 97.3% idle) | `base`, `inl` = an inline result carried by value on `callResult`, sliced by the waiter instead of the drain reader | `g6-rejected-inline` |
+| `g6-*.txt` (76.3% -> 75.2% idle) | `base` = `05484e2`, `s0` = take id on `callResult`, `b` = deliver collects for a Call and returns its permit, `a` = Call registers its waiter under the `semTickets` hold, `c` = result channels recycled through a channel | `archive/g6-step0-takeid`, `archive/g6-rejected-b-a-c` |
+| `g6b-*.txt` (92.4% -> 92.3% idle) | `base`, `s0`, `bp` = B' (deliver collects, the waiter returns the permit), `bpc` = B' + `c` | `archive/g6-rejected-bprime-recycle` |
+| `inline-*.txt` (79.9% -> 97.3% idle) | `base`, `inl` = an inline result carried by value on `callResult`, sliced by the waiter instead of the drain reader | `archive/g6-rejected-inline` |
 
 ```
 benchstat -ignore ld -col 'variant@(base s0 b a c)' -filter '.unit:sec/op' g6-darwin-arm64-go1.27.2-rust1.99.0.txt
@@ -184,7 +184,7 @@ While building `c`, `TestReusedWaitChansUnderCloseAndDrainExit` found that
 drainPipe's exit set `drainExited` only after answering waiters, so a waiter
 that returns without retaking mu could report ErrClosed on a handle still
 reading as open. Today every waiter retakes mu, so nothing on this branch can
-reach it; the reorder is in `g6-rejected-bprime-recycle` for anyone who
+reach it; the reorder is in `archive/g6-rejected-bprime-recycle` for anyone who
 builds on that path.
 
 ## Next
