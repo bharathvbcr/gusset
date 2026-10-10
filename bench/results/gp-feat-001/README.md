@@ -24,6 +24,10 @@ sed -E 's/-[0-9]+[nu]s-18/-18/' ../crossover/transport-darwin-arm64-go1.27.2-rus
   benchstat -ignore ld -filter '.unit:sec/op' -
 ```
 
+1 µs and 10 µs themselves were not recorded: `workSizes` brackets the range
+with ~0.7 µs (below it) and ~7 µs (inside it). A filtered `CrossoverSerial`
+arm at ~1.4k and ~14k iterations, in a file of its own, would pin the ends.
+
 **The bar is not met.** Serial, a ~7 µs job is under it (1.24x). A ~0.7 µs job
 is 3.1x serial, and under 18 goroutines both sizes are far over: the parallel
 arm measures throughput, and Gusset's is capped by its coordination (one drain

@@ -52,17 +52,17 @@ Both transports run a byte-identical Rust loop (`rs_spin` in
 `bench/seed/rs`, and diagnostic mode 11 in `gusset::pool`), so the gap between
 them is transport and nothing else.
 
-The curve is the whole argument. At a noop the ratio is two orders of magnitude
-serial and three across 18 goroutines, and that is the honest worst case — it is
-also a workload nobody has.
+The curve is the whole argument. At a noop the ratio is orders of magnitude
+(the table under "The measured numbers" has the figures), and that is the
+honest worst case — it is also a workload nobody has.
 By the time a call does a few hundred microseconds of real work the coordination
 has disappeared into the noise.
 
 | work per call | what Gusset costs you |
 | --- | --- |
 | under ~1 µs | **don't**. The overhead is the workload. Write it in Go, or call it with raw cgo. |
-| ~1–10 µs | serial, about 3× at ~0.7 µs falling to about 1.25× at ~7 µs; under parallel load still several times raw cgo (about 6× at ~7 µs), because the coordination caps throughput. Write it in Go or raw cgo unless the thread bound is the point |
-| ~70 µs | a few percent serial, low tens of percent under load |
+| ~1–10 µs | serial, a multiple of raw cgo at the low end, closing toward it by 10 µs; under parallel load still several times raw cgo, because the coordination caps throughput. Write it in Go or raw cgo unless the thread bound is the point |
+| ~70 µs | noticeable — single-digit percent serial, more under load |
 | ~700 µs | a few percent |
 | milliseconds and up | unmeasurable against the work |
 
@@ -184,11 +184,10 @@ those, not for the RAM.
 > can exceed `GOMAXPROCS`. Otherwise use raw cgo and keep the simplicity.
 
 100 µs is not a cliff — it is where the trade stops being obviously bad. Gusset's
-fixed cost is the noop row of the table above: about a microsecond and a half
-serial, a few microseconds per call under parallel load, and it moves between
-recordings. At 100 µs of work you are paying a few percent of *the Rust call*
-serial and low tens of percent under load, which is usually a low single-digit
-percent of the request around it. Decide against your request budget, not
+fixed cost is the noop row of the table above, serial and under parallel load,
+and it moves between recordings. At 100 µs of work you are paying a few percent
+of *the Rust call* serial and low tens of percent under load, which is usually a
+low single-digit percent of the request around it. Decide against your request budget, not
 against the call. Below ~10 µs under parallel load there is no budget in which
 this works out.
 
