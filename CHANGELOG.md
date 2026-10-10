@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased] - 2026-10-10 · The log ring keeps its lines under contention
+
+From the 2026-10-09 audit (`gs-log-ring-quadratic-eviction`). No export signature, ABI or Go API change; `gusset::ffi::log_dropped_total` is a new Rust diagnostic.
+
+- **Two threads logging onto a full ring no longer drop lines (I2, I3, I5).** `log_event` tried the ring lock 16 times, a `spin_loop` hint apart, then dropped the line. One eviction from a full ring outlasts that, and the ring stays full in normal use because Go drains it only on `DrainLogs`. With one thread writing short lines and another writing "completion write failed", "drain budget expired" and "WITHOUT sigaltstack" lines, about 15,000 of 16,200 lines were dropped per run (3 runs on the old code). Every caller now waits for the ring. The hold is bounded: nothing under the ring lock blocks, calls out or logs. The try-lock was there so a panic hook firing inside the critical section could not deadlock. `LOG_OWNER` now records which thread holds the ring (`thread_local!` is ruled out in `ffi/` by R7), and only a call re-entered on that thread drops its line. `log_ring_contention` asserts that no line is dropped and that the last critical line is in the ring. With a backported drop counter it fails 3/3 on the old code. `logging_while_holding_the_ring_drops_instead_of_deadlocking` covers re-entry.
+- **Eviction is one cut and one shift.** `append_line` found one newline per pass and shifted the rest of the ring each time, all under the ring lock. `evict_cut` scans forward once for the cut point, and `append_line` drains up to it once. Release build, best of 5: a 60 KiB line onto 8000 eight-byte lines went from 2,820 µs to 1.5-1.8 µs. Onto three large lines it went from 16.8 µs to 2.0 µs. Instrumented, the old loop shifted the ring 7,489 times for that line. `one_cut_evicts_what_line_by_line_eviction_does` compares `evict_cut` against the line-by-line loop on 2000 seeded rings. `a_long_line_onto_many_short_lines_evicts_in_one_cut` pins the 59,912-byte cut. `log_ring_matches_its_model` now runs that case through `check_log_ring` against the line-by-line model first. The unit tests call `evict_cut`, which does not exist on the old code, so there they fail to compile rather than fail.
+
 ## [Unreleased] - 2026-10-10 · Submit sends without a sender mutex
 
 From GP-FEAT-001. No export signature, ABI or Go API change.
