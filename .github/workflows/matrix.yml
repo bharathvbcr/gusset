@@ -194,6 +194,11 @@ jobs:
       - name: Rust tests (BufferAlloc, Counting as Allocator, zero-copy adoption)
         run: cargo test --workspace --release
 
+      # The optimiser hides a slow test engine in --release; the nightly ASan job
+      # runs this suite unoptimised against the 5 s ticket wait (issue #3).
+      - name: Allocator suite in a debug build
+        run: cargo test -p gusset --test rust_allocator_api
+
       - name: Go suite against the allocator-backed library
         run: go test -timeout 15m ./...
 
