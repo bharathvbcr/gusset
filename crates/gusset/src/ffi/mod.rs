@@ -50,15 +50,67 @@ pub const GUSSET_ABI_VERSION: u32 = 2;
 /// Byte budget for the log ring.
 const LOG_RING_CAPACITY: usize = 65536;
 
+/// The log ring. Nothing done while holding it blocks, calls out, or logs: an
+/// append is one scan and one front shift (see [`evict_cut`]), a drain one copy
+/// and one shift. That is what lets every caller but a re-entrant one wait for
+/// it (see [`lock_log_ring`]).
 static LOG_BUFFER: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
-/// Lines `log_event` gave up on because the ring stayed locked.
+/// The thread holding `LOG_BUFFER`, set only through [`lock_log_ring`].
 ///
-/// The lines lost that way are the ones that matter most ("WITHOUT
-/// sigaltstack", "completion write failed", "drain budget expired"), and they
-/// used to vanish with no trace. The count is reported on the next line that
-/// does get in.
+/// A panic hook fires before unwinding, so a panic inside the ring's critical
+/// section runs any hook that logs on the thread that still holds the ring,
+/// and waiting there would deadlock. `thread_local!` is ruled out in `ffi/`
+/// (R7), so the holder is recorded here instead.
+static LOG_OWNER: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
+
+/// Lines dropped since the last note in the ring said so.
+///
+/// Only a `log_event` re-entered on the thread holding the ring drops its
+/// line. The count is reported on the next line that does get in.
 static LOG_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Lines dropped since the process started; never reset.
+static LOG_DROPPED_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Number of log lines dropped since the process started. Test and diagnostic use.
+pub fn log_dropped_total() -> u64 {
+    LOG_DROPPED_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The log ring, held by the current thread until dropped.
+struct LogRingGuard {
+    buf: std::sync::MutexGuard<'static, Vec<u8>>,
+}
+
+impl Drop for LogRingGuard {
+    fn drop(&mut self) {
+        // Runs before `buf` releases the ring, so no other thread ever holds
+        // the ring while this one is still recorded as its owner.
+        *LOG_OWNER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Waits for the log ring, recovering from poisoning, or returns `None` when
+/// this thread already holds it.
+///
+/// The wait is unbounded because the hold is bounded (see `LOG_BUFFER`). It
+/// used to be 16 `spin_loop` hints and then a dropped line: one eviction from
+/// a full ring outlasts that, and the ring is full in normal use, so two
+/// threads logging onto it lost most of their lines (about 15,000 of 16,200 in
+/// `log_ring_contention`), the ones that matter most among them ("completion
+/// write failed", "drain budget expired", "WITHOUT sigaltstack").
+fn lock_log_ring() -> Option<LogRingGuard> {
+    // Before the ring is taken, so nothing that can panic runs between taking
+    // it and recording the owner.
+    let me = std::thread::current().id();
+    if *LOG_OWNER.lock().unwrap_or_else(|e| e.into_inner()) == Some(me) {
+        return None;
+    }
+    let buf = LOG_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
+    *LOG_OWNER.lock().unwrap_or_else(|e| e.into_inner()) = Some(me);
+    Some(LogRingGuard { buf })
+}
 
 /// Appends a log line to the bounded internal ring buffer.
 ///
@@ -67,38 +119,15 @@ static LOG_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 /// exactly the moment those diagnostics matter. A line longer than the whole budget
 /// is truncated instead of being appended wholesale, which previously let one
 /// oversized message push the buffer past its cap without limit.
-/// Recovers from lock poisoning and performs a short spin-retry loop if the buffer
-/// is contended with `gusset_drain_logs`. Returns if still blocked (avoiding deadlock
-/// on re-entrancy from panic hooks).
+/// Waits for the ring when another thread holds it; a call re-entered on the
+/// thread already holding it (a panic hook) drops its line instead of deadlocking.
 pub fn log_event(line: &str) {
-    let mut buf = match LOG_BUFFER.try_lock() {
-        Ok(b) => b,
-        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => {
-            let mut acquired = None;
-            for _ in 0..16 {
-                std::hint::spin_loop();
-                match LOG_BUFFER.try_lock() {
-                    Ok(b) => {
-                        acquired = Some(b);
-                        break;
-                    }
-                    Err(std::sync::TryLockError::Poisoned(p)) => {
-                        acquired = Some(p.into_inner());
-                        break;
-                    }
-                    Err(std::sync::TryLockError::WouldBlock) => {}
-                }
-            }
-            match acquired {
-                Some(b) => b,
-                None => {
-                    LOG_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return;
-                }
-            }
-        }
+    let Some(mut ring) = lock_log_ring() else {
+        LOG_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        LOG_DROPPED_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return;
     };
+    let buf = &mut *ring.buf;
 
     let dropped = LOG_DROPPED.swap(0, std::sync::atomic::Ordering::Relaxed);
     if dropped > 0 {
@@ -106,9 +135,9 @@ pub fn log_event(line: &str) {
             "gusset: {} log line(s) dropped while the ring was busy",
             dropped
         );
-        append_line(&mut buf, &note);
+        append_line(buf, &note);
     }
-    append_line(&mut buf, line);
+    append_line(buf, line);
 }
 
 /// Appends one line to the ring, evicting whole lines from the front.
@@ -125,24 +154,34 @@ fn append_line(buf: &mut Vec<u8>, line: &str) {
     } else {
         line.as_bytes()
     };
-    let needed = bytes.len() + 1;
-
-    while buf.len() + needed > LOG_RING_CAPACITY {
-        match buf.iter().position(|&b| b == b'\n') {
-            // Drop the oldest complete line, newline included.
-            Some(nl) => {
-                buf.drain(..=nl);
-            }
-            // No line boundary left: the remainder is a single partial line.
-            None => {
-                buf.clear();
-                break;
-            }
-        }
-    }
-
+    let cut = evict_cut(buf, bytes.len() + 1);
+    buf.drain(..cut);
     buf.extend_from_slice(bytes);
     buf.push(b'\n');
+}
+
+/// How many bytes to evict from the front of `ring` so that `needed` more fit
+/// in `LOG_RING_CAPACITY`: the fewest whole lines that make room, or all of
+/// `ring` when no line boundary does (the rest is one partial line).
+///
+/// Found in one forward scan and evicted in one shift. Evicting one line per
+/// shift moved the rest of the ring once per line under the ring lock: a
+/// 60 KiB line onto 8000 eight-byte lines took 2.8 ms in a release build,
+/// against 17 µs onto three large lines.
+fn evict_cut(ring: &[u8], needed: usize) -> usize {
+    let excess = (ring.len() + needed).saturating_sub(LOG_RING_CAPACITY);
+    if excess == 0 {
+        return 0;
+    }
+    // The cut lands just past a newline at index excess - 1 or later. A
+    // `needed` beyond the capacity (`append_line` never asks) empties the ring.
+    match ring
+        .get(excess - 1..)
+        .and_then(|tail| tail.iter().position(|&b| b == b'\n'))
+    {
+        Some(at) => excess + at,
+        None => ring.len(),
+    }
 }
 
 /// Passes a handle-bound export's failure code through, poisoning the handle
@@ -750,8 +789,13 @@ pub unsafe extern "C" fn gusset_drain_logs(buf: *mut u8, len: usize, out_written
     }
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut log_buf = LOG_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
-        let count = drain_cut(&log_buf, len);
+        // `None` only when re-entered from a panic hook on the thread
+        // draining: there is nothing to hand over then.
+        let Some(mut ring) = lock_log_ring() else {
+            return 0;
+        };
+        let log_buf = &mut *ring.buf;
+        let count = drain_cut(log_buf, len);
         unsafe {
             ptr::copy_nonoverlapping(log_buf.as_ptr(), buf, count);
         }
@@ -935,6 +979,112 @@ mod drain_cut_tests {
             "starting mid-character still progresses"
         );
         assert_eq!(drain_cut(&[], 8), 0);
+    }
+}
+
+#[cfg(test)]
+mod evict_cut_tests {
+    use super::{append_line, evict_cut, LOG_RING_CAPACITY};
+
+    /// Eviction as it was specified: drop the oldest line, newline included,
+    /// until `needed` fits; a remainder with no newline is one partial line.
+    fn evict_line_by_line(ring: &mut Vec<u8>, needed: usize) {
+        while ring.len() + needed > LOG_RING_CAPACITY {
+            match ring.iter().position(|&b| b == b'\n') {
+                Some(nl) => {
+                    ring.drain(..=nl);
+                }
+                None => {
+                    ring.clear();
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn one_cut_evicts_what_line_by_line_eviction_does() {
+        // xorshift64*: seeded, so a failure reproduces.
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |bound: usize| {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            (state.wrapping_mul(0x2545_F491_4F6C_DD1D) % bound as u64) as usize
+        };
+        for _ in 0..2000 {
+            let mut ring = Vec::new();
+            // Sometimes start mid-line, as a drain split on a character
+            // boundary leaves it.
+            if next(4) == 0 {
+                ring.extend(std::iter::repeat_n(b'p', next(300)));
+            }
+            loop {
+                let len = match next(8) {
+                    0 => next(30_000),
+                    _ => next(40),
+                };
+                if ring.len() + len + 1 > LOG_RING_CAPACITY {
+                    break;
+                }
+                ring.extend(std::iter::repeat_n(b'x', len));
+                ring.push(b'\n');
+            }
+            let needed = 1 + next(LOG_RING_CAPACITY);
+            let mut want = ring.clone();
+            evict_line_by_line(&mut want, needed);
+            let cut = evict_cut(&ring, needed);
+            assert_eq!(
+                &ring[cut..],
+                &want[..],
+                "ring of {} bytes, needed {needed}: cut {cut}",
+                ring.len()
+            );
+        }
+        assert_eq!(evict_cut(&[], 1), 0);
+        assert_eq!(evict_cut(b"partial", LOG_RING_CAPACITY), 7);
+        assert_eq!(evict_cut(b"a\n", LOG_RING_CAPACITY + 9), 2);
+    }
+
+    /// 8000 eight-byte lines (64000 bytes) and a 60 KiB line: the ring must
+    /// lose bytes 0..59905 at least, and the first line boundary from there is
+    /// past byte 59911, so 7489 lines go in one shift. Evicting a line per
+    /// shift moved the ring 7489 times under the lock (2.8 ms in release).
+    #[test]
+    fn a_long_line_onto_many_short_lines_evicts_in_one_cut() {
+        let mut ring = Vec::new();
+        for _ in 0..8000 {
+            append_line(&mut ring, "1234567");
+        }
+        assert_eq!(ring.len(), 64_000);
+        let long = "x".repeat(60 * 1024);
+        assert_eq!(evict_cut(&ring, long.len() + 1), 7489 * 8);
+        append_line(&mut ring, &long);
+        assert_eq!(ring.len(), 511 * 8 + long.len() + 1);
+        assert!(ring.starts_with(b"1234567\n"));
+        assert!(ring.ends_with(format!("{long}\n").as_bytes()));
+    }
+}
+
+/// A `log_event` from the thread already holding the ring (a panic hook firing
+/// inside the critical section) must drop its line rather than wait for itself.
+#[cfg(test)]
+mod log_reentry_tests {
+    use super::{lock_log_ring, log_dropped_total, log_event};
+
+    #[test]
+    fn logging_while_holding_the_ring_drops_instead_of_deadlocking() {
+        let held = match lock_log_ring() {
+            Some(g) => g,
+            None => panic!("the ring was already held by this thread"),
+        };
+        assert!(lock_log_ring().is_none(), "re-entry must not wait");
+        let before = log_dropped_total();
+        log_event("re-entered");
+        assert_eq!(log_dropped_total(), before + 1);
+        drop(held);
+        // Released: the same thread takes it again.
+        assert!(lock_log_ring().is_some());
     }
 }
 

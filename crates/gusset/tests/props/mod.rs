@@ -7,10 +7,12 @@
 //!
 //! What crosses the boundary here, and why each property matters:
 //!
-//! * The log ring (`log_event` / `gusset_drain_logs`, `append_line` and
-//!   `drain_cut`): Go decodes each drained chunk as text, so a chunk must end
-//!   on a line or character boundary, the ring must stay bounded, and a drain
-//!   must always make progress (0 reads as "empty" and strands the ring).
+//! * The log ring (`log_event` / `gusset_drain_logs`, `append_line`,
+//!   `evict_cut` and `drain_cut`): Go decodes each drained chunk as text, so a
+//!   chunk must end on a line or character boundary, the ring must stay
+//!   bounded, eviction must drop exactly the oldest whole lines that make room
+//!   (the model evicts line by line; `evict_cut` does it in one cut), and a
+//!   drain must always make progress (0 reads as "empty" and strands the ring).
 //! * Panic payload truncation (`truncate_payload` via `extract_panic_payload`):
 //!   the message is copied into an `FfiStatus` Go reads (I2); it must stay
 //!   valid UTF-8, bounded, and a prefix of what the engine said.
@@ -145,7 +147,8 @@ fn describe_as_static(s: &str) -> String {
 const LOG_RING_CAPACITY: usize = 65536;
 
 /// Reference model of the log ring from its documentation (`log_event`,
-/// `append_line`, `gusset_drain_logs`).
+/// `append_line`, `gusset_drain_logs`). It evicts one line at a time, the
+/// specification `evict_cut` meets in a single cut.
 #[derive(Default)]
 struct LogModel {
     ring: Vec<u8>,
