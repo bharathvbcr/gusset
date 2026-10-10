@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased] - 2026-10-10 · Submit sends without a sender mutex
+
+From GP-FEAT-001. No export signature, ABI or Go API change.
+
+- **Parallel submits no longer convoy on one Rust mutex (I3, I4).** `Handle::sender` was a `Mutex<Option<QueueSender>>` held across the cancel-flag lock and the queue's push lock; a native sample of `BenchmarkGussetCallParallel` put 986 of 1116 Rust mutex-wait samples in it. `close` now closes the queue directly and `submit` sends without it: the flag goes in before the send and comes out when the send is refused, and `close` closes the queue before `cancel_all`, so every queued unit's flag is cancelled and a refused submit leaves none. Interleaved A/B over 10 rounds against `23e925b`: CallParallel -6.6% (p=0.012), min 3325 -> 2707 ns; CallNoop unchanged (p=0.90). `submits_racing_close_leave_no_flag_and_none_is_accepted_after` covers the race. A performance change, so no test fails on the old code; the A/B is the evidence.
+- **Benchmarks re-recorded on this tree.** The main suite (`bench/results/darwin-arm64-go1.27.2-rust1.99.0.txt`) and the crossover and thread-pressure files replace the 2026-09-20 recordings, and `make docs` regenerated the README table and charts. The README's CallNoop `3.000 ± 33%` allocs/op was that old data: a memory profile puts today's single allocation at `drain.go:88`, the result bytes `Call` returns (1 alloc/op, 1 B/op). `docs/choosing.md`'s prose now matches the new crossover: about 1.24x raw cgo serial at ~7 µs jobs, 3.1x at ~0.7 µs, and 6x at ~7 µs under 18 goroutines. The 1.5x bar on 1-10 µs jobs is not met; `bench/results/gp-feat-001/README.md` has the profiles naming the contended locks and what comes next.
+
 ## [Unreleased] - 2026-10-09 · The quiet handoff leaves a P for everyone else
 
 From the 2026-10-09 audit (`gs-perf-quiet-handoff-gomaxprocs2`). No ABI or Go API change.

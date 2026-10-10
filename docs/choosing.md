@@ -11,7 +11,7 @@ Every figure here is drawn from committed benchmark output by
 [`tools/benchplot`](../tools/benchplot), the same way the README's table is drawn
 by `tools/benchdoc`. `make docs-check` fails if a chart and its data disagree.
 The numbers come from one machine — Apple M5 Pro, 18 cores, darwin/arm64, Go
-1.27.1, Rust 1.98.0. [Benchmarks, plotted](benchmarks.md) charts the rest of the
+1.27.2, Rust 1.99.0. [Benchmarks, plotted](benchmarks.md) charts the rest of the
 committed results, including the Linux VM. Re-run `make bench-crossover && make bench-scaling` on
 yours; the shapes should hold, the constants will not.
 
@@ -52,15 +52,17 @@ Both transports run a byte-identical Rust loop (`rs_spin` in
 `bench/seed/rs`, and diagnostic mode 11 in `gusset::pool`), so the gap between
 them is transport and nothing else.
 
-The curve is the whole argument. At a noop the ratio is three orders of
-magnitude, and that is the honest worst case — it is also a workload nobody has.
+The curve is the whole argument. At a noop the ratio is two orders of magnitude
+serial and three across 18 goroutines, and that is the honest worst case — it is
+also a workload nobody has.
 By the time a call does a few hundred microseconds of real work the coordination
 has disappeared into the noise.
 
 | work per call | what Gusset costs you |
 | --- | --- |
-| under ~10 µs | **don't**. The overhead is the workload. Write it in Go, or call it with raw cgo. |
-| ~70 µs | noticeable — low tens of percent serial, more under load |
+| under ~1 µs | **don't**. The overhead is the workload. Write it in Go, or call it with raw cgo. |
+| ~1–10 µs | serial, about 3× at ~0.7 µs falling to about 1.25× at ~7 µs; under parallel load still several times raw cgo (about 6× at ~7 µs), because the coordination caps throughput. Write it in Go or raw cgo unless the thread bound is the point |
+| ~70 µs | a few percent serial, low tens of percent under load |
 | ~700 µs | a few percent |
 | milliseconds and up | unmeasurable against the work |
 
@@ -105,11 +107,11 @@ counts three recordings out of date.
 
 | work per call | cgo, serial | Gusset, serial | ratio | cgo, 18 goroutines | Gusset, 18 goroutines | ratio |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| noop | 15.88 ns | 13.14 µs | 828× | 1.59 ns | 4.25 µs | 2678× |
-| 663 ns | 706.10 ns | 13.21 µs | 18.7× | 47.01 ns | 4.23 µs | 90.0× |
-| 6 µs | 7.19 µs | 19.42 µs | 2.70× | 471.05 ns | 4.70 µs | 9.97× |
-| 66 µs | 73.37 µs | 84.70 µs | 1.15× | 4.70 µs | 7.34 µs | 1.56× |
-| 660 µs | 709.31 µs | 715.64 µs | 1.01× | 47.34 µs | 46.39 µs | 0.98× |
+| noop | 16.27 ns | 1.34 µs | 82.2× | 1.52 ns | 2.66 µs | 1743× |
+| 718 ns | 702.15 ns | 2.17 µs | 3.09× | 44.94 ns | 2.73 µs | 60.8× |
+| 7 µs | 7.29 µs | 9.04 µs | 1.24× | 495.15 ns | 3.00 µs | 6.06× |
+| 72 µs | 75.24 µs | 79.53 µs | 1.06× | 4.49 µs | 5.18 µs | 1.15× |
+| 720 µs | 724.30 µs | 738.11 µs | 1.02× | 45.90 µs | 47.18 µs | 1.03× |
 
 **Cost of concurrency.** Medians over the committed sweep, each transport in its own process.
 
@@ -182,12 +184,13 @@ those, not for the RAM.
 > can exceed `GOMAXPROCS`. Otherwise use raw cgo and keep the simplicity.
 
 100 µs is not a cliff — it is where the trade stops being obviously bad. Gusset's
-fixed cost is the noop row of the table above: low tens of microseconds serial,
-a few microseconds under parallel load, and it moves by a few microseconds
-between recordings. At 100 µs of work you are paying low double-digit percent of
-*the Rust call*, which is usually a low single-digit percent of the request
-around it. Decide against your request budget, not against the call. Below
-~10 µs there is no budget in which this works out.
+fixed cost is the noop row of the table above: about a microsecond and a half
+serial, a few microseconds per call under parallel load, and it moves between
+recordings. At 100 µs of work you are paying a few percent of *the Rust call*
+serial and low tens of percent under load, which is usually a low single-digit
+percent of the request around it. Decide against your request budget, not
+against the call. Below ~10 µs under parallel load there is no budget in which
+this works out.
 
 Everything below is refinement of that rule.
 

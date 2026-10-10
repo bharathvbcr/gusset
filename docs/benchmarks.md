@@ -15,7 +15,9 @@ leaves out at the end.
 
 Two hosts are recorded, and charts from different hosts are not comparable:
 
-- **darwin/arm64** — Apple M5 Pro, 18 cores, Go 1.27.1, Rust 1.98.0.
+- **darwin/arm64** — Apple M5 Pro, 18 cores. The suite and the crossover and
+  thread-pressure files are Go 1.27.2, Rust 1.99.0; the concurrency sweep is
+  Go 1.27.1, Rust 1.98.0.
 - **linux/amd64 VM** — 4 vCPU Xeon, Go 1.27.1, Rust 1.98.1. Its "before" files
   are the original `main`; its "after" files are the spin-then-park completion
   path. Compare a before bar with its after bar, never a VM bar with a darwin one.

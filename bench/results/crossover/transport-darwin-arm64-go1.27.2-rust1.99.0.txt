@@ -1,0 +1,245 @@
+# gusset-bench: v1
+# gusset-bench-recorded: 2026-10-10T17:15:51Z
+# gusset-bench-host: Bharaths-MacBook-Pro.local
+# gusset-bench-uname: Darwin 27.0.0 arm64
+# gusset-bench-package: bench/seed/go .
+# gusset-bench-arms: CrossoverSerial/RawCgo CrossoverSerial/Gusset CrossoverParallel/RawCgo CrossoverParallel/Gusset
+# gusset-bench-benchtime: 1s
+# gusset-bench-count: 10
+# gusset-bench-cpu: default
+# gusset-bench-cpu-idle-before: 73.79
+# gusset-bench-cpu-idle-after: 82.29
+# gusset-bench-min-idle: 60
+# gusset-bench-exclusive: yes
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/RawCgo/noop-18         	73069556	        16.30 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/noop-18         	74460357	        16.29 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/noop-18         	72845002	        16.25 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/noop-18         	69625256	        17.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/noop-18         	74225466	        16.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/noop-18         	76188661	        16.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/noop-18         	74018865	        16.07 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/noop-18         	73577691	        16.46 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/noop-18         	67634530	        15.80 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/noop-18         	75930744	        15.85 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000it-718ns-18 	 1684303	       703.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000it-718ns-18 	 1714066	       697.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000it-718ns-18 	 1721071	       698.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000it-718ns-18 	 1595287	       699.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000it-718ns-18 	 1721686	       698.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000it-718ns-18 	 1708737	       710.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000it-718ns-18 	 1687836	       704.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000it-718ns-18 	 1723270	       701.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000it-718ns-18 	 1706443	       704.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000it-718ns-18 	 1724764	       703.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/10000it-7us-18  	  165484	      7238 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/10000it-7us-18  	  167154	      7175 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/10000it-7us-18  	  166359	      7878 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/10000it-7us-18  	  166171	      7314 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/10000it-7us-18  	  162896	      7314 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/10000it-7us-18  	  165548	      7223 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/10000it-7us-18  	  169342	      7166 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/10000it-7us-18  	  167266	      7608 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/10000it-7us-18  	  162414	      7707 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/10000it-7us-18  	  163000	      7261 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/100000it-72us-18         	   16380	     73536 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/100000it-72us-18         	   16375	     73587 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/100000it-72us-18         	   16320	     73210 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/100000it-72us-18         	   16294	     77881 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/100000it-72us-18         	   15108	     73347 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/100000it-72us-18         	   15781	     76014 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/100000it-72us-18         	   15496	     76920 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/100000it-72us-18         	   15118	     79917 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/100000it-72us-18         	   14592	     80339 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/100000it-72us-18         	   15711	     74475 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000000it-720us-18       	    1489	    753778 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000000it-720us-18       	    1628	    731222 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000000it-720us-18       	    1581	    744605 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000000it-720us-18       	    1701	    723763 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000000it-720us-18       	    1628	    724834 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000000it-720us-18       	    1521	    725358 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000000it-720us-18       	    1708	    713072 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000000it-720us-18       	    1698	    710307 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000000it-720us-18       	    1677	    711100 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCrossoverSerial/RawCgo/1000000it-720us-18       	    1690	    710849 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	ffibench	76.577s
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverSerial/Gusset/noop-18         	  884854	      1302 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/noop-18         	  811760	      1303 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/noop-18         	  903192	      1296 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/noop-18         	  933092	      1308 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/noop-18         	  893724	      1348 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/noop-18         	  904606	      1334 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/noop-18         	  851322	      1373 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/noop-18         	  786696	      1379 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/noop-18         	  835639	      1342 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/noop-18         	  891880	      1367 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-18 	  266323	     20023 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-18 	  478638	      2773 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-18 	  522879	      2189 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-18 	  517688	      2358 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-18 	  558318	      2141 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-18 	  551269	      2124 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-18 	  599697	      2338 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-18 	  562980	      2150 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-18 	  601948	      2063 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000it-697ns-18 	  587485	      2050 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-18  	  133586	      9018 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-18  	  131965	      9302 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-18  	  126916	      9031 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-18  	  137911	      8827 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-18  	  135532	      8877 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-18  	  129991	      9539 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-18  	  134443	      9055 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-18  	  134894	      8963 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-18  	  132333	      9317 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/10000it-7us-18  	  129486	      9120 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-71us-18         	   14696	     79201 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-71us-18         	   14644	     84500 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-71us-18         	   10000	    151136 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-71us-18         	   15500	     78940 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-71us-18         	   14874	     79734 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-71us-18         	   15051	     79948 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-71us-18         	   14942	     78812 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-71us-18         	   15117	     79919 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-71us-18         	   14786	     79328 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/100000it-71us-18         	   15784	     76227 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-700us-18       	    1602	    737411 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-700us-18       	    1641	    728837 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-700us-18       	    1646	    729138 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-700us-18       	    1644	    729570 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-700us-18       	    1636	    730539 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-700us-18       	    1628	    742263 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-700us-18       	    1621	    738805 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-700us-18       	    1626	    739874 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-700us-18       	    1623	    742689 ns/op	       8 B/op	       1 allocs/op
+BenchmarkCrossoverSerial/Gusset/1000000it-700us-18       	    1606	    741478 ns/op	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	81.392s
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverParallel/RawCgo/noop-18         	960084164	         1.457 ns/op	         2.000 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/noop-18         	782405866	         1.404 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/noop-18         	810674781	         1.516 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/noop-18         	750724528	         1.594 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/noop-18         	823520666	         1.533 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/noop-18         	747506365	         1.470 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/noop-18         	745981027	         1.642 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/noop-18         	819357780	         1.607 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/noop-18         	740719213	         1.478 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/noop-18         	805543032	         1.662 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000it-725ns-18 	26756821	        44.99 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000it-725ns-18 	25835295	        47.82 ns/op	         2.000 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000it-725ns-18 	27952696	        44.52 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000it-725ns-18 	27774080	        44.47 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000it-725ns-18 	25258416	        44.51 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000it-725ns-18 	27457911	        44.02 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000it-725ns-18 	27094558	        46.56 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000it-725ns-18 	27245532	        44.88 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000it-725ns-18 	26711160	        45.97 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000it-725ns-18 	21667819	        53.35 ns/op	         1.000 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/10000it-7us-18  	 2312918	       533.8 ns/op	         1.000 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/10000it-7us-18  	 2436166	       532.6 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/10000it-7us-18  	 2388201	       549.5 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/10000it-7us-18  	 2334237	       452.4 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/10000it-7us-18  	 2604560	       522.6 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/10000it-7us-18  	 2667152	       439.6 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/10000it-7us-18  	 2322232	       534.1 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/10000it-7us-18  	 2354319	       466.9 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/10000it-7us-18  	 2454384	       467.7 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/10000it-7us-18  	 2588968	       448.4 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/100000it-72us-18         	  273306	      4540 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/100000it-72us-18         	  266781	      4561 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/100000it-72us-18         	  251179	      4501 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/100000it-72us-18         	  270693	      4473 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/100000it-72us-18         	  269617	      4447 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/100000it-72us-18         	  273306	      4426 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/100000it-72us-18         	  276007	      4433 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/100000it-72us-18         	  272391	      4719 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/100000it-72us-18         	  275860	      4470 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/100000it-72us-18         	  244300	      4682 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000000it-701us-18       	   25280	     46976 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000000it-701us-18       	   26005	     49373 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000000it-701us-18       	   23409	     48188 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000000it-701us-18       	   25574	     46527 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000000it-701us-18       	   25974	     45423 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000000it-701us-18       	   26707	     45794 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000000it-701us-18       	   26347	     46000 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000000it-701us-18       	   25808	     44121 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000000it-701us-18       	   26868	     44210 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+BenchmarkCrossoverParallel/RawCgo/1000000it-701us-18       	   27489	     45311 ns/op	         0 Δthreads	       0 B/op	       0 allocs/op
+PASS
+ok  	ffibench	72.896s
+# ffibench.test
+ld: warning: ignoring duplicate libraries: '-ldl', '-lm', '-lpthread'
+goos: darwin
+goarch: arm64
+pkg: ffibench
+cpu: Apple M5 Pro
+BenchmarkCrossoverParallel/Gusset/noop-18         	  410041	      2669 ns/op	         1.000 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/noop-18         	  485508	      2551 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/noop-18         	  487280	      2501 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/noop-18         	  480200	      2718 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/noop-18         	  426898	      2769 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/noop-18         	  432525	      2676 ns/op	         1.000 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/noop-18         	  444204	      2806 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/noop-18         	  462220	      2524 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/noop-18         	  454568	      2583 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/noop-18         	  473185	      2645 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-691ns-18 	  408955	      2736 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-691ns-18 	  415156	      2856 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-691ns-18 	  399842	      2766 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-691ns-18 	  434995	      2735 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-691ns-18 	  415574	      2748 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-691ns-18 	  451722	      2635 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-691ns-18 	  496998	      2553 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-691ns-18 	  415989	      2520 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-691ns-18 	  437887	      2589 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000it-691ns-18 	  409414	      2731 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-6us-18  	  396681	      2938 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-6us-18  	  405925	      2944 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-6us-18  	  394161	      2992 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-6us-18  	  388197	      2992 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-6us-18  	  373387	      3164 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-6us-18  	  393072	      3076 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-6us-18  	  390032	      3062 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-6us-18  	  391570	      3033 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-6us-18  	  387115	      2997 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/10000it-6us-18  	  406851	      3004 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-70us-18         	  219871	      4821 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-70us-18         	  254612	      4938 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-70us-18         	  239449	      4991 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-70us-18         	  234174	      5173 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-70us-18         	  225529	      5191 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-70us-18         	  228979	      5391 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-70us-18         	  227294	      5087 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-70us-18         	  228910	      5212 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-70us-18         	  231151	      5320 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/100000it-70us-18         	  207196	      5375 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-701us-18       	   24884	     49096 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-701us-18       	   25413	     49046 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-701us-18       	   25250	     48020 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-701us-18       	   25906	     46494 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-701us-18       	   25922	     46786 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-701us-18       	   25548	     46281 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-701us-18       	   25533	     47538 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-701us-18       	   26216	     46521 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-701us-18       	   26056	     46816 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+BenchmarkCrossoverParallel/Gusset/1000000it-701us-18       	   25576	     48223 ns/op	         0 Δthreads	       8 B/op	       1 allocs/op
+PASS
+ok  	ffibench	65.892s

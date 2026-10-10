@@ -1,0 +1,49 @@
+Analysis of sampling bench.test (pid 10552) every 1 millisecond
+Process:         bench.test [10552]
+Load Address:    0x100004000
+Identifier:      bench.test
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Target Type:     live task
+
+Date/Time:       2026-10-10 10:02:00.803 -0700
+
+Sort by top of stack, same collapsed (when >= 5):
+        __psynch_cvwait  (in libsystem_kernel.dylib)        9979
+        __semwait_signal  (in libsystem_kernel.dylib)        1525
+        __psynch_mutexwait  (in libsystem_kernel.dylib)        1116
+        swtch_pri  (in libsystem_kernel.dylib)        1058
+        _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMNtNtCsajanNQczxx4_6gusset4pool6workerNtB1e_6Handle20spawn_workers_locked0uEB1g_  (in bench.test)        370
+        __psynch_mutexdrop  (in libsystem_kernel.dylib)        176
+        mach_absolute_time  (in libsystem_kernel.dylib)        167
+        __psynch_cvsignal  (in libsystem_kernel.dylib)        163
+        kevent  (in libsystem_kernel.dylib)        130
+        runtime.stealWork  (in bench.test)        48
+        runtime.unlock2  (in bench.test)        48
+        runtime.lock2  (in bench.test)        42
+        runtime.procyieldAsm.abi0  (in bench.test)        39
+        github.com/bharathvbcr/gusset.(*handleState).waitInternal  (in bench.test)        34
+        runtime.selectgo  (in bench.test)        34
+        runtime.mapaccess2_fast64  (in bench.test)        31
+        internal/sync.(*Mutex).lockSlow  (in bench.test)        27
+        runtime.findRunnable  (in bench.test)        26
+        runtime.casgstatus  (in bench.test)        23
+        github.com/bharathvbcr/gusset.(*handleState).submitInput  (in bench.test)        20
+        github.com/bharathvbcr/gusset.(*ticketReader).waitRing  (in bench.test)        19
+        runtime.wakep  (in bench.test)        17
+        github.com/bharathvbcr/gusset/internal/ffi.Submit  (in bench.test)        16
+        pthread_mutex_lock  (in libsystem_pthread.dylib)        14
+        runtime.selunlock  (in bench.test)        14
+        runtime.checkRunqsNoP  (in bench.test)        13
+        _RNvMNtNtCsajanNQczxx4_6gusset4pool5queueINtB2_8JobQueueNtB4_8WorkUnitE4pushB6_  (in bench.test)        12
+        runtime.schedule  (in bench.test)        12
+        github.com/bharathvbcr/gusset.(*handleState).deliver  (in bench.test)        11
+        internal/sync.(*Mutex).unlockSlow  (in bench.test)        11
+
+__psynch_mutexwait samples, attributed to the nearest gusset or std::sync frame above each leaf (see ../README.md):
+986 _RNvMs5_NtNtNtCs1SSuMAdGM58_3std4sync6poison5mutexINtB5_5MutexINtNtCsjIpoRzUjyHQ_4core6option6OptionINtNtNtCsajanNQczxx4_6gusset4pool5queue1
+51 _RINvNtNtCs1SSuMAdGM58_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMNtNtCsajanNQczxx4_6gusset4pool6workerNtB1e_6Handle20spawn_worke
+39 _RNvNtNtCsajanNQczxx4_6gusset3ffi5guard19take_panic_location
+32 _RNvMNtNtCsajanNQczxx4_6gusset4pool5queueINtB2_8JobQueueNtB4_8WorkUnitE4pushB6_
+8 ?
