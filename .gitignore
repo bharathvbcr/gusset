@@ -67,3 +67,6 @@ bench/results/.record.lock/
 
 # bench/r14/run.sh stamps the linked archives' hash here before every link.
 bench/r14/host/zz_archives.go
+
+# DevCouncil local state
+!/.devcouncil/
