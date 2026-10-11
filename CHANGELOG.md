@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased] - 2026-10-10 · gussetseal accepts what Apple's ar writes
+
+From the 2026-10-09 audit (`gs-gussetseal-darwin-ar-padding`). No library, ABI or Go API change; `tools/gussetseal` only.
+
+- **A sealed object whose length is not a multiple of 8 is no longer refused on macOS (R14).** `archiveHoldsExactly` compared the archive's member to the verified object with `bytes.Equal`. Apple's `ar` pads a `#1/len` member with `\n` to a multiple of 8 inside the size it declares, so a 529-byte object comes back as a 536-byte member. Every unaligned `ld -r` output was refused and its archive deleted. CI runs 37944107330 and 37855657375 failed with "its member (2346576 bytes) differs from …libengine_a.o (2346575 bytes)", and the `R14 sealed staticlibs (macos-latest)` job had failed on every main push since 97947d0. A BSD member is now accepted when it is exactly the object followed by `\n` up to the next multiple of 8, and nothing else: its length must equal `roundup8(len(obj))`. NUL bytes, any other byte, a shorter or longer tail, or the same tail on a GNU-format member are still refused, and a GNU-format member must still match exactly. `TestArchiveOfAnUnalignedObjectIsAccepted` archives objects 1, 3 and 7 bytes past a multiple of 8 with the host `ar`. It fails on the old code on darwin, and on Linux it passes either way because GNU `ar` pads outside the size. `TestArchiveRefusesWhatIsNotPadding` covers the refusals on hand-built archives. The audit traced why R14 passed locally: the local `ld -r` happened to write 8-aligned output, so the failure depended on the toolchain and showed up only in CI.
+- **A negative BSD name length is refused instead of panicking.** A member named `#1/-5` sliced its data with a negative bound. `TestNegativeBSDNameLengthIsRefused` panicked on the old code.
+
 ## [Unreleased] - 2026-10-10 · The log ring keeps its lines under contention
 
 From the 2026-10-09 audit (`gs-log-ring-quadratic-eviction`). No export signature, ABI or Go API change; `gusset::ffi::log_dropped_total` is a new Rust diagnostic.

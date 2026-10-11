@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"debug/elf"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -191,4 +194,90 @@ func mkdirAll(t *testing.T, parent, name string) string {
 		t.Fatal(err)
 	}
 	return d
+}
+
+// Apple's ar pads a member's data with '\n' to a multiple of 8 inside the size
+// it declares, so an object whose length is not already a multiple of 8 comes
+// back from the archive longer than it went in. Compiler output is aligned;
+// ld -r output need not be, and the seal refused and deleted every such
+// archive. GNU ar pads outside the size, so on Linux this passes either way.
+func TestArchiveOfAnUnalignedObjectIsAccepted(t *testing.T) {
+	need(t, "cc", "ar")
+	dir := t.TempDir()
+	archive(t, dir, engineC)
+	obj, err := os.ReadFile(filepath.Join(dir, "engine_member.o"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, extra := range []int{1, 3, 7} {
+		t.Run(strconv.Itoa(extra), func(t *testing.T) {
+			sub := t.TempDir()
+			o := filepath.Join(sub, "odd.o")
+			a := filepath.Join(sub, "odd.a")
+			odd := append(append([]byte(nil), obj...), make([]byte, roundup8(len(obj))+extra-len(obj))...)
+			if err := os.WriteFile(o, odd, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := run(context.Background(), "ar", "rcs", a, o); err != nil {
+				t.Fatal(err)
+			}
+			if err := archiveHoldsExactly(a, o); err != nil {
+				t.Fatalf("an archive of exactly that %d-byte object was refused: %v", len(odd), err)
+			}
+		})
+	}
+}
+
+// arFile writes an archive of one member with the given header name and data,
+// with no symbol table.
+func arFile(t *testing.T, name string, data []byte) string {
+	t.Helper()
+	header := fmt.Sprintf("%-16s%-12s%-6s%-6s%-8s%-10d`\n", name, "0", "0", "0", "644", len(data))
+	body := append([]byte("!<arch>\n"+header), data...)
+	if len(data)%2 == 1 {
+		body = append(body, '\n')
+	}
+	a := filepath.Join(t.TempDir(), "hand.a")
+	if err := os.WriteFile(a, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// Padding is accepted only in the form Apple's ar writes it: a BSD member, the
+// object's bytes, then '\n' up to the next multiple of 8 and no further.
+// Anything else in the tail, or the same tail on a GNU-format member, is a
+// member that is not the verified object.
+func TestArchiveRefusesWhatIsNotPadding(t *testing.T) {
+	obj := bytes.Repeat([]byte{0xcf}, 529)
+	o := filepath.Join(t.TempDir(), "odd.o")
+	if err := os.WriteFile(o, obj, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bsd := func(data []byte) []byte { return append([]byte("odd.o\x00\x00\x00"), data...) }
+	pad := func(tail string) []byte { return append(append([]byte(nil), obj...), tail...) }
+	if err := archiveHoldsExactly(arFile(t, "#1/8", bsd(pad("\n\n\n\n\n\n\n"))), o); err != nil {
+		t.Fatalf("Apple's padding was refused: %v", err)
+	}
+	for what, a := range map[string]string{
+		"a non-newline byte in the padding": arFile(t, "#1/8", bsd(pad("\n\n\n\n\n\nx"))),
+		"NUL padding":                       arFile(t, "#1/8", bsd(pad("\x00\x00\x00\x00\x00\x00\x00"))),
+		"padding short of the multiple":     arFile(t, "#1/8", bsd(pad("\n"))),
+		"padding past the multiple":         arFile(t, "#1/8", bsd(pad("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"))),
+		"padding inside a GNU member":       arFile(t, "odd.o/", pad("\n\n\n\n\n\n\n")),
+	} {
+		if err := archiveHoldsExactly(a, o); err == nil {
+			t.Errorf("a member with %s was accepted", what)
+		}
+	}
+}
+
+// A BSD name length is read from the archive; a negative one sliced the member
+// with a negative bound and panicked.
+func TestNegativeBSDNameLengthIsRefused(t *testing.T) {
+	a := arFile(t, "#1/-5", []byte("abcdefgh"))
+	_, err := archiveMembers(a)
+	if err == nil || !strings.Contains(err.Error(), "bad BSD name length") {
+		t.Fatalf("err = %v, want a refusal of the BSD name length", err)
+	}
 }

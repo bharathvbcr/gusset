@@ -200,7 +200,8 @@ func seal(archive, prefix, out string) error {
 		return err
 	}
 	// Verify what ships, not only what was verified: the archive must hold
-	// exactly the object that passed, byte for byte.
+	// exactly the object that passed, byte for byte, plus only the padding
+	// Apple's ar writes.
 	if err := archiveHoldsExactly(out, obj); err != nil {
 		os.Remove(out)
 		return fmt.Errorf("%s does not hold the verified object, removed: %w", out, err)
@@ -210,7 +211,9 @@ func seal(archive, prefix, out string) error {
 
 // archiveHoldsExactly fails unless archive's only member, symbol tables aside,
 // has the same bytes as obj. It reads both the GNU/SysV format (ar on Linux)
-// and the BSD one with #1/len names (ar on darwin).
+// and the BSD one with #1/len names (ar on darwin). Apple's ar pads a BSD
+// member with '\n' to a multiple of 8 inside its declared size, so there obj
+// may be followed by exactly that padding and nothing else.
 func archiveHoldsExactly(archive, obj string) error {
 	want, err := os.ReadFile(obj)
 	if err != nil {
@@ -223,15 +226,26 @@ func archiveHoldsExactly(archive, obj string) error {
 	if len(members) != 1 {
 		return fmt.Errorf("%d members, want 1", len(members))
 	}
-	if !bytes.Equal(members[0], want) {
-		return fmt.Errorf("its member (%d bytes) differs from %s (%d bytes)", len(members[0]), obj, len(want))
+	m := members[0]
+	padded := m.bsd && len(m.data) == roundup8(len(want)) && bytes.Equal(m.data[:len(want)], want) &&
+		len(bytes.Trim(m.data[len(want):], "\n")) == 0
+	if !bytes.Equal(m.data, want) && !padded {
+		return fmt.Errorf("its member (%d bytes) differs from %s (%d bytes)", len(m.data), obj, len(want))
 	}
 	return nil
 }
 
+func roundup8(n int) int { return (n + 7) &^ 7 }
+
+// arMember is one member's data; bsd is set when its name was a #1/len one.
+type arMember struct {
+	data []byte
+	bsd  bool
+}
+
 // archiveMembers returns the contents of every member that is not a symbol
 // table or the GNU long-name table.
-func archiveMembers(archive string) ([][]byte, error) {
+func archiveMembers(archive string) ([]arMember, error) {
 	data, err := os.ReadFile(archive)
 	if err != nil {
 		return nil, err
@@ -240,7 +254,7 @@ func archiveMembers(archive string) ([][]byte, error) {
 	if !bytes.HasPrefix(data, []byte(magic)) {
 		return nil, fmt.Errorf("%s is not an ar archive", archive)
 	}
-	var members [][]byte
+	var members []arMember
 	for off := len(magic); off < len(data); {
 		if off+header > len(data) || string(data[off+58:off+60]) != "`\n" {
 			return nil, fmt.Errorf("%s: malformed member header at offset %d", archive, off)
@@ -251,9 +265,10 @@ func archiveMembers(archive string) ([][]byte, error) {
 			return nil, fmt.Errorf("%s: bad member size at offset %d", archive, off)
 		}
 		body := data[off+header : off+header+size]
-		if n, ok := strings.CutPrefix(name, "#1/"); ok { // BSD: name precedes the data
+		n, bsd := strings.CutPrefix(name, "#1/")
+		if bsd { // BSD: name precedes the data
 			nlen, err := strconv.Atoi(n)
-			if err != nil || nlen > len(body) {
+			if err != nil || nlen < 0 || nlen > len(body) {
 				return nil, fmt.Errorf("%s: bad BSD name length at offset %d", archive, off)
 			}
 			name, body = strings.TrimRight(string(body[:nlen]), "\x00"), body[nlen:]
@@ -261,7 +276,7 @@ func archiveMembers(archive string) ([][]byte, error) {
 		switch name {
 		case "/", "//", "/SYM64/", "__.SYMDEF", "__.SYMDEF SORTED", "__.SYMDEF_64", "__.SYMDEF_64 SORTED":
 		default:
-			members = append(members, body)
+			members = append(members, arMember{body, bsd})
 		}
 		off += header + size + size%2
 	}
