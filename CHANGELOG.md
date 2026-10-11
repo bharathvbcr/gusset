@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased] - 2026-10-10 · The hammer's seed replays, and a nightly leg watches the heap
+
+From `ft-94a2f74b` (the 2026-09-30 nightly SIGSEGV in `gusset_take`, run 36702124084, seed 1790763872967289580). No library, ABI or Go API change. Tests and CI only. **The crash is not fixed and its cause is not known.**
+
+- **A recorded seed can be replayed.** `TestHammer_BoundaryUnderChaos` drew its seed from `time.Now()` with no override, so the crash's seed could not be rerun. `GUSSET_HAMMER_SEED` now sets it, and a value that does not parse as a uint64 fails the test instead of quietly running a different seed. The seed goes to stderr before the lanes start: without `-v`, `t.Logf` output is lost when a cgo call crashes the process. Every failing run ends with `replay: GUSSET_HAMMER_SEED=… GUSSET_STRESS=…`. A seed fixes each lane's operations, sizes and deadlines. It does not fix how the lanes and the Rust workers interleave. `TestHammerSeed_ReplaysTheRecordedSeed` checks the recorded seed, the uint64 bounds and the rejected forms.
+- **What the dump shows.** The faulting PC is in glibc. The registers match `_mid_memalign` walking the thread's tcache chain for a 64-byte-aligned (`rbx=0x40`) 973-byte (`rsi=0x3cd`) request, bin 60 (`rdi=0x3c`, the 992-byte class), whose decoded `next` was non-canonical (`rax=rdx=0x5abce2e8632f6205`). The 973-byte request is `RawBuffer::from_bytes` in `gusset_take`. So the first 8 bytes of a freed 992-class chunk on that thread had already been overwritten. `drainPipe` found the damage. It did not cause it. The writer is unidentified.
+- **Replay, bounded (no repro).** 30 runs on the crash seed in an arm64 Linux container (Debian, glibc 2.36, Go 1.27.1, 4 CPUs, 60 s each, `GOGC=1`), all passed: 10 with `GLIBC_TUNABLES=glibc.malloc.tcache_count=0:glibc.malloc.perturb=165 GOTRACEBACK=crash`, 10 with Gusset built `-Zsanitizer=address` (nightly-2026-10-05) in a `go test -asan` binary, and 10 under `-race`. The 2026-10-09 audit ran 125 more, all passing. CI's x86-64 ubuntu-24.04 (glibc 2.39), where the crash happened, has not run either new leg yet.
+- **New nightly job `hammer-heap`.** It runs those two legs for 5 minutes each on ubuntu-latest, where a stray heap write faults at the write rather than in a later allocation on another thread. The ASan leg checks that `gusset_take` in the linked binary calls into ASan. Without that check, a link against the plain archive, or a cached link of it, would pass unexamined. `binutils`' `nm` lists no symbols for rustc's LTO objects, so the check disassembles the function. The job is in `report.needs`, so a failure opens an issue.
+
 ## [Unreleased] - 2026-10-10 · The log ring keeps its lines under contention
 
 From the 2026-10-09 audit (`gs-log-ring-quadratic-eviction`). No export signature, ABI or Go API change; `gusset::ffi::log_dropped_total` is a new Rust diagnostic.
