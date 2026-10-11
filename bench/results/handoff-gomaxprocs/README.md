@@ -170,6 +170,11 @@ sleeper wakes up to 0.91 ms late, about what an idle process shows on that VM
 reverted build's 8-9 µs there comes from the reader's yields waking threads,
 the cost `a4d4cd8` removed.
 
+`wake-tail/` measures the sleeper's tail on both builds of `4114abe` under host
+load, at two and four pinned Linux CPUs, and under a 2-CPU quota. The
+pre-fix gate passes the test's median check on two pinned CPUs, and no tail
+threshold separates the builds on Linux.
+
 ## Reproduce
 
 Two extra worktrees, one at `159d352` and one at `159d352` with the revert

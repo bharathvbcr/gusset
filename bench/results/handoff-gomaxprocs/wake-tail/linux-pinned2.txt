@@ -1,0 +1,106 @@
+nproc 2 GOMAXPROCS-default  cpu.max max 100000
+round 1 loadavg 0.23 0.14 0.42
+fixed --- PASS | n=1000 p25=292ns p50=626ns p75=1.376µs p90=612.335µs p95=2.74938ms p99=3.484506ms max=5.669219ms over200us=120 over1ms=81
+prefix --- PASS | n=1000 p25=16.793µs p50=41.876µs p75=73.25µs p90=139.959µs p95=472.876µs p99=1.744087ms max=11.466313ms over200us=73 over1ms=20
+fixed-race --- PASS | n=1000 p25=1.375µs p50=2.875µs p75=18.792µs p90=2.751881ms p95=2.976673ms p99=3.62809ms max=4.741634ms over200us=158 over1ms=132
+prefix-race --- PASS | n=1000 p25=22.959µs p50=35.334µs p75=80.751µs p90=148.084µs p95=437.085µs p99=3.043006ms max=17.564533ms over200us=77 over1ms=26
+fixed:GOGC=1 --- PASS | n=1000 p25=251ns p50=583ns p75=1.625µs p90=603.001µs p95=2.745089ms p99=3.349715ms max=3.989924ms over200us=130 over1ms=82
+prefix:GOGC=1 --- PASS | n=1000 p25=14.792µs p50=36µs p75=63.25µs p90=120.668µs p95=235.792µs p99=1.937295ms max=2.954089ms over200us=54 over1ms=20
+round 2 loadavg 0.21 0.14 0.42
+fixed --- PASS | n=1000 p25=251ns p50=626ns p75=2.251µs p90=875.835µs p95=2.798713ms p99=3.52109ms max=5.968761ms over200us=121 over1ms=94
+prefix --- PASS | n=1000 p25=12.501µs p50=38.459µs p75=68.834µs p90=126.918µs p95=267.043µs p99=2.778922ms max=21.079248ms over200us=61 over1ms=29
+fixed-race --- PASS | n=1000 p25=1.459µs p50=2.917µs p75=16.959µs p90=2.673381ms p95=2.999798ms p99=3.767799ms max=4.795384ms over200us=158 over1ms=136
+prefix-race --- PASS | n=1000 p25=22.042µs p50=32.667µs p75=69.334µs p90=136.375µs p95=381.501µs p99=3.185673ms max=3.788632ms over200us=69 over1ms=34
+fixed:GOGC=1 --- PASS | n=1000 p25=209ns p50=542ns p75=1.459µs p90=575.751µs p95=2.114504ms p99=3.475798ms max=6.013386ms over200us=122 over1ms=78
+prefix:GOGC=1 --- PASS | n=1000 p25=9.125µs p50=30.917µs p75=56.417µs p90=126.959µs p95=508.752µs p99=3.058298ms max=3.60909ms over200us=62 over1ms=38
+round 3 loadavg 0.20 0.14 0.42
+fixed --- PASS | n=1000 p25=251ns p50=584ns p75=1.667µs p90=1.55942ms p95=2.809756ms p99=3.60684ms max=5.996511ms over200us=145 over1ms=110
+prefix --- PASS | n=1000 p25=10.251µs p50=32.751µs p75=57.834µs p90=115.376µs p95=146.459µs p99=2.583421ms max=3.803091ms over200us=39 over1ms=19
+fixed-race --- PASS | n=1000 p25=1.376µs p50=2.542µs p75=5µs p90=950.461µs p95=2.810255ms p99=3.594048ms max=5.75897ms over200us=116 over1ms=100
+prefix-race --- PASS | n=1000 p25=21.834µs p50=35.709µs p75=68.917µs p90=179.417µs p95=886.127µs p99=3.324799ms max=3.620423ms over200us=93 over1ms=49
+fixed:GOGC=1 --- PASS | n=1000 p25=250ns p50=542ns p75=1.458µs p90=605.877µs p95=2.789839ms p99=3.491923ms max=4.880092ms over200us=124 over1ms=79
+prefix:GOGC=1 --- PASS | n=1000 p25=9.667µs p50=24µs p75=50.542µs p90=124.417µs p95=223.626µs p99=2.927881ms max=3.505882ms over200us=51 over1ms=29
+round 4 loadavg 0.18 0.14 0.41
+fixed --- PASS | n=1000 p25=251ns p50=584ns p75=1.834µs p90=1.170794ms p95=2.797547ms p99=3.622049ms max=6.041762ms over200us=134 over1ms=108
+prefix --- PASS | n=1000 p25=8.167µs p50=26.292µs p75=57.293µs p90=132.292µs p95=420.668µs p99=2.996506ms max=3.56109ms over200us=66 over1ms=39
+fixed-race --- PASS | n=1000 p25=1.209µs p50=2.709µs p75=7.667µs p90=763.752µs p95=2.797797ms p99=3.582257ms max=5.777928ms over200us=115 over1ms=94
+prefix-race --- PASS | n=1000 p25=24.126µs p50=30.209µs p75=52µs p90=107.625µs p95=144.543µs p99=1.823837ms max=3.674674ms over200us=32 over1ms=12
+fixed:GOGC=1 --- PASS | n=1000 p25=250ns p50=542ns p75=1.417µs p90=1.404128ms p95=2.854297ms p99=3.785591ms max=7.876723ms over200us=132 over1ms=101
+prefix:GOGC=1 --- PASS | n=1000 p25=12.292µs p50=30.417µs p75=55.375µs p90=116.5µs p95=222.25µs p99=3.070965ms max=3.588049ms over200us=54 over1ms=38
+round 5 loadavg 0.49 0.20 0.43
+fixed --- PASS | n=1000 p25=251ns p50=542ns p75=1.292µs p90=589.751µs p95=2.731755ms p99=3.457798ms max=6.572138ms over200us=116 over1ms=86
+prefix --- PASS | n=1000 p25=10.542µs p50=34.084µs p75=56.708µs p90=127.959µs p95=346.543µs p99=2.892047ms max=3.512341ms over200us=64 over1ms=31
+fixed-race --- PASS | n=1000 p25=1.292µs p50=2.584µs p75=5.208µs p90=2.135671ms p95=2.800797ms p99=3.553965ms max=3.801257ms over200us=125 over1ms=111
+prefix-race --- PASS | n=1000 p25=22.542µs p50=32.458µs p75=60.084µs p90=129.292µs p95=327.501µs p99=2.773172ms max=3.795674ms over200us=66 over1ms=27
+fixed:GOGC=1 --- PASS | n=1000 p25=209ns p50=500ns p75=1.125µs p90=84.542µs p95=1.356878ms p99=3.597674ms max=6.206179ms over200us=94 over1ms=56
+prefix:GOGC=1 --- PASS | n=1000 p25=11.292µs p50=29.376µs p75=50.834µs p90=117.001µs p95=262.46µs p99=3.029922ms max=4.08655ms over200us=59 over1ms=32
+round 6 loadavg 0.45 0.20 0.43
+fixed --- PASS | n=1000 p25=209ns p50=501ns p75=1.418µs p90=1.241711ms p95=2.800964ms p99=3.603132ms max=5.859178ms over200us=142 over1ms=105
+prefix --- PASS | n=1000 p25=8.625µs p50=30.501µs p75=55.25µs p90=112.418µs p95=193.084µs p99=2.875839ms max=3.530507ms over200us=49 over1ms=29
+fixed-race --- PASS | n=1000 p25=1.251µs p50=2.459µs p75=4.75µs p90=2.741464ms p95=2.801339ms p99=3.790049ms max=5.876595ms over200us=130 over1ms=117
+prefix-race --- PASS | n=1000 p25=25.625µs p50=32.5µs p75=55.126µs p90=142.542µs p95=495.96µs p99=3.074173ms max=3.576257ms over200us=76 over1ms=44
+fixed:GOGC=1 --- PASS | n=1000 p25=250ns p50=542ns p75=1.333µs p90=302.751µs p95=2.772756ms p99=3.599173ms max=5.859303ms over200us=105 over1ms=76
+prefix:GOGC=1 --- PASS | n=1000 p25=8.792µs p50=22.25µs p75=48.417µs p90=93.958µs p95=200.376µs p99=2.880798ms max=3.589465ms over200us=51 over1ms=26
+round 7 loadavg 0.41 0.19 0.43
+fixed --- PASS | n=1000 p25=209ns p50=458ns p75=1.126µs p90=568.001µs p95=2.796922ms p99=3.601882ms max=3.862508ms over200us=111 over1ms=83
+prefix --- PASS | n=1000 p25=8.668µs p50=34.208µs p75=51.459µs p90=96.084µs p95=171.417µs p99=2.880172ms max=3.572007ms over200us=44 over1ms=29
+fixed-race --- PASS | n=1000 p25=1.333µs p50=2.5µs p75=5.334µs p90=493.377µs p95=2.801214ms p99=3.587299ms max=3.800049ms over200us=106 over1ms=85
+prefix-race --- PASS | n=1000 p25=24.917µs p50=31.875µs p75=49.667µs p90=124.126µs p95=401.001µs p99=2.896881ms max=3.524174ms over200us=61 over1ms=35
+fixed:GOGC=1 --- PASS | n=1000 p25=250ns p50=542ns p75=1.334µs p90=698.46µs p95=2.789006ms p99=3.556673ms max=3.807091ms over200us=114 over1ms=89
+prefix:GOGC=1 --- PASS | n=1000 p25=13.25µs p50=37.25µs p75=59.917µs p90=116.542µs p95=175.084µs p99=2.983214ms max=3.649216ms over200us=45 over1ms=27
+round 8 loadavg 0.38 0.19 0.43
+fixed --- PASS | n=1000 p25=209ns p50=501ns p75=1.334µs p90=2.402339ms p95=2.852255ms p99=3.608549ms max=5.866428ms over200us=146 over1ms=120
+prefix --- PASS | n=1000 p25=11.834µs p50=30.125µs p75=50.084µs p90=90.584µs p95=138µs p99=2.625964ms max=3.644632ms over200us=37 over1ms=22
+fixed-race --- PASS | n=1000 p25=1.334µs p50=2.708µs p75=21.334µs p90=2.800589ms p95=3.260006ms p99=3.783632ms max=5.989095ms over200us=197 over1ms=179
+prefix-race --- PASS | n=1000 p25=22.459µs p50=30.709µs p75=57.834µs p90=128.251µs p95=456.126µs p99=2.751089ms max=3.529841ms over200us=70 over1ms=40
+fixed:GOGC=1 --- PASS | n=1000 p25=209ns p50=459ns p75=1.125µs p90=1.459711ms p95=2.800797ms p99=3.788007ms max=6.740763ms over200us=119 over1ms=104
+prefix:GOGC=1 --- PASS | n=1000 p25=13.084µs p50=27.626µs p75=48.833µs p90=87.334µs p95=136.459µs p99=2.836214ms max=3.550215ms over200us=37 over1ms=22
+round 9 loadavg 0.59 0.24 0.44
+fixed --- PASS | n=1000 p25=209ns p50=501ns p75=1.208µs p90=194.542µs p95=2.797088ms p99=3.547465ms max=3.804966ms over200us=100 over1ms=83
+prefix --- PASS | n=1000 p25=8.75µs p50=26.167µs p75=49.126µs p90=97.417µs p95=163.25µs p99=2.930298ms max=33.766396ms over200us=46 over1ms=32
+fixed-race --- PASS | n=1000 p25=1.501µs p50=3.083µs p75=35.292µs p90=2.811839ms p95=3.456923ms p99=3.785758ms max=6.371304ms over200us=214 over1ms=187
+prefix-race --- PASS | n=1000 p25=23.708µs p50=29.667µs p75=52.584µs p90=106.751µs p95=199.209µs p99=2.744589ms max=3.643049ms over200us=50 over1ms=24
+fixed:GOGC=1 --- PASS | n=1000 p25=251ns p50=542ns p75=1.376µs p90=425.835µs p95=2.769089ms p99=3.570007ms max=5.009635ms over200us=112 over1ms=85
+prefix:GOGC=1 --- PASS | n=1000 p25=14.126µs p50=36.542µs p75=57.292µs p90=116.751µs p95=169.792µs p99=2.739797ms max=3.551923ms over200us=39 over1ms=24
+round 10 loadavg 0.86 0.30 0.46
+fixed --- PASS | n=1000 p25=209ns p50=500ns p75=1.208µs p90=470.126µs p95=2.797964ms p99=3.569632ms max=3.820133ms over200us=110 over1ms=86
+prefix --- PASS | n=1000 p25=11.5µs p50=34.292µs p75=58.667µs p90=119.084µs p95=196.668µs p99=3.101298ms max=3.598215ms over200us=50 over1ms=30
+fixed-race --- PASS | n=1000 p25=1.417µs p50=2.875µs p75=22.417µs p90=2.670589ms p95=2.805839ms p99=3.584841ms max=3.801757ms over200us=156 over1ms=133
+prefix-race --- PASS | n=1000 p25=26.042µs p50=33.376µs p75=53.834µs p90=125.709µs p95=243.126µs p99=3.118589ms max=3.579424ms over200us=59 over1ms=29
+fixed:GOGC=1 --- PASS | n=1000 p25=250ns p50=542ns p75=1.417µs p90=1.552669ms p95=2.802922ms p99=3.605716ms max=5.931719ms over200us=149 over1ms=112
+prefix:GOGC=1 --- PASS | n=1000 p25=12.584µs p50=35.876µs p75=66.584µs p90=109.584µs p95=143.209µs p99=2.911131ms max=3.576173ms over200us=40 over1ms=23
+round 11 loadavg 1.03 0.35 0.47
+fixed --- PASS | n=1000 p25=251ns p50=625ns p75=1.667µs p90=2.058004ms p95=2.812047ms p99=3.648132ms max=8.354807ms over200us=149 over1ms=109
+prefix --- PASS | n=1000 p25=8µs p50=24.084µs p75=50.918µs p90=95.251µs p95=156.376µs p99=2.905297ms max=3.606549ms over200us=45 over1ms=31
+fixed-race --- PASS | n=1000 p25=1.292µs p50=2.583µs p75=7.042µs p90=532.585µs p95=2.800505ms p99=3.557132ms max=3.800632ms over200us=111 over1ms=88
+prefix-race --- PASS | n=1000 p25=24.501µs p50=38.709µs p75=82.375µs p90=184.834µs p95=737.335µs p99=2.972173ms max=3.798132ms over200us=93 over1ms=43
+fixed:GOGC=1 --- PASS | n=1000 p25=334ns p50=833ns p75=21.542µs p90=1.030752ms p95=2.798589ms p99=3.600799ms max=5.794344ms over200us=157 over1ms=103
+prefix:GOGC=1 --- PASS | n=1000 p25=11.001µs p50=28.75µs p75=62.875µs p90=136.459µs p95=443.959µs p99=3.119006ms max=7.823015ms over200us=64 over1ms=42
+round 12 loadavg 1.11 0.37 0.48
+fixed --- PASS | n=1000 p25=292ns p50=708ns p75=8µs p90=1.799004ms p95=2.909214ms p99=3.594966ms max=5.788012ms over200us=172 over1ms=120
+prefix --- PASS | n=1000 p25=8.375µs p50=28.876µs p75=56.625µs p90=117.584µs p95=293.126µs p99=3.012173ms max=3.597507ms over200us=62 over1ms=33
+fixed-race --- PASS | n=1000 p25=1.333µs p50=2.625µs p75=8.459µs p90=464.751µs p95=2.786631ms p99=3.551882ms max=3.801466ms over200us=119 over1ms=84
+prefix-race --- PASS | n=1000 p25=25.167µs p50=32.959µs p75=58.708µs p90=134.834µs p95=731.876µs p99=3.105798ms max=3.752091ms over200us=69 over1ms=47
+fixed:GOGC=1 --- PASS | n=1000 p25=250ns p50=500ns p75=1.042µs p90=342.293µs p95=2.800964ms p99=3.666673ms max=5.990054ms over200us=103 over1ms=83
+prefix:GOGC=1 --- PASS | n=1000 p25=5.001µs p50=9.834µs p75=42.584µs p90=74.875µs p95=142.584µs p99=3.22934ms max=3.592965ms over200us=45 over1ms=35
+round 13 loadavg 1.34 0.43 0.50
+fixed --- PASS | n=1000 p25=209ns p50=459ns p75=875ns p90=584.418µs p95=2.789547ms p99=3.443507ms max=3.842883ms over200us=110 over1ms=93
+prefix --- PASS | n=1000 p25=5.292µs p50=11.084µs p75=50.126µs p90=90.417µs p95=149.167µs p99=3.173964ms max=3.719215ms over200us=42 over1ms=31
+fixed-race --- PASS | n=1000 p25=1.292µs p50=2.459µs p75=10.708µs p90=2.767589ms p95=2.904589ms p99=3.593173ms max=5.861594ms over200us=153 over1ms=132
+prefix-race --- PASS | n=1000 p25=26.376µs p50=32.126µs p75=62.543µs p90=129.542µs p95=370.668µs p99=3.30884ms max=3.658549ms over200us=62 over1ms=39
+fixed:GOGC=1 --- PASS | n=1000 p25=209ns p50=459ns p75=917ns p90=135.959µs p95=2.759797ms p99=3.460048ms max=6.102304ms over200us=96 over1ms=75
+prefix:GOGC=1 --- PASS | n=1000 p25=5.167µs p50=15.5µs p75=51.084µs p90=92.751µs p95=205.626µs p99=3.03959ms max=3.581132ms over200us=52 over1ms=39
+round 14 loadavg 1.34 0.43 0.50
+fixed --- PASS | n=1000 p25=209ns p50=417ns p75=792ns p90=349.667µs p95=2.80088ms p99=3.60109ms max=8.771642ms over200us=105 over1ms=90
+prefix --- PASS | n=1000 p25=5µs p50=11.084µs p75=43.25µs p90=61.417µs p95=116.668µs p99=2.632964ms max=3.456549ms over200us=35 over1ms=20
+fixed-race --- PASS | n=1000 p25=1.125µs p50=2.334µs p75=7.792µs p90=2.797756ms p95=2.985464ms p99=3.596674ms max=5.885261ms over200us=171 over1ms=153
+prefix-race --- PASS | n=1000 p25=25.584µs p50=28.083µs p75=42.083µs p90=95.251µs p95=301.084µs p99=2.807756ms max=3.755591ms over200us=57 over1ms=46
+fixed:GOGC=1 --- PASS | n=1000 p25=209ns p50=542ns p75=1.001µs p90=408.251µs p95=2.798381ms p99=3.581423ms max=6.509429ms over200us=110 over1ms=82
+prefix:GOGC=1 --- PASS | n=1000 p25=5.084µs p50=15.083µs p75=49.917µs p90=95.126µs p95=638.043µs p99=3.094757ms max=3.744341ms over200us=61 over1ms=45
+round 15 loadavg 1.56 0.49 0.52
+fixed --- PASS | n=1000 p25=250ns p50=542ns p75=1.542µs p90=854.71µs p95=2.799547ms p99=3.607298ms max=5.891761ms over200us=133 over1ms=87
+prefix --- PASS | n=1000 p25=5.208µs p50=17.334µs p75=52.083µs p90=95.918µs p95=190.334µs p99=3.146423ms max=3.568049ms over200us=46 over1ms=36
+fixed-race --- PASS | n=1000 p25=1.125µs p50=2.25µs p75=4.5µs p90=913.669µs p95=2.800006ms p99=3.551715ms max=5.820011ms over200us=120 over1ms=96
+prefix-race --- PASS | n=1000 p25=26.458µs p50=31.667µs p75=57.417µs p90=136.501µs p95=867.086µs p99=3.071089ms max=3.735299ms over200us=64 over1ms=48
+fixed:GOGC=1 --- PASS | n=1000 p25=209ns p50=542ns p75=1.333µs p90=287.917µs p95=2.79588ms p99=3.547423ms max=5.991054ms over200us=102 over1ms=81
+prefix:GOGC=1 --- PASS | n=1000 p25=7.5µs p50=23.959µs p75=51.167µs p90=113.376µs p95=263.167µs p99=3.111715ms max=3.594257ms over200us=54 over1ms=36

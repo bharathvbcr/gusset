@@ -1,0 +1,34 @@
+diff --git a/handoff_sched_internal_test.go b/handoff_sched_internal_test.go
+index 58e6eb8..a3a0ae8 100644
+--- a/handoff_sched_internal_test.go
++++ b/handoff_sched_internal_test.go
+@@ -107,7 +107,7 @@ func TestSerialCall_LeavesAPForOtherGoroutines(t *testing.T) {
+ 	const nap = 200 * time.Microsecond
+ 	var late []time.Duration
+ 	time.Sleep(20 * time.Millisecond) // past the first-call and refresh paths
+-	for deadline := time.Now().Add(2 * time.Second); len(late) < 300 && time.Now().Before(deadline); {
++	for deadline := time.Now().Add(2 * time.Second); len(late) < 1000 && time.Now().Before(deadline); {
+ 		t0 := time.Now()
+ 		time.Sleep(nap)
+ 		late = append(late, time.Since(t0)-nap)
+@@ -119,6 +119,20 @@ func TestSerialCall_LeavesAPForOtherGoroutines(t *testing.T) {
+ 
+ 	slices.Sort(late)
+ 	median := late[len(late)/2]
++	{
++		q := func(f float64) time.Duration { return late[int(f*float64(len(late)-1))] }
++		var o200, o1ms int
++		for _, d := range late {
++			if d > nap {
++				o200++
++			}
++			if d > time.Millisecond {
++				o1ms++
++			}
++		}
++		t.Logf("PROBE n=%d p25=%v p50=%v p75=%v p90=%v p95=%v p99=%v max=%v over200us=%d over1ms=%d",
++			len(late), q(.25), q(.5), q(.75), q(.9), q(.95), q(.99), late[len(late)-1], o200, o1ms)
++	}
+ 	// 10x the median measured with a P to spare, and a third of the lowest
+ 	// median measured with both Ps held.
+ 	if limit := 100 * time.Microsecond; median > limit {
