@@ -173,6 +173,77 @@ jobs:
       - name: Hammer without the race detector (more operations)
         run: GUSSET_STRESS=5m GOGC=1 go test -run Hammer -count=1 -timeout 30m -v .
 
+  # The 2026-09-30 SIGSEGV (seed 1790763872967289580) was glibc faulting inside
+  # gusset_take's 973-byte posix_memalign: the 992-byte tcache bin on that
+  # thread held a chunk whose next pointer had been overwritten (rdi=0x3c,
+  # rbx=0x40, rax non-canonical). drainPipe was where the damage was found, not
+  # where it was done, and the plain hammer cannot say who wrote it. These two
+  # legs run the same hammer where a stray write faults at the write.
+  hammer-heap:
+    name: Chaos hammer (heap checks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Rust Nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.x'
+          cache: false
+
+      # tcache off sends every free through the bins glibc checks on each
+      # malloc and free, so a corrupted chunk aborts close to the write instead
+      # of minutes later on whichever thread next allocates that size. perturb
+      # fills freed memory with 0xa5, so a stale read comes back as a corrupted
+      # result the hammer reports. GOTRACEBACK=crash dumps every thread with
+      # registers, not only the faulting goroutine. The test binary is built
+      # first so the tunables apply to the hammer, not the compiler.
+      - name: Hammer with glibc heap checks and a full crash dump
+        run: |
+          cargo +stable build --release -p gusset
+          go generate ./internal/ffi
+          go test -c -o hammer.test .
+          GLIBC_TUNABLES=glibc.malloc.tcache_count=0:glibc.malloc.perturb=165 \
+            GOTRACEBACK=crash GUSSET_STRESS=5m GOGC=1 \
+            ./hammer.test -test.run Hammer -test.count=1 -test.timeout 30m -test.v
+
+      # Rust instrumented with ASan, linked into a Go -asan binary, which brings
+      # the ASan runtime and checks Go's own loads and stores, the unsafe.Slice
+      # views of Rust buffers and the completion ring included. -asan and -race
+      # do not combine, so this is a separate run. The instrumented archive
+      # replaces target/release/libgusset.a, and go generate records its hash so
+      # the build cache cannot link the plain one.
+      # Runs even when the glibc leg failed: the two catch different writers.
+      - name: Hammer under ASan (Rust and Go)
+        if: ${{ !cancelled() }}
+        env:
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+        run: |
+          RUSTFLAGS=-Zsanitizer=address cargo +${{ env.RUST_NIGHTLY }} build --release -p gusset \
+            --target x86_64-unknown-linux-gnu
+          mkdir -p target/release
+          cp target/x86_64-unknown-linux-gnu/release/libgusset.a target/release/libgusset.a
+          go generate ./internal/ffi
+          go test -asan -c -o hammer-asan.test .
+          # The libasan that -asan links proves nothing about the Rust side.
+          # Only an instrumented gusset_take calls into it, and a binary linked
+          # against the plain archive (or a cached link of it) has no such call.
+          if ! objdump -d --disassemble=gusset_take hammer-asan.test | grep -q '__asan'; then
+            echo "::error::gusset_take in the hammer binary is not ASan-instrumented"
+            exit 1
+          fi
+          GUSSET_STRESS=5m GOGC=1 \
+            ./hammer-asan.test -test.run Hammer -test.count=1 -test.timeout 30m -test.v
+
   # libFuzzer targets over the Rust side of the boundary (fuzz/, its own
   # workspace): the log ring and drain, panic-payload truncation, ring slot
   # records, and arbitrary 40-byte call headers through a real job.
@@ -241,7 +312,7 @@ jobs:
   # main: a dispatch on a branch is someone already watching the run.
   report:
     name: Open an issue on failure
-    needs: [miri, sanitizer, hammer, cargo-fuzz, go-fuzz]
+    needs: [miri, sanitizer, hammer, hammer-heap, cargo-fuzz, go-fuzz]
     if: failure() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
