@@ -281,3 +281,95 @@ func TestNegativeBSDNameLengthIsRefused(t *testing.T) {
 		t.Fatalf("err = %v, want a refusal of the BSD name length", err)
 	}
 }
+
+// The padding rule at every length that matters: an aligned object takes no
+// padding, and one at 1, 3 or 7 past a multiple of 8 takes exactly the '\n's
+// that reach the next multiple. One byte more or less is a member that is not
+// the verified object. Lengths straddle 512 because that is where a stray
+// 8-byte round-up of an already aligned object would show.
+func TestArchivePaddingAtEveryAlignment(t *testing.T) {
+	bsd := func(data []byte) []byte { return append([]byte("odd.o\x00\x00\x00"), data...) }
+	for _, n := range []int{512, 513, 515, 519, 520} {
+		obj := bytes.Repeat([]byte{0xcf}, n)
+		o := filepath.Join(t.TempDir(), "odd.o")
+		if err := os.WriteFile(o, obj, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		withTail := func(k int) []byte { return append(append([]byte(nil), obj...), bytes.Repeat([]byte{'\n'}, k)...) }
+		want := roundup8(n) - n
+		if err := archiveHoldsExactly(arFile(t, "#1/8", bsd(withTail(want))), o); err != nil {
+			t.Errorf("%d bytes with the %d-byte padding Apple writes was refused: %v", n, want, err)
+		}
+		// No padding at all is exactly the object, and stays acceptable.
+		if err := archiveHoldsExactly(arFile(t, "#1/8", bsd(withTail(0))), o); err != nil {
+			t.Errorf("%d bytes with no padding was refused: %v", n, err)
+		}
+		for _, k := range []int{want + 1, want + 8} {
+			if err := archiveHoldsExactly(arFile(t, "#1/8", bsd(withTail(k))), o); err == nil {
+				t.Errorf("%d bytes with %d bytes of padding (longer than roundup8) was accepted", n, k)
+			}
+		}
+		if want > 1 {
+			if err := archiveHoldsExactly(arFile(t, "#1/8", bsd(withTail(want-1))), o); err == nil {
+				t.Errorf("%d bytes with %d bytes of padding (short of roundup8) was accepted", n, want-1)
+			}
+		}
+	}
+}
+
+// A member whose prefix is not the verified object is refused even at the exact
+// padded length.
+func TestArchiveRefusesAPaddedMemberWithADifferentPrefix(t *testing.T) {
+	obj := bytes.Repeat([]byte{0xcf}, 515)
+	o := filepath.Join(t.TempDir(), "odd.o")
+	if err := os.WriteFile(o, obj, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	other := append([]byte(nil), obj...)
+	other[100] ^= 0xff
+	data := append(append([]byte("odd.o\x00\x00\x00"), other...), "\n\n\n\n\n"...)
+	if err := archiveHoldsExactly(arFile(t, "#1/8", data), o); err == nil {
+		t.Fatal("a padded member with one differing byte was accepted")
+	}
+}
+
+// Archives cut short or lying about their sizes are errors, never a panic and
+// never an accepted member.
+func TestArchiveMembersRefusesTruncatedAndLyingArchives(t *testing.T) {
+	obj := bytes.Repeat([]byte{1}, 64)
+	o := filepath.Join(t.TempDir(), "odd.o")
+	if err := os.WriteFile(o, obj, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	whole := arFile(t, "#1/8", append([]byte("odd.o\x00\x00\x00"), obj...))
+	if err := archiveHoldsExactly(whole, o); err != nil {
+		t.Fatalf("the intact archive was refused: %v", err)
+	}
+	raw, err := os.ReadFile(whole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string][]byte{
+		"cut inside the data":          raw[:len(raw)-10],
+		"cut inside the header":        raw[:8+30],
+		"a stray byte after the magic": append([]byte("!<arch>\n"), 'x'),
+	}
+	for what, b := range cases {
+		a := filepath.Join(t.TempDir(), "cut.a")
+		if err := os.WriteFile(a, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := archiveMembers(a); err == nil {
+			t.Errorf("%s: archiveMembers accepted it", what)
+		}
+		if err := archiveHoldsExactly(a, o); err == nil {
+			t.Errorf("%s: archiveHoldsExactly accepted it", what)
+		}
+	}
+	if _, err := archiveMembers(arFile(t, "#1/4096", []byte("short"))); err == nil || !strings.Contains(err.Error(), "bad BSD name length") {
+		t.Errorf("a BSD name longer than its member: err = %v", err)
+	}
+	if _, err := archiveMembers(arFile(t, "#1/zz", []byte("abcdefgh"))); err == nil {
+		t.Error("a non-numeric BSD name length was accepted")
+	}
+}
