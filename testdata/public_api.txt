@@ -1,0 +1,68 @@
+// Exported surface of package gusset. Generated: see public_api_test.go.
+const ExpectedAbiVersion
+const ExpectedHeaderAlign
+const ExpectedHeaderSize
+const ExpectedLayoutAlign
+const ExpectedLayoutSize
+const ExpectedStatsAlign
+const ExpectedStatsSize
+const ExpectedStatusAlign
+const ExpectedStatusSize
+const MaxBufferBytes
+const MaxDrain
+const MaxPoolSize
+func (b *Buffer) Bytes() []byte
+func (b *Buffer) Free() error
+func (b *Buffer) ID() uint64
+func (h *Handle) Call(ctx context.Context, in []byte) ([]byte, error)
+func (h *Handle) CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error)
+func (h *Handle) Close() error
+func (h *Handle) Discard(ticket uint64) error
+func (h *Handle) NewBuffer(n int) (*Buffer, error)
+func (h *Handle) Submit(ctx context.Context, in any) (uint64, error)
+func (h *Handle) Wait(ctx context.Context, ticket uint64) ([]byte, error)
+func (h *Handle) WaitBuffer(ctx context.Context, ticket uint64) (*Buffer, error)
+func AdviseMemoryLimit(total int64) int64
+func ContextWithOpcode(ctx context.Context, opcode uint32) context.Context
+func DrainLogs(buf []byte) int
+func Open(opts ...Option) (*Handle, error)
+func Shutdown(drain time.Duration) error
+func Stats() AllocStats
+func Threads() int64
+func WithBufferBudget(bytes int64) Option
+func WithDiagnosticEngine() Option
+func WithOpcode(opcode uint32) Option
+func WithPoolSize(n int) Option
+type AllocStats struct {
+	LiveBytes  uint64
+	PeakBytes  uint64
+	AllocCount uint64
+}
+type Buffer struct {
+	// contains filtered or unexported fields
+}
+type Error = ffi.Error
+type Handle struct {
+	// contains filtered or unexported fields
+}
+type Option func(*handleConfig)
+type TraceCarrier interface {
+	TraceID() [16]byte
+	SpanID() [8]byte
+}
+var ErrBadArg
+var ErrBufferBudget
+var ErrClosed
+var ErrGeneric
+var ErrInputTooLarge
+var ErrNilBuffer
+var ErrNilContext
+var ErrNilHandle
+var ErrPanic
+var ErrPoisoned
+var ErrShutdown
+var ErrShutdownIncomplete
+var ErrTicketBusy
+var ErrUnknownTicket
+var OpcodeContextKey
+var SpanContextKey

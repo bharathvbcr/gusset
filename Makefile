@@ -1,4 +1,4 @@
-.PHONY: all build test bench bench-crossover bench-scaling lint ci-local docs docs-check cross fuzz clean install uninstall
+.PHONY: all build test bench bench-crossover bench-scaling lint alloc-gate ci-local docs docs-check cross fuzz clean install install-build uninstall
 
 export PATH := $(PATH):$(shell go env GOPATH)/bin
 
@@ -7,35 +7,79 @@ LIBDIR ?= $(PREFIX)/lib
 INCLUDEDIR ?= $(PREFIX)/include
 BINDIR ?= $(PREFIX)/bin
 PKGCONFIGDIR ?= $(LIBDIR)/pkgconfig
+# Staging root for packagers. Every file lands under $(DESTDIR)<dir>; the
+# generated gusset.pc names the final <dir>, never DESTDIR.
+DESTDIR ?=
+
+# Cargo's output directory, as cargo itself resolves it from the environment.
+TARGET_DIR ?= $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)
+
+# The archive `install` puts at $(LIBDIR)/libgusset.a. By default Gusset's own,
+# built here. Pass ARCHIVE=<umbrella>/target/release/libgusset.a to install the
+# adopter's umbrella archive instead (docs/adoption.md, Option A): that is the
+# only archive a Go binary can link, so it is the one gusset.pc must describe.
+# An explicit ARCHIVE is not rebuilt.
+INSTALL_BUILD := $(if $(filter undefined,$(origin ARCHIVE)),install-build)
+ARCHIVE ?= $(TARGET_DIR)/release/libgusset.a
+
+# The one place the version is typed is [workspace.package] in Cargo.toml.
+# `cargo pkgid` prints path+file:///.../crates/gusset#0.0.2 (or #gusset@0.0.2).
+# HASH, not a literal '#': GNU Make 3.81 (macOS's make) reads '#' inside
+# $(shell …) as a comment and stops with "unterminated call to function".
+HASH := \#
+GUSSET_VERSION = $(shell cargo pkgid -p gusset 2>/dev/null | sed 's/.*[$(HASH)@]//')
 
 all: build
 
 build:
-	cargo build --release
+	cargo build --locked --release
 	go generate ./internal/ffi
 	go build ./...
 
-install: build
-	@mkdir -p $(LIBDIR) $(INCLUDEDIR) $(BINDIR) $(PKGCONFIGDIR)
-	@cp target/release/libgusset.a $(LIBDIR)/libgusset.a
-	@chmod 644 $(LIBDIR)/libgusset.a
-	@cp internal/ffi/gusset.h $(INCLUDEDIR)/gusset.h
-	@chmod 644 $(INCLUDEDIR)/gusset.h
-	@sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@VERSION@|0.0.2|g' gusset.pc.in > $(PKGCONFIGDIR)/gusset.pc
-	@chmod 644 $(PKGCONFIGDIR)/gusset.pc
-	@go build -o $(BINDIR)/gussetvet ./tools/gussetvet
-	@chmod 755 $(BINDIR)/gussetvet
-	@echo "Gusset installed successfully to $(PREFIX)"
+# Installing builds the archive and gussetvet only. `build` is not a dependency:
+# its `go generate` rewrites the tracked internal/ffi/archive_hash.go, and an
+# install must leave the source tree exactly as it found it.
+install-build:
+	cargo build --locked --release
+
+# Shell-quote a make value: 'it'\''s'.
+shq = '$(subst ','\'',$(1))'
+
+# gusset.pc is filled by awk reading the values from the environment, so a path
+# holding `|`, `&` or `\` is copied byte for byte. pkg-config splits Libs and
+# Cflags on whitespace, so a directory with whitespace in it is refused rather
+# than installed as a file that cannot be used.
+install: $(INSTALL_BUILD)
+	@version=$(call shq,$(GUSSET_VERSION)); \
+	case "$$version" in [0-9]*.[0-9]*.[0-9]*) ;; \
+		*) echo "install: cannot read the version from Cargo.toml (cargo pkgid gave '$$version')" >&2; exit 1;; esac; \
+	for d in $(call shq,$(LIBDIR)) $(call shq,$(INCLUDEDIR)); do \
+		case "$$d" in *[[:space:]]*) echo "install: '$$d' contains whitespace; pkg-config cannot use it" >&2; exit 1;; esac; \
+	done; \
+	[ -f $(call shq,$(ARCHIVE)) ] || { echo "install: archive $(call shq,$(ARCHIVE)) does not exist" >&2; exit 1; }; \
+	go build -o $(call shq,$(TARGET_DIR))/gussetvet ./tools/gussetvet || exit 1; \
+	install -d $(call shq,$(DESTDIR)$(LIBDIR)) $(call shq,$(DESTDIR)$(INCLUDEDIR)) \
+		$(call shq,$(DESTDIR)$(BINDIR)) $(call shq,$(DESTDIR)$(PKGCONFIGDIR)) || exit 1; \
+	install -m 644 $(call shq,$(ARCHIVE)) $(call shq,$(DESTDIR)$(LIBDIR))/libgusset.a || exit 1; \
+	install -m 644 internal/ffi/gusset.h $(call shq,$(DESTDIR)$(INCLUDEDIR))/gusset.h || exit 1; \
+	install -m 755 $(call shq,$(TARGET_DIR))/gussetvet $(call shq,$(DESTDIR)$(BINDIR))/gussetvet || exit 1; \
+	GUSSET_PC_LIBDIR=$(call shq,$(LIBDIR)) GUSSET_PC_INCLUDEDIR=$(call shq,$(INCLUDEDIR)) GUSSET_PC_VERSION="$$version" \
+	awk 'function repl(s, from, to,   out, i) { out = ""; while ((i = index(s, from)) > 0) { out = out substr(s, 1, i - 1) to; s = substr(s, i + length(from)) } return out s } \
+		{ $$0 = repl($$0, "@LIBDIR@", ENVIRON["GUSSET_PC_LIBDIR"]); $$0 = repl($$0, "@INCLUDEDIR@", ENVIRON["GUSSET_PC_INCLUDEDIR"]); \
+		  $$0 = repl($$0, "@VERSION@", ENVIRON["GUSSET_PC_VERSION"]); print }' gusset.pc.in \
+		> $(call shq,$(DESTDIR)$(PKGCONFIGDIR))/gusset.pc || exit 1; \
+	chmod 644 $(call shq,$(DESTDIR)$(PKGCONFIGDIR))/gusset.pc; \
+	echo "Gusset $$version installed to" $(call shq,$(DESTDIR)$(PREFIX))
 
 uninstall:
-	@rm -f $(LIBDIR)/libgusset.a
-	@rm -f $(INCLUDEDIR)/gusset.h
-	@rm -f $(PKGCONFIGDIR)/gusset.pc
-	@rm -f $(BINDIR)/gussetvet
-	@echo "Gusset uninstalled from $(PREFIX)"
+	@rm -f $(call shq,$(DESTDIR)$(LIBDIR))/libgusset.a
+	@rm -f $(call shq,$(DESTDIR)$(INCLUDEDIR))/gusset.h
+	@rm -f $(call shq,$(DESTDIR)$(PKGCONFIGDIR))/gusset.pc
+	@rm -f $(call shq,$(DESTDIR)$(BINDIR))/gussetvet
+	@echo Gusset uninstalled from $(call shq,$(DESTDIR)$(PREFIX))
 
 test:
-	cargo test --workspace
+	cargo test --locked --workspace
 	go test -v ./...
 
 # -count=10: benchstat refuses to quote a confidence interval below 6 samples, and
@@ -66,7 +110,7 @@ SCALING_COUNT ?= 6
 BENCH_RESULTS ?= bench/results/$(shell go env GOOS)-$(shell go env GOARCH)-go$(shell go env GOVERSION | sed 's/^go//')-rust$(shell rustc --version | cut -d' ' -f2).txt
 
 bench:
-	cargo build --release
+	cargo build --locked --release
 	RECORD_DIR=. RECORD_PKG=./bench/... bench/record.sh $(BENCH_RESULTS) 1s $(BENCH_COUNT) .
 
 # Raw blocking cgo versus Gusset on byte-identical work.
@@ -84,8 +128,8 @@ bench:
 # take minutes to no extra effect.
 CROSS_SUFFIX ?= $(shell go env GOOS)-$(shell go env GOARCH)-go$(shell go env GOVERSION | sed 's/^go//')-rust$(shell rustc --version | cut -d' ' -f2).txt
 bench-crossover:
-	cargo build --release
-	cargo build --release --manifest-path bench/seed/rs/Cargo.toml
+	cargo build --locked --release
+	cargo build --locked --release --manifest-path bench/seed/rs/Cargo.toml
 	@# Each (shape, transport) arm in its own process.
 	@#
 	@# Not tidiness: a parallel blocking-cgo arm leaves a few hundred Ms behind,
@@ -130,8 +174,8 @@ bench-crossover:
 # withholds its absolute peak once it sees a second transport in the process, so
 # a contaminated run now fails benchplot rather than charting a false result.
 bench-scaling:
-	cargo build --release
-	cargo build --release --manifest-path bench/seed/rs/Cargo.toml
+	cargo build --locked --release
+	cargo build --locked --release --manifest-path bench/seed/rs/Cargo.toml
 	@# Repeated, unlike the thread-pressure target's -count=1.
 	@#
 	@# Repetitions of the *same* transport in one process are safe here in a way
@@ -156,12 +200,17 @@ bench-scaling:
 # Supported platform set, compile-verified. Gusset is unix-only by construction
 # (POSIX pipe, sigaltstack, pthread stack accounting); lib.rs fails the build on a
 # non-unix target rather than letting it fail deep inside pool::sys.
-CROSS_TARGETS ?= x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-apple-darwin
+#
+# x86_64-apple-darwin is in the set because docs/platforms.md and CONTRIBUTING.md
+# call it supported; it was the one claim `make cross` never compiled. Adding a
+# target that cannot be installed is an error, not a skip: a platform that was
+# not compiled must not read as one that was.
+CROSS_TARGETS ?= x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin
 cross:
 	@for t in $(CROSS_TARGETS); do \
 		echo "== cargo check --target $$t"; \
-		rustup target add $$t >/dev/null 2>&1 || true; \
-		cargo check -p gusset --target $$t --all-targets || exit 1; \
+		rustup target add $$t || { echo "cross: could not install target $$t"; exit 1; }; \
+		cargo check --locked -p gusset --target $$t --all-targets || exit 1; \
 	done
 	@echo "cross: all supported targets compile"
 
@@ -185,17 +234,29 @@ fuzz:
 		go test -run '^$$' -fuzz "^$$t\$$" -fuzztime $(FUZZTIME) -fuzzminimizetime 10x . || exit 1; \
 	done
 
+# One pipeline, shared with the CI "Lint & Boundary Audits" job: gofmt, go vet,
+# gussetvet, staticcheck, govulncheck, the forbidden-pattern audit, clippy
+# (--all-targets, so the R3 disallowed-method rules reach test code), cargo fmt
+# and cargo-deny over both the root and fuzz/ workspaces. A missing or wrongly
+# versioned tool fails the step with the command that installs it; see
+# tools/ci/lint.sh and tools/ci/versions.env.
 lint:
-	# --all-targets: without it clippy skips test targets, and the R3
-	# disallowed-method rules go unenforced in exactly the code most likely
-	# to reach for unwrap.
-	cargo clippy --workspace --all-targets -- -D warnings
-	cargo fmt --all -- --check
-	go run ./tools/gussetvet
-	go vet ./...
+	tools/ci/lint.sh
+
+# The zero-allocation gate (R5), shared with the CI bench job. Reads raw
+# `go test -bench -benchmem` output. ChannelHop is the pure-Go control and must
+# stay at 0; the cgo call path measures 1 alloc/op (1 B/op) today, so
+# CallNoop and SubmitWait are bounded at 1. A benchmark missing from the file
+# fails the gate rather than passing it.
+ALLOC_FILE ?= bench/results/allocs.tmp
+ALLOC_BOUNDS ?= -max ChannelHop=0 -max GussetCallNoop=1 -max GussetSubmitWait=1
+alloc-gate:
+	go run ./tools/ci/benchgate allocs $(ALLOC_BOUNDS) $(ALLOC_FILE)
 
 ci-local: build test lint docs-check
-	go test -bench . -benchtime=100ms ./bench/...
+	go test -run '^$$' -bench . -benchtime=100ms -benchmem ./bench/... > $(ALLOC_FILE) || { cat $(ALLOC_FILE); exit 1; }
+	@cat $(ALLOC_FILE)
+	$(MAKE) alloc-gate
 
 # R15: every performance number in the docs is generated from committed raw data.
 # This target used to print "Documentation up to date" and regenerate nothing,
@@ -203,7 +264,7 @@ ci-local: build test lint docs-check
 docs:
 	@command -v benchstat >/dev/null 2>&1 || { \
 		echo "benchstat not found; install with:"; \
-		echo "  go install golang.org/x/perf/cmd/benchstat@latest"; exit 1; }
+		echo "  . tools/ci/versions.env && go install golang.org/x/perf/cmd/benchstat@\$$BENCHSTAT_VERSION"; exit 1; }
 	go run ./tools/benchdoc
 	@# benchplot redraws docs/img/*.svg from the same committed raw data.
 	@# It shipped with a -check flag that nothing ran and no target invoked, so
@@ -215,7 +276,7 @@ docs:
 docs-check:
 	@command -v benchstat >/dev/null 2>&1 || { \
 		echo "benchstat not found; install with:"; \
-		echo "  go install golang.org/x/perf/cmd/benchstat@latest"; exit 1; }
+		echo "  . tools/ci/versions.env && go install golang.org/x/perf/cmd/benchstat@\$$BENCHSTAT_VERSION"; exit 1; }
 	go run ./tools/benchdoc -check
 	go run ./tools/benchplot -check
 

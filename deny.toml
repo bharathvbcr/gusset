@@ -17,6 +17,14 @@ allow = [
     "Unicode-DFS-2016",
 ]
 
+# libfuzzer-sys bundles LLVM's libFuzzer and is licensed
+# "(MIT OR Apache-2.0) AND NCSA". NCSA is permissive and OSI approved; the
+# exception is scoped to that one crate, which only the fuzz/ workspace links
+# and which never reaches libgusset.a, so the allow list above stays as it was.
+[[licenses.exceptions]]
+crate = "libfuzzer-sys"
+allow = ["NCSA"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

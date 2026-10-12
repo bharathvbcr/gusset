@@ -539,10 +539,20 @@ pub fn set_nonblocking(fd: i32) -> Result<()> {
 /// EINTR unspecified; not retrying can at worst leak one descriptor, which is
 /// the safe side.)
 pub fn close_fd(fd: i32) {
+    close_fd_with(fd, |fd| {
+        // SAFETY: closing a descriptor number the caller owns; see above for
+        // why the result is not retried.
+        unsafe { libc::close(fd) }
+    });
+}
+
+/// [`close_fd`] with the close itself supplied, so a test can count the closes
+/// a call makes. A second close of one number cannot be seen from outside: it
+/// returns EBADF, or, once another thread has been handed the number, closes
+/// that thread's file.
+pub(crate) fn close_fd_with(fd: i32, close: impl FnOnce(i32) -> i32) {
     if fd >= 0 {
-        unsafe {
-            libc::close(fd);
-        }
+        close(fd);
     }
 }
 
@@ -629,6 +639,157 @@ mod tests {
             Ok(_) => panic!("allocate must refuse before posix_memalign"),
             Err(e) => assert!(e.contains("maximum"), "got: {}", e),
         }
+    }
+
+    /// One call, one close(2), of that descriptor; a negative one is never
+    /// closed (a handle that already released its pipe holds -1, and close(-1)
+    /// is not harmless on every platform's wrappers).
+    #[test]
+    fn close_fd_makes_exactly_one_close_and_none_for_a_released_descriptor() {
+        let mut calls: Vec<i32> = Vec::new();
+        close_fd_with(7, |fd| {
+            calls.push(fd);
+            0
+        });
+        assert_eq!(calls, vec![7], "exactly one close of the descriptor");
+
+        for released in [-1, i32::MIN] {
+            close_fd_with(released, |fd| panic!("closed released descriptor {fd}"));
+        }
+    }
+
+    /// A connected stream socketpair with a tiny send buffer. Not a pipe, so a
+    /// write larger than the buffer is split by the kernel: the case
+    /// `write_record_attempt`'s short-write handling exists for. `Handle::open`
+    /// is deliberately not involved; this drives the function directly.
+    fn tiny_socketpair() -> (i32, i32) {
+        let mut fds = [0i32; 2];
+        // SAFETY: fds is a valid two-element out array.
+        let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(rc, 0, "socketpair: {}", Error::last_os_error());
+        let small: libc::c_int = 1024;
+        for fd in fds {
+            // SAFETY: valid fd, valid option pointer and length.
+            unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    &small as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    &small as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+            }
+        }
+        if let Err(e) = set_nonblocking(fds[0]) {
+            panic!("writer end non-blocking: {e}");
+        }
+        (fds[0], fds[1])
+    }
+
+    fn pattern(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// Nothing committed and the buffer full: the caller is told to sleep, not
+    /// that the record tore.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn write_record_attempt_reports_would_block_when_nothing_was_committed() {
+        let (w, r) = tiny_socketpair();
+        loop {
+            let one = [0u8; 1];
+            // SAFETY: one is a valid 1-byte buffer.
+            let n = unsafe { libc::write(w, one.as_ptr() as *const libc::c_void, 1) };
+            if n < 0 {
+                break;
+            }
+        }
+        let err =
+            write_record_attempt(w, &[1u8; 16]).expect_err("a full socket cannot take a record");
+        assert_eq!(err.kind(), ErrorKind::WouldBlock, "got {err}");
+        close_fd(w);
+        close_fd(r);
+    }
+
+    /// A record larger than the buffer is split by the kernel. With the reader
+    /// draining slowly the writer must keep retrying the remainder inside the
+    /// call (releasing the lock between halves would let another record
+    /// interleave) and deliver every byte, in order.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn write_record_attempt_finishes_a_short_write_by_retrying() {
+        let (w, r) = tiny_socketpair();
+        let record = pattern(256 * 1024);
+        let want = record.clone();
+        let reader = std::thread::spawn(move || {
+            let mut got = Vec::with_capacity(want.len());
+            let mut chunk = [0u8; 1024];
+            while got.len() < want.len() {
+                // SAFETY: chunk is a valid 1 KiB buffer.
+                let n =
+                    unsafe { libc::read(r, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) };
+                if n > 0 {
+                    got.extend_from_slice(&chunk[..n as usize]);
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                } else if n == 0 {
+                    break;
+                }
+            }
+            close_fd(r);
+            got
+        });
+        let started = std::time::Instant::now();
+        if let Err(e) = write_record_attempt(w, &record) {
+            panic!("the retry path must finish the record: {e}");
+        }
+        let waited = started.elapsed();
+        let got = match reader.join() {
+            Ok(g) => g,
+            Err(_) => panic!("reader thread panicked"),
+        };
+        close_fd(w);
+        assert_eq!(got.len(), record.len(), "bytes lost or duplicated");
+        assert!(got == record, "record bytes reordered or corrupted");
+        // 256 reads at >=200us each: returning early (or never retrying)
+        // cannot take this long, so this proves the call waited out the stall.
+        assert!(
+            waited >= std::time::Duration::from_millis(20),
+            "finished in {waited:?}: the short-write retry never ran"
+        );
+    }
+
+    /// Some bytes landed and the reader never drains: the record is torn on the
+    /// wire, which must surface as TimedOut "torn completion write", not as
+    /// WouldBlock (that would invite a retry that re-sends the first half).
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn write_record_attempt_times_out_on_a_torn_write() {
+        let (w, r) = tiny_socketpair();
+        let record = pattern(1 << 20);
+        let err = write_record_attempt(w, &record)
+            .expect_err("a stalled reader must not hang the writer");
+        assert_eq!(err.kind(), ErrorKind::TimedOut, "got {err}");
+        assert!(
+            err.to_string().contains("torn completion write"),
+            "message must say the record is torn, got: {err}"
+        );
+        // Prove a prefix really was committed: the peer holds unread bytes.
+        let mut avail: libc::c_int = 0;
+        // SAFETY: FIONREAD writes one c_int.
+        unsafe { libc::ioctl(r, libc::FIONREAD, &mut avail) };
+        assert!(
+            avail > 0,
+            "no bytes were committed, so this was not a torn write"
+        );
+        close_fd(w);
+        close_fd(r);
     }
 }
 

@@ -16,7 +16,7 @@ For GPU workloads requiring zero-downtime serving from Go, Gusset defines the Ph
 
 | Item | Choice | Rationale |
 | :--- | :--- | :--- |
-| **Transport** | `iceoryx2` upstream Go binding (still **planned** as of iceoryx2 v0.10.0, 2026-09-18) | Zero-copy shared memory IPC with formal distribution and maintenance from Eclipse Foundation. C/C++/C#/Python bindings exist; Go does not. Phase 4 cannot ship until that binding exists or Gusset contributes it upstream. |
+| **Transport** | `iceoryx2` upstream Go binding (in no release as of iceoryx2 v0.10.0, 2026-09-18; Gusset is contributing it, agreed on iceoryx2 #225; step 1 is iceoryx2 #2104) | Zero-copy shared memory IPC with formal distribution and maintenance from Eclipse Foundation. C/C++/C#/Python bindings exist. The Go binding goes in `iceoryx2-ffi/go` and may later move to a separate, release-synced eclipse-iceoryx repository. `gusset-ipc` pins an iceoryx2 release tag, never `main`, and seals or dynamically links `libiceoryx2_ffi_c` under R14 (`DECISIONS.md` 2026-10-12). Phase 4 cannot ship until the binding covers request/response and waitset. |
 | **Adapter Role** | Thin adapter over iceoryx2 | Gusset avoids maintaining a custom shm transport. `gusset-ipc` provides the identical `gusset.Handle` Go API over IPC. |
 
 ---

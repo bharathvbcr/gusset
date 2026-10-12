@@ -1,0 +1,41 @@
+nproc 2
+round 1 loadavg 0.11 0.18 0.09
+baseline --- PASS | n=1000 p25=989.003µs p50=1.084629ms p75=1.202295ms p90=1.312129ms p95=1.348296ms p99=1.387338ms max=1.404546ms over200us=1000 over1ms=706
+fixed --- PASS | n=1000 p25=209ns p50=458ns p75=792ns p90=1.276046ms p95=2.8038ms p99=3.67251ms max=6.399934ms over200us=122 over1ms=103
+prefix --- PASS | n=1000 p25=5.001µs p50=12.417µs p75=51.001µs p90=100.876µs p95=557.96µs p99=3.022676ms max=3.642469ms over200us=61 over1ms=41
+round 2 loadavg 0.11 0.18 0.09
+baseline --- PASS | n=1000 p25=982.337µs p50=1.075086ms p75=1.204545ms p90=1.299379ms p95=1.341004ms p99=1.398671ms max=2.644049ms over200us=998 over1ms=701
+fixed --- PASS | n=1000 p25=333ns p50=750ns p75=8.334µs p90=605.793µs p95=1.926589ms p99=3.478801ms max=9.206858ms over200us=134 over1ms=80
+prefix --- PASS | n=1000 p25=5.542µs p50=16.542µs p75=49.292µs p90=90.209µs p95=146.501µs p99=2.771591ms max=3.645343ms over200us=40 over1ms=22
+round 3 loadavg 0.34 0.23 0.10
+baseline --- PASS | n=1000 p25=992.878µs p50=1.082461ms p75=1.203795ms p90=1.300879ms p95=1.35388ms p99=1.403462ms max=1.805213ms over200us=994 over1ms=727
+fixed --- PASS | n=1000 p25=334ns p50=792ns p75=7.584µs p90=436.044µs p95=2.160506ms p99=3.646051ms max=6.29185ms over200us=124 over1ms=77
+prefix --- PASS | n=1000 p25=7.834µs p50=25.958µs p75=51.668µs p90=118.001µs p95=643.502µs p99=3.126217ms max=3.549844ms over200us=60 over1ms=46
+round 4 loadavg 0.34 0.23 0.10
+baseline --- PASS | n=1000 p25=975.087µs p50=1.059628ms p75=1.183337ms p90=1.285379ms p95=1.326962ms p99=1.374213ms max=1.386337ms over200us=1000 over1ms=664
+fixed --- PASS | n=1000 p25=168ns p50=376ns p75=709ns p90=122.126µs p95=2.801092ms p99=3.60626ms max=5.779349ms over200us=98 over1ms=85
+prefix --- PASS | n=1000 p25=4.917µs p50=9.042µs p75=44.917µs p90=72.709µs p95=266.043µs p99=3.020758ms max=3.677302ms over200us=54 over1ms=44
+round 5 loadavg 0.34 0.23 0.10
+baseline --- PASS | n=1000 p25=973.045µs p50=1.061294ms p75=1.191503ms p90=1.288671ms p95=1.326045ms p99=1.381171ms max=1.418879ms over200us=999 over1ms=667
+fixed --- PASS | n=1000 p25=250ns p50=501ns p75=1.251µs p90=486.294µs p95=2.756841ms p99=3.380509ms max=5.78039ms over200us=112 over1ms=83
+prefix --- PASS | n=1000 p25=4.959µs p50=15.418µs p75=50.584µs p90=68.543µs p95=118.334µs p99=2.928675ms max=3.80226ms over200us=32 over1ms=20
+round 6 loadavg 0.32 0.23 0.10
+baseline --- PASS | n=1000 p25=986.711µs p50=1.078337ms p75=1.193546ms p90=1.289379ms p95=1.331754ms p99=1.380421ms max=1.394379ms over200us=1000 over1ms=700
+fixed --- PASS | n=1000 p25=209ns p50=459ns p75=833ns p90=901.211µs p95=2.802466ms p99=3.60051ms max=5.843308ms over200us=114 over1ms=96
+prefix --- PASS | n=1000 p25=5.542µs p50=21.292µs p75=50.709µs p90=99.001µs p95=288.46µs p99=3.121425ms max=3.578676ms over200us=53 over1ms=42
+round 7 loadavg 0.32 0.23 0.10
+baseline --- PASS | n=1000 p25=978.42µs p50=1.063503ms p75=1.183754ms p90=1.288379ms p95=1.333337ms p99=1.383171ms max=1.432004ms over200us=1000 over1ms=677
+fixed --- PASS | n=1000 p25=209ns p50=459ns p75=834ns p90=410.752µs p95=2.794549ms p99=3.541426ms max=5.772183ms over200us=109 over1ms=82
+prefix --- PASS | n=1000 p25=6.668µs p50=21.918µs p75=52.209µs p90=112.042µs p95=257.126µs p99=3.050259ms max=3.460801ms over200us=57 over1ms=46
+round 8 loadavg 0.29 0.22 0.10
+baseline --- PASS | n=1000 p25=899.503µs p50=937.42µs p75=1.038086ms p90=1.178045ms p95=1.244879ms p99=1.339671ms max=1.382463ms over200us=1000 over1ms=303
+fixed --- PASS | n=1000 p25=251ns p50=542ns p75=3.417µs p90=743.21µs p95=2.799217ms p99=3.565843ms max=5.954725ms over200us=122 over1ms=85
+prefix --- PASS | n=1000 p25=5.292µs p50=19.959µs p75=50.334µs p90=111.875µs p95=1.334087ms p99=3.128926ms max=3.559427ms over200us=66 over1ms=54
+round 9 loadavg 0.29 0.22 0.10
+baseline --- PASS | n=1000 p25=928.587µs p50=1.01542ms p75=1.160878ms p90=1.274296ms p95=1.324129ms p99=1.389712ms max=3.654718ms over200us=1000 over1ms=549
+fixed --- PASS | n=1000 p25=250ns p50=459ns p75=918ns p90=484.21µs p95=2.789508ms p99=3.568885ms max=3.804761ms over200us=109 over1ms=80
+prefix --- PASS | n=1000 p25=5µs p50=11.542µs p75=49.25µs p90=87.417µs p95=181.001µs p99=3.048884ms max=3.62901ms over200us=49 over1ms=35
+round 10 loadavg 0.59 0.29 0.12
+baseline --- PASS | n=1000 p25=988.128µs p50=1.077337ms p75=1.200504ms p90=1.27992ms p95=1.331171ms p99=1.377921ms max=1.399962ms over200us=1000 over1ms=701
+fixed --- PASS | n=1000 p25=209ns p50=376ns p75=750ns p90=55.376µs p95=2.648299ms p99=3.595885ms max=6.087349ms over200us=90 over1ms=74
+prefix --- PASS | n=1000 p25=5.001µs p50=11.251µs p75=50.168µs p90=81.668µs p95=168.959µs p99=3.246967ms max=3.607427ms over200us=45 over1ms=34

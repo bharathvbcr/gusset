@@ -98,8 +98,8 @@ Five phases; each has an exit criterion that is a test, not an opinion. Duration
 flowchart LR
     P0["Phase 0: Seed Repro\n(Firewall NUL panic & benchmarks)\n[SHIPPED]"] --> P1["Phase 1: v0.1 Core Runtime\n(6 Invariants, exports, CI matrix)\n[SHIPPED]"]
     P1 --> P2["Phase 2: 2nd-App Validation\n(DevCouncil dc-glob & gusset-example)\n[SHIPPED]"]
-    P2 --> P3["Phase 3: Public Release\n(Generated benchdoc, release packages)\n[READY]"]
-    P3 --> P4["Phase 4: Out-of-Process IPC\n(iceoryx2 daemon for GPU crash isolation)\n[SPECIFIED]"]
+    P2 --> P3["Phase 3: Public Release\n(Generated benchdoc, release packages)\n[IN PROGRESS]"]
+    P3 --> P4["Phase 4: Out-of-Process IPC\n(iceoryx2 daemon for GPU crash isolation)\n[SPECIFIED, spike only]"]
 ```
 
 | Phase | What ships | Exit criterion | Rough effort |
@@ -116,7 +116,7 @@ Phase 1 build order is in `AGENTS.md` (Repo layout and build order).
 
 The CI matrix is the product: adopters get it for free, and it is what no binding generator offers. The full job table is in `AGENTS.md` (Testing plan).
 
-Baseline numbers from the seed benchmark (Go 1.24.7, Rust 1.95, x86-64 Linux): 64 ns per cgo call, 0.67 ns per item at 256-item batches, 0 allocations with `noescape`, 56 ns per channel send. The README reports these per platform on every release.
+The seed benchmark (`bench/seed`, with its own table in `bench/seed/README.md`) is the baseline the first draft quoted: a cgo call into Rust costs about what a buffered channel send does, with 0 allocations under `noescape`. Those figures are a seed-era measurement, not R15-generated, so none is repeated here; the README's tables are generated from `bench/results` per platform by `make docs`.
 
 ## Success and kill criteria
 
@@ -149,6 +149,6 @@ Naming convention: crate `gusset`, Go module `github.com/bharathvbcr/gusset`, ou
 | Rust `panic=abort` in a dependency's profile silently disables the firewall | Medium | Build script asserts `panic=unwind`; the panic zoo test fails otherwise |
 | Two Rust staticlibs in one Go binary (duplicate `std` symbols) | Medium for adopters | Document the umbrella-crate rule; example repo shows it |
 | Solo maintenance stalls after Phase 3 | Medium | Keep the surface small (17 exports); the matrix does the reviewing |
-| iceoryx2 ships its own Go binding before Phase 4 | Low–medium | Good outcome: adopt it and drop Phase 4 |
+| The iceoryx2 Go binding moves to a separate repository synced only on iceoryx2 releases | Medium (upstream raised it on #225) | `gusset-ipc` pins a release tag, never `main`; the module-path change is a mechanical rename before v1; Phase 4 depends only on the request/response and waitset surface |
 
 Open decisions from the first draft are all resolved in `DECISIONS.md`.

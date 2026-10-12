@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -349,6 +350,20 @@ func TestPitfall_DeepRecursionOnWorkerStack(t *testing.T) {
 }
 
 // Pitfall 8: Concurrency Bound and Thread Cap Soak (Invariant I4, Rule R11)
+//
+// Two bounds, both on the PEAK rather than on a reading taken after the run:
+//
+//   - in-flight: the engine itself counts jobs executing at once (diagnostic
+//     mode 17 raises an atomic on entry and lowers it on exit) and the highest
+//     value it reached must not exceed the pool size. 500 callers on a pool of
+//     4 is where an unbounded dispatch would show 500.
+//   - threads: the scheduler's thread total, sampled every millisecond for the
+//     whole run, stays within pool size + GOMAXPROCS + 8 of where it started,
+//     the bound AGENTS.md states for R11.
+//
+// The thread count after the run says nothing about the run: Go never destroys
+// an M, so it can only have grown, but a transient spike that settled would not
+// have been seen by a single late reading either way.
 func TestPitfall_ThreadCapBoundedSoak(t *testing.T) {
 	const poolSize = 4
 	h, err := gusset.Open(gusset.WithPoolSize(poolSize), gusset.WithDiagnosticEngine())
@@ -359,6 +374,25 @@ func TestPitfall_ThreadCapBoundedSoak(t *testing.T) {
 
 	initialThreads := gusset.Threads()
 	t.Logf("initial scheduler thread count: %d", initialThreads)
+	_ = peakInEngine(t, h) // reset the engine gauge
+
+	var peakThreads atomic.Int64
+	peakThreads.Store(initialThreads)
+	stopSampling := make(chan struct{})
+	samplerDone := make(chan struct{})
+	go func() {
+		defer close(samplerDone)
+		for {
+			if n := gusset.Threads(); n > peakThreads.Load() {
+				peakThreads.Store(n)
+			}
+			select {
+			case <-stopSampling:
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}()
 
 	const callers = 500
 	var wg sync.WaitGroup
@@ -368,25 +402,36 @@ func TestPitfall_ThreadCapBoundedSoak(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			payload := []byte{0, byte(id & 0xFF)}
-			res, err := h.Call(ctx, payload)
+			// A 2 ms non-cooperative hold, so jobs genuinely overlap.
+			res, err := h.Call(ctx, holdInEngine(2))
 			if err != nil {
 				t.Errorf("caller %d failed: %v", id, err)
 				return
 			}
-			if len(res) == 0 || res[1] != byte(id&0xFF) {
-				t.Errorf("corrupted echo from caller %d", id)
+			if len(res) != 1 || res[0] != 17 {
+				t.Errorf("unexpected result from caller %d: %v", id, res)
 			}
 		}(i)
 	}
 
 	wg.Wait()
+	close(stopSampling)
+	<-samplerDone
 
-	maxThreads := gusset.Threads()
-	t.Logf("post-soak thread count: %d", maxThreads)
+	// Invariant I4, seen from the engine.
+	peak := peakInEngine(t, h)
+	t.Logf("engine-side peak in-flight: %d (pool size %d)", peak, poolSize)
+	if peak > poolSize {
+		t.Fatalf("engine ran %d jobs at once on a pool of %d (I4)", peak, poolSize)
+	}
+	if peak < 2 {
+		t.Fatalf("engine-side peak in-flight was %d: the soak never overlapped jobs, so the bound proved nothing", peak)
+	}
 
-	// Invariant I4: threads must not explode under load
-	bound := int64(poolSize + runtime.GOMAXPROCS(0) + 16)
+	// Rule R11: threads must not explode under load.
+	maxThreads := peakThreads.Load()
+	t.Logf("peak scheduler thread count during the soak: %d", maxThreads)
+	bound := int64(poolSize + runtime.GOMAXPROCS(0) + 8)
 	if maxThreads > initialThreads+bound {
 		t.Fatalf("thread count exploded: started with %d, peaked at %d, exceeded bound %d",
 			initialThreads, maxThreads, bound)

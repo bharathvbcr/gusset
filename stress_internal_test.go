@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,14 @@ import (
 //
 //	GUSSET_STRESS=2m go test -race -run Hammer -count=1 .
 //	GUSSET_STRESS=2m GOGC=1 go test -run Hammer -count=1 .
+//
+// Every run prints its seed, and GUSSET_HAMMER_SEED replays one:
+//
+//	GUSSET_HAMMER_SEED=1790763872967289580 GUSSET_STRESS=1m go test -race -run Hammer -count=1 .
+//
+// A seed fixes each lane's sequence of operations, sizes and deadlines, not
+// the interleaving of the lanes or of the Rust workers, so a replay reaches
+// the same mix of paths without promising the same race.
 
 func hammerDuration(t *testing.T) time.Duration {
 	if testing.Short() {
@@ -50,6 +59,47 @@ func hammerDuration(t *testing.T) time.Duration {
 		d = parsed
 	}
 	return d
+}
+
+// hammerSeed is GUSSET_HAMMER_SEED when set, so a seed a failing run printed
+// can be replayed, and otherwise a fresh one from the clock.
+func hammerSeed() (uint64, error) {
+	v := os.Getenv("GUSSET_HAMMER_SEED")
+	if v == "" {
+		return uint64(time.Now().UnixNano()), nil
+	}
+	seed, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("GUSSET_HAMMER_SEED=%q: %w", v, err)
+	}
+	return seed, nil
+}
+
+func TestHammerSeed_ReplaysTheRecordedSeed(t *testing.T) {
+	// The 2026-09-30 crash's seed, which could not be replayed before.
+	t.Setenv("GUSSET_HAMMER_SEED", "1790763872967289580")
+	if seed, err := hammerSeed(); err != nil || seed != 1790763872967289580 {
+		t.Fatalf("hammerSeed() = %d, %v; want the recorded seed", seed, err)
+	}
+	// The full uint64 range: seeds are printed as uint64, so any printed one
+	// must parse back.
+	t.Setenv("GUSSET_HAMMER_SEED", "18446744073709551615")
+	if seed, err := hammerSeed(); err != nil || seed != 1<<64-1 {
+		t.Fatalf("hammerSeed() = %d, %v; want the largest uint64", seed, err)
+	}
+	for _, bad := range []string{"-1", "0x10", "12 ", "seed", "18446744073709551616"} {
+		t.Setenv("GUSSET_HAMMER_SEED", bad)
+		if seed, err := hammerSeed(); err == nil {
+			t.Errorf("GUSSET_HAMMER_SEED=%q: got seed %d, want an error rather than a different run", bad, seed)
+		}
+	}
+	t.Setenv("GUSSET_HAMMER_SEED", "")
+	a, errA := hammerSeed()
+	time.Sleep(time.Microsecond)
+	b, errB := hammerSeed()
+	if errA != nil || errB != nil || a == b {
+		t.Fatalf("unset: hammerSeed() = %d (%v), %d (%v); want two fresh seeds", a, errA, b, errB)
+	}
 }
 
 // hammerSlot is one lane of handles: the live one, replaced when it is
@@ -533,10 +583,24 @@ func TestHammer_BoundaryUnderChaos(t *testing.T) {
 	baseGoroutines := runtime.NumGoroutine()
 	baseLive := Stats().LiveBytes
 
+	seed, err := hammerSeed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Also straight to stderr: t.Logf is buffered without -v, and a crash
+	// inside a cgo call (the 2026-09-30 SIGSEGV in gusset_take) kills the
+	// process before the test's log is flushed.
+	fmt.Fprintf(os.Stderr, "hammer: GUSSET_HAMMER_SEED=%d\n", seed)
+	t.Logf("seed %d, duration %v", seed, dur)
+	// Every failure path, the hammer's own and the final invariant checks,
+	// ends with the line that replays it.
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("replay: GUSSET_HAMMER_SEED=%d GUSSET_STRESS=%v", seed, dur)
+		}
+	})
 	hm := &hammer{t: t}
 	const slots, lanes = 4, 12
-	seed := uint64(time.Now().UnixNano())
-	t.Logf("seed %d, duration %v", seed, dur)
 	for i := 0; i < slots; i++ {
 		s := &hammerSlot{}
 		h, err := hm.open(rand.New(rand.NewPCG(seed, uint64(i))))

@@ -5,22 +5,29 @@ on:
     - cron: '0 6 * * 1' # Weekly on Monday
   workflow_dispatch:
 
+# Read-only for everything that builds or tests. Filing the issue needs
+# issues: write and lives in its own job below: this workflow builds Go from
+# googlesource HEAD and runs the suite, and that job must never hold a token
+# that can write.
 permissions:
   contents: read
-  issues: write
 
 jobs:
   gotip:
     name: Go Tip Compatibility
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust Stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
 
       - name: Build Rust static library
-        run: cargo build --release
+        run: cargo build --locked --release
 
       # Go tip (1.28) requires a bootstrap >= Go 1.26.0: src/make.bash sets
       # bootgo=1.26.0, and src/cmd/dist/notgo126.go is //go:build !go1.26.
@@ -31,7 +38,7 @@ jobs:
       # and ubuntu-latest still has Go 1.24 in the toolcache. The pin matches
       # the matrix (1.27.x), which is ahead of that floor.
       - name: Set up Go bootstrap
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           cache: false
@@ -88,12 +95,19 @@ jobs:
             -run 'TestPitfall_ThreadCapBoundedSoak|TestSoak_GoroutineLeakProfileIsEmptyAfterDrain' \
             ./tests/pitfalls/
 
-      # The matrix said failure here opens an issue tagged `toolchain`. It did not:
-      # the job just went red on a schedule nobody watches, which is the same as
-      # not running. A scheduled job whose failure nobody sees is not a gate.
+  # The matrix said failure here opens an issue tagged `toolchain`. It did not:
+  # the job just went red on a schedule nobody watches, which is the same as
+  # not running. A scheduled job whose failure nobody sees is not a gate.
+  report:
+    name: Open a toolchain issue on failure
+    needs: [gotip]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
       - name: Open a toolchain issue on failure
-        if: failure()
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const title = `Go tip breaks Gusset (run ${context.runId})`;

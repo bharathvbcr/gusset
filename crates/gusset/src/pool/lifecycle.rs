@@ -254,9 +254,15 @@ impl Handle {
     /// Under `pipe_write_lock`, so no writer holds a loaded copy of the number
     /// while it is closed and possibly reused.
     fn release_pipe(&self) {
+        self.release_pipe_with(sys::close_fd);
+    }
+
+    /// [`release_pipe`](Self::release_pipe) with the close supplied; see
+    /// [`sys::close_fd_with`].
+    pub(super) fn release_pipe_with(&self, close: impl FnOnce(i32)) {
         let _w = lock_recover(&self.pipe_write_lock);
         let fd = self.pipe_write_fd.swap(-1, Ordering::AcqRel);
-        sys::close_fd(fd);
+        close(fd);
     }
 }
 

@@ -15,9 +15,9 @@
 // Go GC blindness to the foreign heap.
 //
 // Gusset is not a foreign function interface binding generator (like cbindgen
-// or uniffi-bindgen-go), not a cgo-free assembly trampoline (like purego or
-// asmcgocall), and not an out-of-process IPC bus. It is an in-process hardening
-// layer.
+// or uniffi-bindgen-go), not a cgo-free assembly trampoline (like purego, or a
+// direct call into the runtime's own assembly trampoline), and not an
+// out-of-process IPC bus. It is an in-process hardening layer.
 package gusset
 
 import (
@@ -153,15 +153,39 @@ const (
 	ExpectedStatsAlign  = 8
 )
 
-func init() {
-	// I6: Validate ABI layout at initialization time.
-	layout := ffi.GetAbiLayout()
+// abiReport is everything the I6 check compares: what the Rust archive reports
+// and what cgo compiled from the hand-maintained header. Gathering it is the
+// only part of the check that touches C, so checkABI is a pure function a test
+// can feed a drifted report.
+type abiReport struct {
+	rust       ffi.AbiLayout
+	rustFields [2][ffi.AbiFieldCount]uint32 // offsets, sizes
+	rustCount  uint32
+	localSizes [ffi.AbiTypeCount]uint32
+	localAlign [ffi.AbiTypeCount]uint32
+	localFlds  [2][ffi.AbiFieldCount]uint32 // offsets, sizes
+}
+
+func gatherABIReport() abiReport {
+	var r abiReport
+	r.rust = ffi.GetAbiLayout()
+	r.rustFields[0], r.rustFields[1], r.rustCount = ffi.RustFieldLayout()
+	r.localSizes, r.localAlign = ffi.LocalLayout()
+	r.localFlds[0], r.localFlds[1] = ffi.LocalFieldLayout()
+	return r
+}
+
+// checkABI is the I6 check: version, struct sizes and alignments against the
+// constants compiled into Go, then Rust against cgo, then every named field's
+// offset and size. It returns the first disagreement.
+func checkABI(r abiReport) error {
+	layout := r.rust
 	if layout.Version != ExpectedAbiVersion {
-		panic(fmt.Sprintf(
+		return fmt.Errorf(
 			"gusset: ABI version mismatch: Go expected version %d, Rust library reported version %d",
 			ExpectedAbiVersion,
 			layout.Version,
-		))
+		)
 	}
 
 	expectedSizes := [ffi.AbiTypeCount]uint32{
@@ -172,29 +196,28 @@ func init() {
 	}
 
 	if layout.Sizes != expectedSizes || layout.Aligns != expectedAligns {
-		panic(fmt.Sprintf(
+		return fmt.Errorf(
 			"gusset: ABI struct size/alignment mismatch: expected sizes %v aligns %v, got sizes %v aligns %v",
 			expectedSizes,
 			expectedAligns,
 			layout.Sizes,
 			layout.Aligns,
-		))
+		)
 	}
 
 	// Second, independent check: what Rust reports against what cgo actually
 	// compiled from the hand-maintained header. The constants above would agree
 	// with Rust while the header disagreed with both. Size and alignment still
 	// miss an equal-width field swap; the named-field check below is that case.
-	localSizes, localAligns := ffi.LocalLayout()
 	for i := 0; i < ffi.AbiTypeCount; i++ {
-		if localSizes[i] != layout.Sizes[i] || localAligns[i] != layout.Aligns[i] {
-			panic(fmt.Sprintf(
+		if r.localSizes[i] != layout.Sizes[i] || r.localAlign[i] != layout.Aligns[i] {
+			return fmt.Errorf(
 				"gusset: ABI layout drift for %s: Rust reports size %d align %d, "+
 					"cgo compiled size %d align %d from internal/ffi/gusset.h",
 				ffi.AbiTypeNames[i],
 				layout.Sizes[i], layout.Aligns[i],
-				localSizes[i], localAligns[i],
-			))
+				r.localSizes[i], r.localAlign[i],
+			)
 		}
 	}
 
@@ -203,25 +226,45 @@ func init() {
 	// disagreement means the hand-maintained header and the archive do not
 	// describe the same layout, and a later struct write would land on the
 	// wrong slot.
-	rustOff, rustSz, nfields := ffi.RustFieldLayout()
-	if nfields != ffi.AbiFieldCount {
-		panic(fmt.Sprintf(
+	if r.rustCount != ffi.AbiFieldCount {
+		return fmt.Errorf(
 			"gusset: ABI field count mismatch: Go expected %d, Rust reported %d",
-			ffi.AbiFieldCount, nfields,
-		))
+			ffi.AbiFieldCount, r.rustCount,
+		)
 	}
-	localOff, localSz := ffi.LocalFieldLayout()
 	for i := 0; i < ffi.AbiFieldCount; i++ {
-		if rustOff[i] != localOff[i] || rustSz[i] != localSz[i] {
-			panic(fmt.Sprintf(
+		if r.rustFields[0][i] != r.localFlds[0][i] || r.rustFields[1][i] != r.localFlds[1][i] {
+			return fmt.Errorf(
 				"gusset: ABI field %s drifted: Rust offset %d size %d, "+
 					"cgo offset %d size %d from internal/ffi/gusset.h",
 				ffi.AbiFieldNames[i],
-				rustOff[i], rustSz[i],
-				localOff[i], localSz[i],
-			))
+				r.rustFields[0][i], r.rustFields[1][i],
+				r.localFlds[0][i], r.localFlds[1][i],
+			)
 		}
 	}
+	return nil
+}
+
+// mustCheckABI panics when the report drifts: a later struct write through a
+// drifted layout would corrupt memory, so there is no degraded mode to fall
+// back to.
+func mustCheckABI(r abiReport) {
+	if err := checkABI(r); err != nil {
+		panic(err.Error())
+	}
+}
+
+// abiAtInit is the report init verified. It stays the zero value if init never
+// ran the check, which is what lets a test tell "checked and passed" from
+// "never checked".
+var abiAtInit abiReport
+
+func init() {
+	// I6: Validate ABI layout at initialization time.
+	r := gatherABIReport()
+	mustCheckABI(r)
+	abiAtInit = r
 
 	if err := ffi.Init(); err != nil {
 		panic(fmt.Sprintf("gusset: failed to initialize runtime: %v", err))
@@ -287,15 +330,23 @@ func DrainLogs(buf []byte) int {
 // A drain longer than [MaxDrain] is capped to it; a negative drain is treated
 // as zero, which cancels everything and reports immediately.
 func Shutdown(drain time.Duration) error {
+	shutdownStarted.Store(true)
+	return ffi.Shutdown(drainMillis(drain))
+}
+
+// drainMillis is the uint32 of milliseconds that crosses the ABI for a drain
+// budget: a negative budget is zero, one beyond [MaxDrain] is MaxDrain. Without
+// the clamp the conversion wraps, so a drain of 2^32 ms plus 5 would cross as a
+// 5 ms budget.
+func drainMillis(drain time.Duration) uint32 {
 	ms := drain.Milliseconds()
 	if ms < 0 {
-		ms = 0
+		return 0
 	}
 	if ms > int64(MaxDrain/time.Millisecond) {
-		ms = int64(MaxDrain / time.Millisecond)
+		return uint32(MaxDrain / time.Millisecond)
 	}
-	shutdownStarted.Store(true)
-	return ffi.Shutdown(uint32(ms))
+	return uint32(ms)
 }
 
 // shutdownStarted is set once Shutdown has run; see shutdownCause.

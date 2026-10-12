@@ -82,6 +82,14 @@ func TestSerialCall_HandsOffWithoutScheduling(t *testing.T) {
 // parking and the reader yielding on every poll, and 32 us in a process
 // making no Calls at all. Under a Linux 2-CPU quota (podman --cpus=2) the
 // median was ~1 ms and p99 15-19 ms, against 4 us.
+//
+// The check sees the starvation only where it shows. With the process pinned
+// to two Linux CPUs (taskset 0,1) the code before the fix passed it 55 times
+// out of 55, and on a darwin host at load 17.5 it passed 13 of 16. No tail
+// statistic set beside the median separated the two builds on Linux either
+// (bench/results/handoff-gomaxprocs/wake-tail/). TestQuietProcs_FollowsGOMAXPROCS
+// and TestPollResult_Gates check the gate itself rather than a wake time, and
+// failed on that code in every run, idle or at load 13-16.
 func TestSerialCall_LeavesAPForOtherGoroutines(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(2))
 	h, err := Open(WithPoolSize(2), WithDiagnosticEngine())

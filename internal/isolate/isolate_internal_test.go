@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -35,6 +36,10 @@ const (
 	faultAbort = 0xFD
 )
 
+// modeEnv picks a misbehaving worker for the robustness tests; empty is the
+// honest one.
+const modeEnv = "GUSSET_ISOLATE_WORKER_MODE"
+
 func TestMain(m *testing.M) {
 	if os.Getenv(workerEnv) == "1" {
 		os.Exit(workerMain())
@@ -43,12 +48,27 @@ func TestMain(m *testing.M) {
 }
 
 func workerMain() int {
+	out, err := ProtocolOut()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "worker:", err)
+		return 1
+	}
+	mode := os.Getenv(modeEnv)
+	if mode == "nostdin" {
+		_ = os.Stdin.Close() // before hello: the host's first write fails
+	}
+	if mode != "" && mode != "stray" {
+		return misbehave(mode, out)
+	}
+	if mode == "stray" {
+		fmt.Fprint(os.Stdout, "INFO engine ready\n")
+	}
 	h, err := gusset.Open(gusset.WithPoolSize(workerPool), gusset.WithDiagnosticEngine())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "worker open:", err)
 		return 1
 	}
-	serveErr := Serve(os.Stdin, os.Stdout, faulty{h}, workerPool)
+	serveErr := Serve(os.Stdin, out, faulty{h}, workerPool)
 	closeErr := h.Close()
 	if err := errors.Join(serveErr, closeErr); err != nil {
 		fmt.Fprintln(os.Stderr, "worker:", err)
@@ -57,17 +77,45 @@ func workerMain() int {
 	return 0
 }
 
+// misbehave announces itself and then fails the protocol one way, staying
+// alive so only the host can end it.
+func misbehave(mode string, out *os.File) int {
+	if err := writeFrame(out, &response{Op: opHello, Version: protocolVersion, PoolSize: workerPool}, maxResponseFrame); err != nil {
+		return 1
+	}
+	switch mode {
+	case "corrupt":
+		_, _ = out.Write([]byte{0, 0, 0, 5, 'x', 'x', 'x', 'x', 'x'})
+	case "grandchild":
+		// A grandchild holding every pipe the worker has outlives it.
+		gc := exec.Command("sleep", "4")
+		gc.Stdout, gc.Stderr = out, os.Stderr
+		if err := gc.Start(); err != nil {
+			return 1
+		}
+	}
+	time.Sleep(time.Minute)
+	return 0
+}
+
 // faulty kills its own process on a fault byte and passes everything else to
 // the handle.
 type faulty struct{ *gusset.Handle }
 
 func (f faulty) Submit(ctx context.Context, in any) (uint64, error) {
+	if os.Getenv(modeEnv) == "stray" {
+		fmt.Fprint(os.Stdout, "INFO engine ready\n")
+	}
 	if b, ok := in.([]byte); ok && len(b) > 0 {
 		switch b[0] {
 		case faultKill:
 			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+			// The signal is asynchronous: falling through would let the job
+			// answer before it lands. Nothing may produce a result.
+			select {}
 		case faultAbort:
 			_ = syscall.Kill(os.Getpid(), syscall.SIGABRT)
+			select {}
 		}
 	}
 	return f.Handle.Submit(ctx, in)
@@ -75,8 +123,13 @@ func (f faulty) Submit(ctx context.Context, in any) (uint64, error) {
 
 func startWorker(t *testing.T) *Proc {
 	t.Helper()
+	return startWorkerMode(t, "")
+}
+
+func startWorkerMode(t *testing.T, mode string) *Proc {
+	t.Helper()
 	cmd := exec.Command(os.Args[0])
-	cmd.Env = append(os.Environ(), workerEnv+"=1")
+	cmd.Env = append(os.Environ(), workerEnv+"=1", modeEnv+"="+mode)
 	var stderr lockedBuffer
 	cmd.Stderr = &stderr
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -86,7 +139,7 @@ func startWorker(t *testing.T) *Proc {
 		t.Fatalf("Start: %v\nworker stderr:\n%s", err, stderr.String())
 	}
 	t.Cleanup(func() {
-		_ = p.Close()
+		_ = p.close(5 * time.Second)
 		if t.Failed() {
 			t.Logf("worker stderr:\n%s", stderr.String())
 		}
@@ -342,12 +395,15 @@ func TestIsolation_UncatchableFaultEndsOnlyTheWorker(t *testing.T) {
 	for _, fault := range []struct {
 		name   string
 		b      byte
-		signal string
+		signal []string // any one names the exit
 	}{
-		{"SIGKILL", faultKill, "signal: killed"},
+		{"SIGKILL", faultKill, []string{"signal: killed"}},
 		// Go's own handler takes SIGABRT, prints the crash dump and exits 2,
 		// so an abort() from Rust code reaches the host as this status too.
-		{"SIGABRT", faultAbort, "exit status 2"},
+		// A process-directed signal can land on one of the engine's own
+		// threads instead, where cgo forwards it to the default action: Linux
+		// then reports the signal.
+		{"SIGABRT", faultAbort, []string{"exit status 2", "signal: aborted"}},
 	} {
 		t.Run(fault.name, func(t *testing.T) {
 			t.Parallel()
@@ -363,8 +419,12 @@ func TestIsolation_UncatchableFaultEndsOnlyTheWorker(t *testing.T) {
 			if !errors.Is(err, gusset.ErrPoisoned) {
 				t.Fatalf("faulting Call = %v; want ErrPoisoned", err)
 			}
-			if !strings.Contains(err.Error(), fault.signal) {
-				t.Fatalf("worker exit not named: %v", err)
+			named := false
+			for _, want := range fault.signal {
+				named = named || strings.Contains(err.Error(), want)
+			}
+			if !named {
+				t.Fatalf("worker exit not named (want one of %q): %v", fault.signal, err)
 			}
 			select {
 			case err := <-waited:
@@ -536,5 +596,119 @@ func TestParity_BufferInputDiverges(t *testing.T) {
 	}
 	if err := buf.Free(); err != nil {
 		t.Fatalf("Free after the refusal = %v; the refusal must not consume the buffer", err)
+	}
+}
+
+// within fails the test unless f returns inside d, without waiting on f past
+// it.
+func within(t *testing.T, d time.Duration, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); f() }()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s did not return within %v", what, d)
+	}
+}
+
+// A live worker that emits a corrupt frame is dead to the host: every waiter
+// gets ErrPoisoned at once, not at its own deadline.
+func TestProc_CorruptFrameLatchesTheWorkerDead(t *testing.T) {
+	p := startWorkerMode(t, "corrupt")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	var err error
+	within(t, 3*time.Second, "Call", func() { _, err = p.Call(ctx, []byte{0}) })
+	if !errors.Is(err, gusset.ErrPoisoned) {
+		t.Fatalf("Call = %v; want ErrPoisoned", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("waiter released after %v, near its 5s deadline", elapsed)
+	}
+}
+
+// An engine's own stdout writes are not protocol.
+func TestProc_StrayStdoutCannotCorruptTheProtocol(t *testing.T) {
+	p := startWorkerMode(t, "stray")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for i := 0; i < 3; i++ {
+		out, err := p.Call(ctx, []byte{0, byte(i)})
+		if err != nil || !bytes.Equal(out, []byte{0, byte(i)}) {
+			t.Fatalf("Call %d = %v, %v", i, out, err)
+		}
+	}
+}
+
+func TestReadFrame_AllocatesOnlyWhatItRead(t *testing.T) {
+	const limit = 1 << 30
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], 1<<29)
+	r := bufio.NewReader(bytes.NewReader(append(hdr[:], "{\"op\":"...)))
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	var resp response
+	err := readFrame(r, limit, &resp)
+	runtime.ReadMemStats(&after)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("readFrame = %v; want ErrUnexpectedEOF", err)
+	}
+	if got := after.TotalAlloc - before.TotalAlloc; got > 8<<20 {
+		t.Fatalf("readFrame allocated %d bytes for a 7-byte body", got)
+	}
+}
+
+func TestClose_BoundedWithAGrandchildHoldingTheWorkersPipes(t *testing.T) {
+	p := startWorkerMode(t, "grandchild")
+	start := time.Now()
+	var err error
+	within(t, 3*time.Second, "close", func() { err = p.close(100 * time.Millisecond) })
+	if err == nil || !strings.Contains(err.Error(), "killed") {
+		t.Fatalf("close = %v; want the kill reported", err)
+	}
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Fatalf("close took %v with a 100ms budget; the 4s grandchild held it", elapsed)
+	}
+}
+
+func TestClose_BoundedWhileAWriterIsBlockedOnAFullStdin(t *testing.T) {
+	p := startWorkerMode(t, "deaf") // never reads stdin
+	writer := make(chan error, 1)
+	go func() {
+		in := make([]byte, maxInlineInput)
+		for id := uint64(1); ; id++ {
+			if err := p.send(&request{Op: opSubmit, ID: id, In: in}); err != nil {
+				writer <- err
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-writer:
+		t.Fatalf("writer ended before the pipe filled: %v", err)
+	case <-time.After(300 * time.Millisecond): // blocked, holding wmu
+	}
+	start := time.Now()
+	within(t, 3*time.Second, "close", func() { _ = p.close(100 * time.Millisecond) })
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Fatalf("close took %v with a 100ms budget", elapsed)
+	}
+	select {
+	case <-writer:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the blocked writer was not released by Close")
+	}
+}
+
+func TestSubmit_ReturnsCtxErrWhileTheWorkerHasNotYetBeenLatchedDead(t *testing.T) {
+	p := startWorkerMode(t, "nostdin") // alive, but every write to it fails
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	var err error
+	within(t, 3*time.Second, "Submit", func() { _, err = p.Submit(ctx, []byte{0}) })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Submit = %v; want ctx.Err()", err)
 	}
 }

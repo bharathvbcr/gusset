@@ -41,8 +41,8 @@ This compiles `crates/gusset` in release mode, generates the cgo archive hash, a
 make test
 ```
 This runs:
-- `cargo test --workspace`: 20 Rust unit and integration tests (including symbol export verification and header type diffs).
-- `go test -v ./...`: Go unit tests, 5-case panic zoo (`tests/panic_zoo`), and 13 pitfall tests (`tests/pitfalls`).
+- `cargo test --workspace`: the Rust unit and integration tests (including symbol export verification and header type diffs).
+- `go test -v ./...`: Go unit tests, the panic zoo (`tests/panic_zoo`: six panic cases and a success-path control) and the pitfall suite (`tests/pitfalls`).
 
 ### 3. Run Linters and Custom Analyzers
 ```bash

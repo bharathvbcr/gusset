@@ -1,7 +1,5 @@
-prefix=@PREFIX@
-exec_prefix=${prefix}
-libdir=${exec_prefix}/lib
-includedir=${prefix}/include
+libdir=@LIBDIR@
+includedir=@INCLUDEDIR@
 
 Name: gusset
 Description: Go-Rust runtime contract static library

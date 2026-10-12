@@ -2,7 +2,12 @@
 
 use super::{sys, JobOutput, MAX_BUFFER_BYTES};
 use crate::header::JobContext;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+
+/// Jobs currently inside diagnostic mode 17, and the most there have been at once.
+static IN_ENGINE: AtomicUsize = AtomicUsize::new(0);
+static IN_ENGINE_PEAK: AtomicUsize = AtomicUsize::new(0);
 
 /// Diagnostic mode 16: a generated output built through the buffer allocator.
 ///
@@ -256,6 +261,39 @@ pub fn diagnostic_dispatch(ctx: &JobContext, input: &[u8]) -> Result<Vec<u8>, St
                 }
             }
             std::panic::panic_any(DropBomb(input.get(1).copied().unwrap_or(0).min(8)))
+        }
+        // Mode 17: a non-cooperative job that counts itself. It raises the
+        // process-wide in-engine gauge, holds for `input[1]` ms without ever
+        // calling `ctx.check()`, and lowers the gauge on the way out, panic
+        // included. The gauge's peak is what proves I4 from the engine's side:
+        // a Go test reading only its own counters cannot see two jobs running
+        // at once on one handle, but the engine can.
+        17 => {
+            struct InEngine;
+            impl InEngine {
+                fn enter() -> Self {
+                    let now = IN_ENGINE.fetch_add(1, Ordering::AcqRel) + 1;
+                    IN_ENGINE_PEAK.fetch_max(now, Ordering::AcqRel);
+                    InEngine
+                }
+            }
+            impl Drop for InEngine {
+                fn drop(&mut self) {
+                    IN_ENGINE.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+            let _in = InEngine::enter();
+            let hold_ms = input.get(1).copied().unwrap_or(1) as u64;
+            thread::sleep(std::time::Duration::from_millis(hold_ms));
+            Ok(vec![17])
+        }
+        // Mode 18: the peak of mode 17's gauge since the last mode 18, as a u64
+        // LE. Reading resets the peak to the current level, so back-to-back
+        // measurements do not see each other.
+        18 => {
+            let current = IN_ENGINE.load(Ordering::Acquire);
+            let peak = IN_ENGINE_PEAK.swap(current, Ordering::AcqRel);
+            Ok((peak as u64).to_le_bytes().to_vec())
         }
         // Default: echo
         _ => Ok(input.to_vec()),

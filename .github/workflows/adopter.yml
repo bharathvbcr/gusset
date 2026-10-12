@@ -1,0 +1,69 @@
+name: Adopter path
+
+# Walks docs/adoption.md as an adopter: builds and runs a toy umbrella crate and
+# Go app, installs with `make install` and install.sh into temporary prefixes, and
+# links a consumer with -tags gusset_pkgconfig against the installed gusset.pc.
+# The code blocks come from the document, so a document that stops compiling
+# fails here. See tests/adopter/walkthrough.sh.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  walkthrough:
+    name: Adopter walkthrough (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      # Full history: the walkthrough clones this checkout to exercise the piped
+      # install.sh path, and a shallow source cannot be cloned.
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          cache: false
+
+      # The walkthrough refuses to run without pkg-config rather than skipping the
+      # -tags gusset_pkgconfig leg, so a runner image that loses it fails loudly.
+      - name: Install pkg-config
+        run: |
+          if command -v pkg-config >/dev/null 2>&1; then
+            exit 0
+          fi
+          case "$RUNNER_OS" in
+            Linux) sudo apt-get update && sudo apt-get install -y pkg-config ;;
+            macOS) brew install pkgconf ;;
+            *) echo "unsupported runner OS $RUNNER_OS" >&2; exit 1 ;;
+          esac
+
+      - name: Walk docs/adoption.md
+        env:
+          WORKDIR: ${{ runner.temp }}/adopter
+        run: |
+          mkdir -p "$WORKDIR"
+          tests/adopter/walkthrough.sh

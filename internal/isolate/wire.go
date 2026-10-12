@@ -166,12 +166,14 @@ func readFrame(r *bufio.Reader, limit int, v any) error {
 	if uint64(n) > uint64(limit) {
 		return fmt.Errorf("isolate: frame of %d bytes exceeds the %d-byte limit", n, limit)
 	}
-	body := make([]byte, n)
-	if _, err := io.ReadFull(r, body); err != nil {
-		if errors.Is(err, io.EOF) {
-			return io.ErrUnexpectedEOF
-		}
+	// The declared length is the peer's claim, not evidence: grow with what
+	// arrives, so a huge length and a short body cost the short body.
+	body, err := io.ReadAll(io.LimitReader(r, int64(n)))
+	if err != nil {
 		return err
+	}
+	if len(body) != int(n) {
+		return io.ErrUnexpectedEOF
 	}
 	return json.Unmarshal(body, v)
 }

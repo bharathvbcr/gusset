@@ -1099,6 +1099,56 @@ mod log_reentry_tests {
         // Released: the same thread takes it again.
         assert!(lock_log_ring().is_some());
     }
+
+    /// The dropped lines are reported, not just counted: once the ring has
+    /// overflowed and a re-entrant call has dropped lines, the next line that
+    /// gets in is preceded by the "log line(s) dropped" note, and the ring
+    /// stays inside its budget with the note and the line both present.
+    #[test]
+    fn dropped_lines_are_reported_by_a_note_after_the_ring_overflows() {
+        use super::{LOG_BUFFER, LOG_RING_CAPACITY};
+
+        for i in 0..(2 * LOG_RING_CAPACITY / 32) {
+            log_event(&format!("overflow filler line number {i:08}"));
+        }
+        let before = log_dropped_total();
+        {
+            let Some(held) = lock_log_ring() else {
+                panic!("ring already held by this thread");
+            };
+            log_event("dropped-one");
+            log_event("dropped-two");
+            drop(held);
+        }
+        assert_eq!(log_dropped_total(), before + 2);
+
+        log_event("the line after the drops");
+
+        let ring = LOG_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
+        let text = match String::from_utf8(ring.clone()) {
+            Ok(t) => t,
+            Err(e) => panic!("ring is not UTF-8: {e}"),
+        };
+        assert!(
+            ring.len() <= LOG_RING_CAPACITY,
+            "ring grew to {}",
+            ring.len()
+        );
+        let note_at = text
+            .find("log line(s) dropped while the ring was busy")
+            .unwrap_or_else(|| panic!("no dropped-lines note in the ring"));
+        let line_at = text
+            .find("the line after the drops")
+            .unwrap_or_else(|| panic!("the post-drop line is missing"));
+        assert!(
+            note_at < line_at,
+            "the note must precede the line that got in"
+        );
+        assert!(
+            !text.contains("dropped-one") && !text.contains("dropped-two"),
+            "a dropped line must not appear in the ring"
+        );
+    }
 }
 
 /// Test-only fault point inside the guarded body of every handle-bound export.
@@ -1257,6 +1307,86 @@ mod export_panic_poisons_tests {
             // SAFETY: `r` is the read end this test opened.
             unsafe { libc::close(r) };
         }
+    }
+
+    /// The status a poisoned submit carries: code and the exact R10 text, with
+    /// no source location (only a caught panic has one).
+    fn assert_refused_as_poisoned(raw: *mut Handle, header: &CallHeader, why: &str) {
+        let mut st = FfiStatus::ok();
+        let mut ticket = 0u64;
+        let input = [0u8; 1];
+        // SAFETY: `raw` is live for the call; every pointer is local.
+        let rc = unsafe { gusset_submit(raw, header, input.as_ptr(), 1, 0, &mut ticket, &mut st) };
+        let (code, line) = (st.code, st.line);
+        // SAFETY: the export initialised msg/msg_len as a valid (ptr, len) pair.
+        let msg = unsafe {
+            if st.msg.is_null() {
+                String::new()
+            } else {
+                String::from_utf8_lossy(std::slice::from_raw_parts(st.msg, st.msg_len)).into_owned()
+            }
+        };
+        // SAFETY: the export initialised `st`.
+        unsafe { gusset_status_free(&mut st) };
+        assert_eq!(
+            rc, FFI_POISONED,
+            "{why}: submit must be refused as poisoned"
+        );
+        assert_eq!(code, FFI_POISONED, "{why}: the status must carry the code");
+        assert_eq!(msg, "handle is poisoned", "{why}: R10 text");
+        assert_eq!(line, 0, "{why}: a poisoned refusal has no source location");
+        assert_eq!(ticket, 0, "{why}: a refused submit must not mint a ticket");
+    }
+
+    /// R10, both ways a handle gets poisoned: a panic caught at the export
+    /// (FFI_PANIC) and a panic inside the engine on a worker. Each must leave
+    /// the next `gusset_submit` answering FFI_POISONED with the R10 text, ahead
+    /// of every other validation, so a header that would otherwise be refused
+    /// as malformed still reads as poisoned.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn submit_after_a_panic_is_refused_with_handle_is_poisoned() {
+        // Poisoned by an FFI_PANIC.
+        let (handle, r) = open();
+        let raw = Arc::as_ptr(&handle) as *mut Handle;
+        let mut st = FfiStatus::ok();
+        fault::arm();
+        assert_eq!(submit(raw, &mut st), FFI_PANIC);
+        // SAFETY: the export initialised `st`.
+        unsafe { gusset_status_free(&mut st) };
+        let ok_header = CallHeader::default();
+        assert_refused_as_poisoned(raw, &ok_header, "after FFI_PANIC");
+        let bad_flags = CallHeader {
+            flags: !0,
+            ..CallHeader::default()
+        };
+        assert_refused_as_poisoned(raw, &bad_flags, "after FFI_PANIC, unknown flag bits");
+        assert!(handle.close().is_ok());
+        // SAFETY: `r` is the read end this test opened.
+        unsafe { libc::close(r) };
+
+        // Poisoned by the engine panicking on a worker (diagnostic mode 1).
+        let (handle, r) = open();
+        let raw = Arc::as_ptr(&handle) as *mut Handle;
+        let diag = CallHeader {
+            flags: crate::header::GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..CallHeader::default()
+        };
+        let mut st = FfiStatus::ok();
+        let mut ticket = 0u64;
+        let input = [1u8];
+        // SAFETY: `raw` is live; every pointer is local.
+        let rc = unsafe { gusset_submit(raw, &diag, input.as_ptr(), 1, 0, &mut ticket, &mut st) };
+        assert_eq!(rc, FFI_OK);
+        // The completion record is written after the worker latched the poison.
+        let mut rec = [0u8; 8];
+        // SAFETY: reading 8 bytes into a local buffer from the pipe this test owns.
+        let n = unsafe { libc::read(r, rec.as_mut_ptr() as *mut libc::c_void, 8) };
+        assert_eq!(n, 8, "no completion record for the panicking job");
+        assert_refused_as_poisoned(raw, &ok_header, "after an engine panic on a worker");
+        assert!(handle.close().is_ok());
+        // SAFETY: `r` is the read end this test opened.
+        unsafe { libc::close(r) };
     }
 }
 

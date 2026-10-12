@@ -115,9 +115,14 @@ N patterns), rather than making N calls.
   Go-to-Rust calls.
 - **Whether Manvi queries `devmap` from a long-lived Go process.** If it does, a
   warm pool belongs there (see above). DevCouncil has no such caller.
-- **macOS.** The completion ring's park path (kqueue under `RawConn.Read`) has only
-  run on Linux. `make cross` compiles the Rust side for `aarch64-apple-darwin`.
-  CI's `macos-latest` lane is the first real run of it.
+- **GitPulse and Manvi (external repositories).** The two items above are
+  surveys of code outside this repository; nothing here can verify or close them,
+  so they are left as they were.
+- **macOS: done.** The completion ring's park path (kqueue under `RawConn.Read`)
+  runs on darwin: `bench/results/darwin-arm64-*.txt` is a committed run of the
+  Gusset benchmarks there, and `matrix.yml` runs `unit` and `r14`, and `adopter.yml` runs the adopter
+  walkthrough on `macos-latest` (see [platforms](platforms.md) for exactly which
+  jobs). This item was written before those existed.
 
 ## How the numbers were taken
 

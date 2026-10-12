@@ -131,6 +131,39 @@ fn failed_open_leaves_the_completion_fd_with_the_caller() {
     }
 }
 
+/// The completion descriptor is closed by exactly one `close(2)`, however many
+/// times release is asked for. The close is counted through the seam rather
+/// than observed: a second close of one number is invisible (EBADF), or closes
+/// another thread's file once the number is reused, which no deterministic
+/// test can arrange.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_completion_descriptor_is_closed_by_exactly_one_close() {
+    let (r, w) = make_pipe();
+    let handle = Handle::open(1, w).must("open");
+
+    let mut closes: Vec<i32> = Vec::new();
+    for _ in 0..3 {
+        handle.release_pipe_with(|fd| {
+            sys::close_fd_with(fd, |f| {
+                closes.push(f);
+                // SAFETY: `f` is the descriptor this handle owns.
+                unsafe { libc::close(f) }
+            })
+        });
+    }
+    assert_eq!(
+        closes,
+        vec![w],
+        "three releases must close the descriptor once, and never the -1 left behind"
+    );
+
+    // The real close path finds nothing left to close.
+    handle.close().must("close");
+    // SAFETY: the read end belongs to this test.
+    unsafe { libc::close(r) };
+}
+
 /// Fails if `fd` carries O_NONBLOCK, or (on Darwin) F_SETNOSIGPIPE: the two
 /// flags `open` sets on a descriptor it takes ownership of.
 fn assert_fd_flags_untouched(fd: i32, what: &str) {
