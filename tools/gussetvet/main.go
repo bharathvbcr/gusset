@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"errors"
+	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -17,19 +19,67 @@ import (
 // Every #cgo import of a Rust export carries #cgo noescape and #cgo nocallback;
 // no export calls back into Go.
 func main() {
-	targetDir := "internal/ffi"
-	if len(os.Args) > 1 {
-		targetDir = os.Args[1]
-	}
-	os.Exit(run(targetDir, os.Stdout, os.Stderr))
+	os.Exit(realMain(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// run checks targetDir and returns the process exit status.
+const usage = `Usage: gussetvet [-exports file] [dir]
+
+Checks the cgo shim in dir (default internal/ffi) against the Gusset rules:
+R5 (every export carries #cgo noescape and #cgo nocallback; no //export), R4
+(no C.free on Rust memory) and R1 (every export has a Go wrapper). R4 and the
+//export scan walk the Go module that contains dir.
+
+  -exports file   list of exported C symbols, one per line, '#' comments allowed
+                  (default dir/exports.txt). An adopter names its own list here.
+
+An empty or unreadable export list is an error: no export was checked.
+`
+
+// realMain parses args and returns the process exit status: 0 clean (or -h),
+// 1 a violation or a check that could not run, 2 a usage error.
+func realMain(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("gussetvet", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	exports := fs.String("exports", "", "")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(stdout, usage)
+			return 0
+		}
+		fmt.Fprintf(stderr, "gussetvet: %v\n\n%s", err, usage)
+		return 2
+	}
+	if fs.NArg() > 1 {
+		fmt.Fprintf(stderr, "gussetvet: want at most one directory, got %d\n\n%s", fs.NArg(), usage)
+		return 2
+	}
+	exportsSet := false
+	fs.Visit(func(f *flag.Flag) { exportsSet = exportsSet || f.Name == "exports" })
+	if exportsSet && *exports == "" {
+		fmt.Fprintf(stderr, "gussetvet: -exports needs a file\n\n%s", usage)
+		return 2
+	}
+	targetDir := "internal/ffi"
+	if fs.NArg() == 1 {
+		targetDir = fs.Arg(0)
+	}
+	return runWith(targetDir, *exports, stdout, stderr)
+}
+
+// run checks targetDir against its own exports.txt and returns the exit status.
 func run(targetDir string, stdout, stderr io.Writer) int {
-	exportsFile := filepath.Join(targetDir, "exports.txt")
-	exports, err := readLines(exportsFile)
+	return runWith(targetDir, "", stdout, stderr)
+}
+
+// runWith checks targetDir against exportsFile (targetDir/exports.txt when
+// empty) and returns the process exit status.
+func runWith(targetDir, exportsFile string, stdout, stderr io.Writer) int {
+	if exportsFile == "" {
+		exportsFile = filepath.Join(targetDir, "exports.txt")
+	}
+	exports, err := readExports(exportsFile)
 	if err != nil {
-		fmt.Fprintf(stderr, "gussetvet: failed to read %s: %v\n", exportsFile, err)
+		fmt.Fprintf(stderr, "gussetvet: %v\n", err)
 		return 1
 	}
 
@@ -369,4 +419,26 @@ func readLines(path string) ([]string, error) {
 		lines = append(lines, scanner.Text())
 	}
 	return lines, scanner.Err()
+}
+
+// readExports reads the export list at path: one symbol per line, blank lines
+// and '#' comments dropped. A list with no symbol is an error, because every
+// check below iterates it and would pass having inspected nothing.
+func readExports(path string) ([]string, error) {
+	lines, err := readLines(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	var out []string
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l == "" || strings.HasPrefix(l, "#") {
+			continue
+		}
+		out = append(out, l)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no exports listed in %s; nothing was checked", path)
+	}
+	return out, nil
 }
