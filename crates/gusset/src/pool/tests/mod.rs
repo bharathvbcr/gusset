@@ -672,7 +672,10 @@ fn an_outer_guard_panic_poisons_the_handle_and_releases_the_unit() {
         );
         std::thread::yield_now();
     }
-    assert!(handle.is_poisoned(), "an unexplained worker fault must poison");
+    assert!(
+        handle.is_poisoned(),
+        "an unexplained worker fault must poison"
+    );
     handle.close().must("close");
     // SAFETY: the read end is still this test's.
     unsafe {
