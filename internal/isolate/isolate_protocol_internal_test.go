@@ -41,7 +41,11 @@ func scripted(mode string, out *os.File) int {
 	}
 	switch mode {
 	case "dup":
-		if !answer(first.ID, first.In) || !answer(first.ID, first.In) {
+		// The same result frame twice: the second is the duplicate under test.
+		if !answer(first.ID, first.In) {
+			return 1
+		}
+		if !answer(first.ID, first.In) {
 			return 1
 		}
 	case "unknown":

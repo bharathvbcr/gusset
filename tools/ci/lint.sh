@@ -46,7 +46,11 @@ need() {
 }
 
 step_gofmt() {
-	unformatted=$(gofmt -l . | grep -v '^bench/seed/')
+	# The files git would commit (tracked plus untracked, minus ignored), not
+	# whatever is on disk: `gofmt -l .` also walked target/, where local
+	# scratch copies of the tree failed a check about the repository.
+	unformatted=$(git ls-files -z --cached --others --exclude-standard -- '*.go' |
+		xargs -0 gofmt -l | grep -v '^bench/seed/')
 	if [ -n "$unformatted" ]; then
 		echo "gofmt needed for:"
 		echo "$unformatted"
