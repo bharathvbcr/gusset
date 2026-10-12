@@ -102,6 +102,9 @@ cat >"$W/adopter/my-engine/Cargo.toml" <<'EOF'
 name = "my-engine"
 version = "0.1.0"
 edition = "2021"
+
+# Standalone: a WORKDIR inside another Cargo workspace must not adopt this crate.
+[workspace]
 EOF
 cat >"$W/adopter/my-engine/src/lib.rs" <<'EOF'
 pub fn run(text: &str) -> String {
@@ -114,6 +117,12 @@ printf '%s\n' "$CARGO_TOML" | grep -E '^gusset_core = \{ package = "gusset", git
 	fail "docs/adoption.md step 1 no longer has the gusset_core git dependency line this script substitutes"
 printf '%s\n' "$CARGO_TOML" |
 	sed "s|^gusset_core = .*|gusset_core = { package = \"gusset\", path = \"$W/module/crates/gusset\" }|" >"$UMB/Cargo.toml"
+# Standalone: cargo refuses a package under another workspace's root that the
+# workspace does not list. The document's block has no [workspace] table of its own.
+if printf '%s\n' "$CARGO_TOML" | grep -E '^\[workspace' >/dev/null; then
+	fail "docs/adoption.md step 1 now has a [workspace] table; drop the one this script appends"
+fi
+printf '\n[workspace]\n' >>"$UMB/Cargo.toml"
 printf '%s\n' "$BUILD_RS" >"$UMB/build.rs"
 {
 	printf '%s\n' "$ENGINE_RS"
@@ -198,7 +207,9 @@ func main() {
 	fmt.Printf("%s\n", out)
 }
 EOF
-cat >"$APP/exports.txt" <<'EOF'
+# The list lives beside the app, not in it: gussetvet defaults to <dir>/exports.txt,
+# so a copy inside the app would give the "no list" check below a list to find.
+cat >"$W/adopter/engine-exports.txt" <<'EOF'
 # the C symbols this shim imports
 myservice_engine_init
 EOF
@@ -261,7 +272,7 @@ expect_fail "an ARCHIVE that does not exist" make -C "$CHECKOUT" install PREFIX=
 
 step "the plain install's archive is not the adopter's: a consumer cannot link it"
 expect_fail "linking the toy against Gusset's own installed archive" \
-	bash -c "cd '$APP' && PKG_CONFIG_PATH='$PM/lib/pkgconfig' go build -tags gusset_pkgconfig -o '$W/toy-plain' ."
+	bash -c "cd '$APP' && GOCACHE='$W/gocache-plain' PKG_CONFIG_PATH='$PM/lib/pkgconfig' go build -tags gusset_pkgconfig -o '$W/toy-plain' ."
 grep -E "myservice_engine_init" "$W/expect_fail.out" >/dev/null || { cat "$W/expect_fail.out" >&2; fail "the plain-archive link failed, but not on the adopter's symbol"; }
 
 # --- step 3, Option A --------------------------------------------------------
@@ -270,17 +281,23 @@ step "step 3, Option A: install the umbrella archive, build with -tags gusset_pk
 PA="$W/prefix-umbrella"
 make -C "$CHECKOUT" install ARCHIVE="$UMB/target/release/libgusset.a" PREFIX="$PA" >/dev/null
 cmp "$UMB/target/release/libgusset.a" "$PA/lib/libgusset.a" || fail "the installed archive is not the umbrella's"
-(cd "$APP" && PKG_CONFIG_PATH="$PA/lib/pkgconfig" go build -tags gusset_pkgconfig -o "$W/toy-a" .)
+# Go caches the cgo flags pkg-config printed, keyed without PKG_CONFIG_PATH, so an
+# earlier pkg-config build against another prefix would link that prefix's -L. Each
+# pkg-config build therefore gets its own GOCACHE.
+(cd "$APP" && GOCACHE="$W/gocache-a" PKG_CONFIG_PATH="$PA/lib/pkgconfig" go build -tags gusset_pkgconfig -o "$W/toy-a" .)
 check_toy "$W/toy-a"
 
 # --- gussetvet from the install ---------------------------------------------
 
 step "gussetvet from the install, on the adopter's shim"
 "$PA/bin/gussetvet" -h >/dev/null || fail "gussetvet -h did not exit 0"
-"$PA/bin/gussetvet" -exports "$APP/exports.txt" "$APP"
+EXPORTS="$W/adopter/engine-exports.txt"
+[ ! -e "$APP/exports.txt" ] || fail "the toy app holds an exports.txt, so gussetvet has a default list to find"
+"$PA/bin/gussetvet" -exports "$EXPORTS" "$APP"
 : >"$W/empty-exports.txt"
 expect_fail "an empty export list" "$PA/bin/gussetvet" -exports "$W/empty-exports.txt" "$APP"
 expect_fail "gussetvet with no export list in an adopter repo" "$PA/bin/gussetvet" "$APP"
+grep -F "exports.txt" "$W/expect_fail.out" >/dev/null || { cat "$W/expect_fail.out" >&2; fail "gussetvet refused, but not over the missing exports.txt"; }
 
 # --- install.sh ---------------------------------------------------------------
 
