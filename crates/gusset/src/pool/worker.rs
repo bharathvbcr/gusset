@@ -16,6 +16,12 @@ use std::thread;
 /// rather than inherited.
 pub const WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
+/// How long a spawner waits for a new worker to report that its startup
+/// protections are in place. Startup is a few syscalls; this only bounds a
+/// pathologically starved scheduler, and a timeout proceeds (logged) rather
+/// than refusing a pool that is merely slow.
+const WORKER_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Runs one dequeued work unit to a result: early cancellation, the engine call
 /// behind its panic firewall, and the refusal of aliased output buffers.
 ///
@@ -119,6 +125,62 @@ fn caught_panic(
     }
 }
 
+/// Stores a finished unit's result, announces it, and takes the unit out of
+/// flight (I2, I4).
+///
+/// Each step that can unwind is guarded, so the guarantee the worker loop
+/// states holds here too:
+///
+/// - Storing the result (`materialize_result` allocates and takes locks): a
+///   panic there is nothing published yet, so the ticket is completed with a
+///   panic result instead and the handle is poisoned.
+/// - Publishing (`complete`): a panic here may have stored the result or
+///   written part of the record already, so a second completion could
+///   duplicate the ticket. It is not retried: the handle is poisoned and the
+///   fault logged, which is the loudest signal available once publication
+///   itself is the thing that failed.
+///
+/// The cancel flag is removed whatever happened above, so `gusset_shutdown`'s
+/// drain never waits on a unit that can no longer finish. It is removed only
+/// after the completion write: removing it first let a drain report clean
+/// while a worker still sat in the up-to-10 s write backoff.
+fn deliver(
+    weak: &Weak<Handle>,
+    ticket: u64,
+    result: JobResult,
+    wants_inline: bool,
+    #[cfg(test)] post_panic: bool,
+) {
+    let Some(h) = weak.upgrade() else {
+        return;
+    };
+    let stored = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        if post_panic {
+            panic!("injected post-engine panic (test)");
+        }
+        materialize_result(&h, result)
+    }));
+    let result = match stored {
+        Ok(r) => r,
+        Err(payload) => caught_panic(weak, payload, |msg| {
+            format!("worker fault storing the result: {}", msg)
+        }),
+    };
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
+        h.complete(ticket, result, wants_inline)
+    })) {
+        if let JobResult::Panic { msg, .. } = caught_panic(weak, payload, |msg| msg) {
+            crate::ffi::log_event(&format!(
+                "gusset: panic while publishing the completion for ticket {}: {}; \
+                 the handle is poisoned and the ticket may have no completion",
+                ticket, msg
+            ));
+        }
+    }
+    lock_recover(&h.cancel_flags).remove(&ticket);
+}
+
 impl Handle {
     pub(super) fn spawn_workers(&self, count: usize) -> Result<(), String> {
         let mut workers = lock_recover(&self.workers);
@@ -142,12 +204,21 @@ impl Handle {
                 return Err("gusset: injected spawn failure (test)".to_string());
             }
 
+            // Test-only: whether this worker must behave as if its sigaltstack
+            // could not be installed. Decided here, on the spawning thread, so
+            // the injection is scoped to the test that armed it.
+            #[cfg(test)]
+            let fail_altstack = super::tests::sigaltstack_should_fail();
+
             let weak_clone = weak_handle.clone();
             let exited = Arc::clone(&self.exited);
             let receiver_clone = Arc::clone(&self.receiver);
             // Monotonic, so a respawned worker never reuses a retired worker's name
             // in a thread dump (workers.len() shrinks when dead entries are reaped).
             let worker_id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
+
+            // The worker reports whether its sigaltstack installed (see below).
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
 
             let builder = thread::Builder::new()
                 .name(format!("gusset-w{}", worker_id))
@@ -184,18 +255,34 @@ impl Handle {
                     // signal arriving while this thread's stack is nearly used up
                     // has nowhere to run Go's handler. (An overflow is still fatal
                     // either way; see sys::sigaltstack_size.) A failure here is a
-                    // real loss of protection and is reported, not shrugged off.
-                    let _sig_guard = match sys::install_sigaltstack() {
-                        Some(g) => Some(g),
+                    // real loss of protection: the worker refuses to start and
+                    // reports why to the spawner, so `open` fails and a respawn
+                    // surfaces as a submit error instead of a pool that runs
+                    // unprotected and logs once.
+                    #[cfg(test)]
+                    let altstack = if fail_altstack {
+                        None
+                    } else {
+                        sys::install_sigaltstack()
+                    };
+                    #[cfg(not(test))]
+                    let altstack = sys::install_sigaltstack();
+                    let _sig_guard = match altstack {
+                        Some(g) => g,
                         None => {
-                            crate::ffi::log_event(&format!(
-                                "gusset: worker gusset-w{} started WITHOUT sigaltstack; \
-                                 a Rust stack overflow on this thread will abort the process (I5/R8)",
+                            let msg = format!(
+                                "worker gusset-w{} could not install its sigaltstack (mmap, \
+                                 mprotect or sigaltstack failed); refusing to run without it \
+                                 (I5/R8)",
                                 worker_id
-                            ));
-                            None
+                            );
+                            crate::ffi::log_event(&format!("gusset: {}", msg));
+                            // The spawner may have given up waiting; nothing to do then.
+                            let _ = ready_tx.send(Err(msg));
+                            return;
                         }
                     };
+                    let _ = ready_tx.send(Ok(()));
 
                     // I5/R8: `Builder::stack_size` is a request. A platform that
                     // rounded it down, or a future refactor that dropped the call,
@@ -230,6 +317,9 @@ impl Handle {
                         let ticket = unit.ticket;
                         #[cfg(test)]
                         let kill_me = unit.ctx.header().trace_id == super::tests::KILL_TRACE;
+                        #[cfg(test)]
+                        let post_panic =
+                            unit.ctx.header().trace_id == super::tests::POST_ENGINE_PANIC_TRACE;
                         let wants_inline = unit.ctx.header().flags
                             & crate::header::GUSSET_FLAG_INLINE_COMPLETION
                             != 0;
@@ -239,7 +329,8 @@ impl Handle {
                         // the unit. Whatever unwinds here, the ticket still gets a
                         // completion: a worker that died between dequeue and write
                         // left its Go waiter parked forever on a permit that never
-                        // came back (I2, I4).
+                        // came back (I2, I4). Storing and publishing the result
+                        // are guarded the same way in `deliver`.
                         let result = match catch_unwind(AssertUnwindSafe(|| {
                             execute_unit(&weak_clone, unit)
                         })) {
@@ -249,15 +340,22 @@ impl Handle {
                             }),
                         };
 
-                        // Store result and wake netpoller if handle still alive
-                        if let Some(h) = weak_clone.upgrade() {
-                            let result = materialize_result(&h, result);
-                            h.complete(ticket, result, wants_inline);
-                            // Only now is the unit out of flight: shutdown's drain
-                            // counts cancel flags, and removing this one before the
-                            // write let `gusset_shutdown` report a clean drain while
-                            // a worker still sat in the up-to-10 s write backoff.
-                            lock_recover(&h.cancel_flags).remove(&ticket);
+                        // Store result and wake netpoller if handle still alive.
+                        // Guarded as a third layer: `deliver` guards each step
+                        // itself, and this catches what is left (dropping the
+                        // last `Arc<Handle>` runs `Handle::drop` on this thread).
+                        let delivered = catch_unwind(AssertUnwindSafe(|| {
+                            deliver(
+                                &weak_clone,
+                                ticket,
+                                result,
+                                wants_inline,
+                                #[cfg(test)]
+                                post_panic,
+                            )
+                        }));
+                        if let Err(payload) = delivered {
+                            drop_panic_payload(payload);
                         }
                         // Test-only worker death (see tests::KILL_TRACE):
                         // the worker that ran a marked unit exits once it
@@ -269,6 +367,33 @@ impl Handle {
                     }
                 })
                 .map_err(|e| format!("failed to spawn worker thread: {}", e))?;
+
+            // A worker that could not protect itself reported why and exited.
+            // Reap it here: its exit is already counted in `exited`, and leaving
+            // it in `workers` would let an immediate retry see a "live" slot
+            // that is about to finish, and queue work behind no thread.
+            let startup = match ready_rx.recv_timeout(WORKER_READY_TIMEOUT) {
+                Ok(r) => r,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    crate::ffi::log_event(&format!(
+                        "gusset: worker gusset-w{} did not report ready within {:?}; \
+                         continuing without confirmation of its sigaltstack",
+                        worker_id, WORKER_READY_TIMEOUT
+                    ));
+                    Ok(())
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(format!(
+                    "worker gusset-w{} exited during startup",
+                    worker_id
+                )),
+            };
+            if let Err(msg) = startup {
+                if let Err(payload) = join_handle.join() {
+                    drop_panic_payload(payload);
+                }
+                self.exited.fetch_sub(1, Ordering::AcqRel);
+                return Err(format!("gusset: {}", msg));
+            }
 
             workers.push(join_handle);
         }
