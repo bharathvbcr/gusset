@@ -273,7 +273,8 @@ jobs:
 
   # libFuzzer targets over the Rust side of the boundary (fuzz/, its own
   # workspace): the log ring and drain, panic-payload truncation, ring slot
-  # records, and arbitrary 40-byte call headers through a real job.
+  # records, arbitrary 40-byte call headers through a real job, and the raw C
+  # exports driven by hostile call sequences (ffi_exports).
   cargo-fuzz:
     name: cargo-fuzz (Rust boundary)
     runs-on: ubuntu-latest
@@ -303,9 +304,9 @@ jobs:
         working-directory: fuzz
         run: |
           set -euo pipefail
-          for t in log_ring truncate_payload ring_records call_header; do
+          for t in log_ring truncate_payload ring_records call_header ffi_exports; do
             echo "== $t"
-            cargo "+$RUST_NIGHTLY" fuzz run -O "$t" -- -max_total_time=300 -max_len=4096
+            cargo "+$RUST_NIGHTLY" fuzz run -O "$t" -- -max_total_time=300 -max_len=4096 -rss_limit_mb=2048
           done
 
   # The per-push matrix fuzzes each Go target for 45 s; this gives each one
