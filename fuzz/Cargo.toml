@@ -45,6 +45,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "ffi_exports"
+path = "fuzz_targets/ffi_exports.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "call_header"
 path = "fuzz_targets/call_header.rs"
 test = false

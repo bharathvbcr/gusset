@@ -341,6 +341,16 @@ pub(crate) const WRITE_TICKET_TIMEOUT: std::time::Duration = std::time::Duration
 pub(crate) const WRITE_TICKET_MAX_BACKOFF: std::time::Duration =
     std::time::Duration::from_millis(8);
 
+/// How long a short write may stay stuck, with no further byte accepted, before
+/// the record is reported torn. Generous on purpose: it only decides when to
+/// give up on a reader that has stopped, and a slow one must never qualify.
+///
+/// On a real pipe this is unreachable: records are at most 64 bytes, under
+/// `PIPE_BUF`, so the kernel writes them whole or not at all, and `open` now
+/// refuses any descriptor that is not a pipe. It stays for a descriptor that
+/// is not (tests hand in a socketpair) so a stuck one cannot hang a worker.
+pub(crate) const TORN_WRITE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// One non-blocking attempt to write a whole completion record (a bare ticket,
 /// or an inline-result record of at most 64 bytes). Records are far below
 /// `PIPE_BUF`, so on a pipe the write is all-or-nothing; the short-write
@@ -361,7 +371,8 @@ pub fn write_record_attempt(fd: i32, bytes: &[u8]) -> Result<()> {
 
     let mut remaining = bytes;
     let mut committed = false;
-    let mut partial_spins = 0u32;
+    let mut stalled_since: Option<std::time::Instant> = None;
+    let mut backoff = std::time::Duration::ZERO;
 
     while !remaining.is_empty() {
         let n = unsafe {
@@ -380,14 +391,23 @@ pub fn write_record_attempt(fd: i32, bytes: &[u8]) -> Result<()> {
                     if !committed {
                         return Err(Error::new(ErrorKind::WouldBlock, "completion pipe full"));
                     }
-                    partial_spins = partial_spins.saturating_add(1);
-                    if partial_spins > 10_000 {
+                    // Time-based, not a spin count: a live reader that is only
+                    // slow (a loaded machine) must not be told it stalled. The
+                    // clock restarts whenever a byte lands.
+                    let stalled_since = *stalled_since.get_or_insert_with(std::time::Instant::now);
+                    if stalled_since.elapsed() >= TORN_WRITE_DEADLINE {
                         return Err(Error::new(
                             ErrorKind::TimedOut,
                             "torn completion write; pipe stayed full after a short write",
                         ));
                     }
-                    std::thread::yield_now();
+                    if backoff.is_zero() {
+                        std::thread::yield_now();
+                        backoff = std::time::Duration::from_micros(50);
+                    } else {
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(WRITE_TICKET_MAX_BACKOFF);
+                    }
                     continue;
                 }
                 _ => return Err(err),
@@ -396,7 +416,8 @@ pub fn write_record_attempt(fd: i32, bytes: &[u8]) -> Result<()> {
             return Err(Error::new(ErrorKind::WriteZero, "pipe write zero bytes"));
         } else {
             committed = true;
-            partial_spins = 0;
+            stalled_since = None;
+            backoff = std::time::Duration::ZERO;
             remaining = &remaining[n as usize..];
         }
     }
@@ -447,12 +468,18 @@ pub fn ensure_pipe_capacity(fd: i32, bytes: usize) -> std::result::Result<(), St
     Ok(())
 }
 
-/// Checks that `fd` is an open descriptor without changing anything about it.
+/// Checks that `fd` is the write end of a pipe, without changing anything
+/// about it.
 ///
 /// `Handle::open` validates the completion descriptor with this before any
-/// side effect, so a closed descriptor is refused before a thread exists and
-/// a refused open leaves the caller's descriptor exactly as it was.
-pub fn check_open(fd: i32) -> Result<()> {
+/// side effect, so a closed, read-only or non-pipe descriptor is refused
+/// before a thread exists and a refused open leaves the caller's descriptor
+/// exactly as it was. Open is not enough: a read-only end makes every
+/// completion write fail with EBADF after the pool is up, and a regular file
+/// or socket is not what the reader polls. Sockets are refused as well: the
+/// contract and every caller is `pipe(2)`/`os.Pipe`, and
+/// `ensure_pipe_capacity` sizes it with `F_SETPIPE_SZ`.
+pub fn check_pipe_write_end(fd: i32) -> Result<()> {
     if fd < 0 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
@@ -460,8 +487,27 @@ pub fn check_open(fd: i32) -> Result<()> {
         ));
     }
     // SAFETY: F_GETFL only reads the descriptor's status flags.
-    if unsafe { libc::fcntl(fd, libc::F_GETFL) } < 0 {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
         return Err(Error::last_os_error());
+    }
+    // SAFETY: `st` is a valid out-pointer and fstat only reads the descriptor.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(Error::last_os_error());
+    }
+    if st.st_mode & libc::S_IFMT != libc::S_IFIFO {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "descriptor is not a pipe",
+        ));
+    }
+    let access = flags & libc::O_ACCMODE;
+    if access != libc::O_WRONLY && access != libc::O_RDWR {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "descriptor is not open for writing",
+        ));
     }
     Ok(())
 }

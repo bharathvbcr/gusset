@@ -5,7 +5,11 @@
 
 mod completion;
 mod engine;
+mod respawn;
 mod submit;
+pub(super) use respawn::{
+    injected_delay, DELAY_BEFORE_CLEAR, DELAY_BEFORE_REMOVE, FAILING_WORKER_MS,
+};
 
 use super::*;
 use crate::header::GUSSET_FLAG_DIAGNOSTIC_ENGINE;
@@ -596,4 +600,208 @@ fn respawn_and_failed_open_release_threads_and_mappings() {
         !after_failed_opens.leaked_since(base),
         "partial opens leaked resources"
     );
+}
+
+/// I4/I5: the completion descriptor must be the write end of a pipe. An open
+/// descriptor of any other kind used to pass the old open-only check: a read-only end
+/// made every completion write fail with EBADF after the pool was up, and a
+/// regular file or socket took 8-byte tickets that no reader would ever poll.
+/// Each is refused before a thread exists, and the caller's descriptor is
+/// left as it was handed in.
+#[test]
+fn open_refuses_a_descriptor_that_is_not_a_pipe_write_end() {
+    let (r, w) = make_pipe();
+    let res = Handle::open(1, r);
+    assert!(res.is_err(), "the read end of a pipe was accepted");
+    // SAFETY: both ends are still this test's.
+    unsafe {
+        libc::close(r);
+        libc::close(w);
+    }
+
+    // A regular file opened for writing: open, writable, not a pipe.
+    let path = std::env::temp_dir().join(format!("gusset-fdkind-{}", std::process::id()));
+    let scratch = std::fs::File::create(&path).must("create a scratch file");
+    let res = Handle::open(1, std::os::fd::AsRawFd::as_raw_fd(&scratch));
+    drop(scratch);
+    let _ = std::fs::remove_file(&path);
+    assert!(res.is_err(), "a regular file was accepted");
+
+    // A socket: writable, but not the pipe the reader polls.
+    let mut sv = [0i32; 2];
+    // SAFETY: sv is a valid two-element array.
+    assert_eq!(
+        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr()) },
+        0
+    );
+    let res = Handle::open(1, sv[0]);
+    // SAFETY: both ends are this test's.
+    unsafe {
+        libc::close(sv[0]);
+        libc::close(sv[1]);
+    }
+    assert!(res.is_err(), "a socket was accepted");
+}
+
+/// Trace id that makes the worker panic after the engine returned, in the
+/// code that stores and announces the result. Compiled only under `cfg(test)`.
+pub(super) const POST_ENGINE_PANIC_TRACE: [u8; 16] = *b"gusset:post-pnic";
+
+/// Trace id that makes `deliver` itself panic after both of its inner guards,
+/// so only the worker loop's outer guard can catch it.
+pub(super) const DELIVER_PANIC_TRACE: [u8; 16] = *b"gusset:deliv-pnc";
+
+/// I2: a panic in `deliver` that no inner guard covers is caught by the loop's
+/// outer guard, which poisons the handle and still takes the unit out of
+/// flight. Before, the payload was dropped silently: the handle stayed
+/// healthy and the cancel flag stayed registered, so a drain never finished.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_outer_guard_panic_poisons_the_handle_and_releases_the_unit() {
+    let (r, w) = make_pipe();
+    let handle = Handle::open(1, w).must("open");
+    let header = CallHeader {
+        trace_id: DELIVER_PANIC_TRACE,
+        flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+        ..Default::default()
+    };
+    let ticket = handle.submit(header, &[9, 2], 0).must("submit");
+    assert!(completion_ready_within(r, 5_000));
+    assert_eq!(read_ticket(r), ticket);
+    let start = std::time::Instant::now();
+    while handle.in_flight() != 0 {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "the cancel flag was never removed"
+        );
+        std::thread::yield_now();
+    }
+    assert!(
+        handle.is_poisoned(),
+        "an unexplained worker fault must poison"
+    );
+    handle.close().must("close");
+    // SAFETY: the read end is still this test's.
+    unsafe {
+        libc::close(r);
+    }
+}
+
+/// Whether the next worker spawned by the arming thread must behave as if its
+/// sigaltstack install failed. Scoped to the arming thread like
+/// [`spawn_should_fail`], for the same cross-talk reason.
+static ALTSTACK_FAIL_ARMED_BY: Mutex<Option<thread::ThreadId>> = Mutex::new(None);
+
+fn arm_sigaltstack_failure() {
+    *lock_recover(&ALTSTACK_FAIL_ARMED_BY) = Some(thread::current().id());
+}
+
+fn disarm_sigaltstack_failure() {
+    *lock_recover(&ALTSTACK_FAIL_ARMED_BY) = None;
+}
+
+pub(super) fn sigaltstack_should_fail() -> bool {
+    *lock_recover(&ALTSTACK_FAIL_ARMED_BY) == Some(thread::current().id())
+}
+
+/// I2: a panic after the engine call, in storing or announcing the result,
+/// still completes the ticket. The worker comment promised this ("whatever
+/// unwinds here, the ticket still gets a completion") but the result path ran
+/// outside both guards: the worker died between dequeue and write, and its Go
+/// waiter parked forever on a permit that never came back.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_panic_after_the_engine_still_completes_the_ticket() {
+    let (r, w) = make_pipe();
+    let handle = Handle::open(1, w).must("open");
+    let header = CallHeader {
+        trace_id: POST_ENGINE_PANIC_TRACE,
+        flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+        ..Default::default()
+    };
+    let ticket = handle.submit(header, &[9, 2], 0).must("submit");
+    assert!(
+        completion_ready_within(r, 5_000),
+        "a post-engine panic left the ticket without a completion"
+    );
+    assert_eq!(read_ticket(r), ticket);
+    assert!(matches!(handle.take(ticket), Ok(JobResult::Panic { .. })));
+    assert!(handle.is_poisoned(), "the panic must poison the handle");
+    // The unit leaves flight: shutdown's drain must not wait on it. `deliver`
+    // removes the cancel flag after the completion write, so poll.
+    let start = std::time::Instant::now();
+    while handle.in_flight() != 0 {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "the unit never left flight"
+        );
+        std::thread::yield_now();
+    }
+    handle.close().must("close");
+    // SAFETY: the read end is still this test's.
+    unsafe {
+        libc::close(r);
+    }
+}
+
+/// I5/R8: a worker that cannot install its sigaltstack is a refused open and
+/// a refused respawn, not a running pool that logs once and then aborts the
+/// process on a stack-pressure signal.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_worker_without_sigaltstack_is_refused() {
+    let _serialise = lock_recover(&INJECT_LOCK);
+    let (r, w) = make_pipe();
+
+    arm_sigaltstack_failure();
+    let opened = Handle::open(2, w);
+    disarm_sigaltstack_failure();
+    match opened {
+        Ok(h) => {
+            let _ = h.close();
+            panic!("open succeeded with workers that have no sigaltstack");
+        }
+        Err(e) => assert!(e.contains("sigaltstack"), "unhelpful error: {e}"),
+    }
+    assert!(
+        still_the_same_pipe(w, r),
+        "the refused open took the caller's fd"
+    );
+
+    // A respawn: kill the worker, make its replacement fail, and see the
+    // submit report it instead of queueing behind a pool with no thread.
+    let handle = Handle::open(1, w).must("open");
+    kill_workers(&handle, r, 1);
+    arm_sigaltstack_failure();
+    let refused = handle.submit(
+        CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+            ..Default::default()
+        },
+        &[1],
+        0,
+    );
+    disarm_sigaltstack_failure();
+    match refused {
+        Ok(_) => panic!("a submit was accepted by a pool whose respawn failed"),
+        Err(e) => assert!(e.contains("sigaltstack"), "unhelpful error: {e}"),
+    }
+    // The next submit retries the respawn and works.
+    let t = handle
+        .submit(
+            CallHeader {
+                flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+                ..Default::default()
+            },
+            &[1],
+            0,
+        )
+        .must("submit after recovery");
+    assert!(completion_ready_within(r, 5_000));
+    assert_eq!(read_ticket(r), t);
+    handle.close().must("close");
+    // SAFETY: the read end is still this test's.
+    unsafe {
+        libc::close(r);
+    }
 }

@@ -16,6 +16,19 @@ use std::thread;
 /// rather than inherited.
 pub const WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
 
+/// How long a spawner waits for a new worker to report that its startup
+/// protections are in place. Startup is a few syscalls; this only bounds a
+/// pathologically starved scheduler, and a timeout proceeds (logged) rather
+/// than refusing a pool that is merely slow.
+const WORKER_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A spawned worker whose startup report has not been collected yet.
+pub(super) struct Startup {
+    thread: thread::ThreadId,
+    worker_id: u64,
+    ready: std::sync::mpsc::Receiver<Result<(), String>>,
+}
+
 /// Runs one dequeued work unit to a result: early cancellation, the engine call
 /// behind its panic firewall, and the refusal of aliased output buffers.
 ///
@@ -119,18 +132,144 @@ fn caught_panic(
     }
 }
 
+/// Stores a finished unit's result, announces it, and takes the unit out of
+/// flight (I2, I4).
+///
+/// Each step that can unwind is guarded, so the guarantee the worker loop
+/// states holds here too:
+///
+/// - Storing the result (`materialize_result` allocates and takes locks): a
+///   panic there is nothing published yet, so the ticket is completed with a
+///   panic result instead and the handle is poisoned.
+/// - Publishing (`complete`): a panic here may have stored the result or
+///   written part of the record already, so a second completion could
+///   duplicate the ticket. It is not retried: the handle is poisoned and the
+///   fault logged, which is the loudest signal available once publication
+///   itself is the thing that failed.
+///
+/// The cancel flag is removed whatever happened above, so `gusset_shutdown`'s
+/// drain never waits on a unit that can no longer finish. It is removed only
+/// after the completion write: removing it first let a drain report clean
+/// while a worker still sat in the up-to-10 s write backoff.
+fn deliver(
+    weak: &Weak<Handle>,
+    ticket: u64,
+    result: JobResult,
+    wants_inline: bool,
+    #[cfg(test)] trace: [u8; 16],
+) {
+    let Some(h) = weak.upgrade() else {
+        return;
+    };
+    let stored = catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(test)]
+        if trace == super::tests::POST_ENGINE_PANIC_TRACE {
+            panic!("injected post-engine panic (test)");
+        }
+        materialize_result(&h, result)
+    }));
+    let result = match stored {
+        Ok(r) => r,
+        Err(payload) => caught_panic(weak, payload, |msg| {
+            format!("worker fault storing the result: {}", msg)
+        }),
+    };
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
+        h.complete(ticket, result, wants_inline)
+    })) {
+        if let JobResult::Panic { msg, .. } = caught_panic(weak, payload, |msg| msg) {
+            crate::ffi::log_event(&format!(
+                "gusset: panic while publishing the completion for ticket {}: {}; \
+                 the handle is poisoned and the ticket may have no completion",
+                ticket, msg
+            ));
+        }
+    }
+    // Test-only: a fault in `deliver` itself, past both inner guards.
+    #[cfg(test)]
+    if trace == super::tests::DELIVER_PANIC_TRACE {
+        panic!("injected deliver panic (test)");
+    }
+    lock_recover(&h.cancel_flags).remove(&ticket);
+}
+
 impl Handle {
+    /// Spawns `count` workers and waits for each to report that its startup
+    /// protections are in place.
+    ///
+    /// The `workers` lock is held only while threads are created, never across
+    /// the wait: `close` takes the same lock outside its join budget, and the
+    /// wait is bounded by one shared deadline for the whole batch, not one per
+    /// worker (a pool of 1024 would otherwise serialise 1024 thread start-ups).
     pub(super) fn spawn_workers(&self, count: usize) -> Result<(), String> {
-        let mut workers = lock_recover(&self.workers);
-        self.spawn_workers_locked(&mut workers, count)
+        let starting = {
+            let mut workers = lock_recover(&self.workers);
+            self.spawn_workers_locked(&mut workers, count)?
+        };
+        self.await_ready(starting)
+    }
+
+    /// Collects the startup reports of `starting` against one deadline.
+    ///
+    /// A worker that could not protect itself reported why and exited. It is
+    /// taken out of `workers` and joined here, and its exit, already counted in
+    /// `exited`, is uncounted: leaving it would let an immediate retry see a
+    /// "live" slot that is about to finish and queue work behind no thread.
+    /// Only the one that removes an entry from `workers` uncounts it, so a
+    /// concurrent reap that got there first is not subtracted twice. A failed
+    /// worker leaves `respawn_pending` raised so the next submit retries.
+    ///
+    /// A worker that has not reported when the deadline passes is let through
+    /// (logged): a starved scheduler is not a failed protection.
+    pub(super) fn await_ready(&self, starting: Vec<Startup>) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + WORKER_READY_TIMEOUT;
+        let mut first_err: Option<String> = None;
+        for s in starting {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let outcome = match s.ready.recv_timeout(left) {
+                Ok(r) => r,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    crate::ffi::log_event(&format!(
+                        "gusset: worker gusset-w{} did not report ready within {:?}; \
+                         continuing without confirmation of its sigaltstack",
+                        s.worker_id, WORKER_READY_TIMEOUT
+                    ));
+                    Ok(())
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(format!(
+                    "worker gusset-w{} exited during startup",
+                    s.worker_id
+                )),
+            };
+            let Err(msg) = outcome else { continue };
+            #[cfg(test)]
+            super::tests::injected_delay(&super::tests::DELAY_BEFORE_REMOVE);
+            let removed = {
+                let mut workers = lock_recover(&self.workers);
+                workers
+                    .iter()
+                    .position(|h| h.thread().id() == s.thread)
+                    .map(|at| workers.swap_remove(at))
+            };
+            if let Some(h) = removed {
+                if let Err(payload) = h.join() {
+                    drop_panic_payload(payload);
+                }
+                self.exited.fetch_sub(1, Ordering::AcqRel);
+            }
+            self.respawn_pending.store(true, Ordering::Release);
+            first_err.get_or_insert(format!("gusset: {}", msg));
+        }
+        first_err.map_or(Ok(()), Err)
     }
 
     fn spawn_workers_locked(
         &self,
         workers: &mut Vec<thread::JoinHandle<()>>,
         count: usize,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<Startup>, String> {
         let weak_handle = lock_recover(&self.self_weak).clone();
+        let mut starting = Vec::with_capacity(count);
 
         for _ in 0..count {
             // Deterministic trigger for the failure path below. The fd-ownership
@@ -142,12 +281,21 @@ impl Handle {
                 return Err("gusset: injected spawn failure (test)".to_string());
             }
 
+            // Test-only: whether this worker must behave as if its sigaltstack
+            // could not be installed. Decided here, on the spawning thread, so
+            // the injection is scoped to the test that armed it.
+            #[cfg(test)]
+            let fail_altstack = super::tests::sigaltstack_should_fail();
+
             let weak_clone = weak_handle.clone();
             let exited = Arc::clone(&self.exited);
             let receiver_clone = Arc::clone(&self.receiver);
             // Monotonic, so a respawned worker never reuses a retired worker's name
             // in a thread dump (workers.len() shrinks when dead entries are reaped).
             let worker_id = self.next_worker_id.fetch_add(1, Ordering::Relaxed);
+
+            // The worker reports whether its sigaltstack installed (see below).
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
 
             let builder = thread::Builder::new()
                 .name(format!("gusset-w{}", worker_id))
@@ -184,18 +332,38 @@ impl Handle {
                     // signal arriving while this thread's stack is nearly used up
                     // has nowhere to run Go's handler. (An overflow is still fatal
                     // either way; see sys::sigaltstack_size.) A failure here is a
-                    // real loss of protection and is reported, not shrugged off.
-                    let _sig_guard = match sys::install_sigaltstack() {
-                        Some(g) => Some(g),
+                    // real loss of protection: the worker refuses to start and
+                    // reports why to the spawner, so `open` fails and a respawn
+                    // surfaces as a submit error instead of a pool that runs
+                    // unprotected and logs once.
+                    #[cfg(test)]
+                    let altstack = if fail_altstack {
+                        None
+                    } else {
+                        sys::install_sigaltstack()
+                    };
+                    #[cfg(not(test))]
+                    let altstack = sys::install_sigaltstack();
+                    let _sig_guard = match altstack {
+                        Some(g) => g,
                         None => {
-                            crate::ffi::log_event(&format!(
-                                "gusset: worker gusset-w{} started WITHOUT sigaltstack; \
-                                 a Rust stack overflow on this thread will abort the process (I5/R8)",
+                            let msg = format!(
+                                "worker gusset-w{} could not install its sigaltstack (mmap, \
+                                 mprotect or sigaltstack failed); refusing to run without it \
+                                 (I5/R8)",
                                 worker_id
+                            );
+                            crate::ffi::log_event(&format!("gusset: {}", msg));
+                            #[cfg(test)]
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                super::tests::FAILING_WORKER_MS.load(Ordering::Acquire),
                             ));
-                            None
+                            // The spawner may have given up waiting; nothing to do then.
+                            let _ = ready_tx.send(Err(msg));
+                            return;
                         }
                     };
+                    let _ = ready_tx.send(Ok(()));
 
                     // I5/R8: `Builder::stack_size` is a request. A platform that
                     // rounded it down, or a future refactor that dropped the call,
@@ -230,6 +398,8 @@ impl Handle {
                         let ticket = unit.ticket;
                         #[cfg(test)]
                         let kill_me = unit.ctx.header().trace_id == super::tests::KILL_TRACE;
+                        #[cfg(test)]
+                        let trace = unit.ctx.header().trace_id;
                         let wants_inline = unit.ctx.header().flags
                             & crate::header::GUSSET_FLAG_INLINE_COMPLETION
                             != 0;
@@ -239,7 +409,11 @@ impl Handle {
                         // the unit. Whatever unwinds here, the ticket still gets a
                         // completion: a worker that died between dequeue and write
                         // left its Go waiter parked forever on a permit that never
-                        // came back (I2, I4).
+                        // came back (I2, I4). Storing and publishing the result
+                        // are guarded in `deliver`, with one documented exception:
+                        // a panic while publishing is not retried (it could
+                        // duplicate the ticket), so that ticket may stay
+                        // uncompleted until Close or its deadline.
                         let result = match catch_unwind(AssertUnwindSafe(|| {
                             execute_unit(&weak_clone, unit)
                         })) {
@@ -249,15 +423,37 @@ impl Handle {
                             }),
                         };
 
-                        // Store result and wake netpoller if handle still alive
-                        if let Some(h) = weak_clone.upgrade() {
-                            let result = materialize_result(&h, result);
-                            h.complete(ticket, result, wants_inline);
-                            // Only now is the unit out of flight: shutdown's drain
-                            // counts cancel flags, and removing this one before the
-                            // write let `gusset_shutdown` report a clean drain while
-                            // a worker still sat in the up-to-10 s write backoff.
-                            lock_recover(&h.cancel_flags).remove(&ticket);
+                        // Store result and wake netpoller if handle still alive.
+                        // Guarded as a third layer: `deliver` guards each step
+                        // itself, and this catches what is left (dropping the
+                        // last `Arc<Handle>` runs `Handle::drop` on this thread,
+                        // and `deliver` itself taking its locks). Whatever it
+                        // catches poisons the handle, is logged, and still takes
+                        // the unit out of flight.
+                        let delivered = catch_unwind(AssertUnwindSafe(|| {
+                            deliver(
+                                &weak_clone,
+                                ticket,
+                                result,
+                                wants_inline,
+                                #[cfg(test)]
+                                trace,
+                            )
+                        }));
+                        if let Err(payload) = delivered {
+                            if let JobResult::Panic { msg, .. } =
+                                caught_panic(&weak_clone, payload, |msg| msg)
+                            {
+                                crate::ffi::log_event(&format!(
+                                    "gusset: panic delivering the completion for ticket {}: \
+                                     {}; the handle is poisoned",
+                                    ticket, msg
+                                ));
+                            }
+                            // `deliver` may not have reached its own removal.
+                            if let Some(h) = weak_clone.upgrade() {
+                                lock_recover(&h.cancel_flags).remove(&ticket);
+                            }
                         }
                         // Test-only worker death (see tests::KILL_TRACE):
                         // the worker that ran a marked unit exits once it
@@ -270,16 +466,32 @@ impl Handle {
                 })
                 .map_err(|e| format!("failed to spawn worker thread: {}", e))?;
 
+            // Registered at once, so close and drop join it whatever happens
+            // to the wait below; the caller collects the startup reports after
+            // it has let go of the `workers` lock.
+            starting.push(Startup {
+                thread: join_handle.thread().id(),
+                worker_id,
+                ready: ready_rx,
+            });
             workers.push(join_handle);
         }
 
-        Ok(())
+        Ok(starting)
     }
 
     /// Verifies worker health and respawns replacement workers if any died (I5).
     pub(super) fn ensure_workers(&self) -> Result<(), String> {
         // Fast path: no worker has exited and no earlier respawn fell short,
         // so there is nothing to reap or replace.
+        if self.exited.load(Ordering::Acquire) == 0 && !self.respawn_pending.load(Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        // One respawn at a time, across the wait for startup reports too. The
+        // condition is re-read once the lock is held: whoever held it before
+        // may have finished the job (or failed it and left it pending).
+        let _respawn = lock_recover(&self.respawn_lock);
         if self.exited.load(Ordering::Acquire) == 0 && !self.respawn_pending.load(Ordering::Acquire)
         {
             return Ok(());
@@ -313,10 +525,16 @@ impl Handle {
             }
         }
 
+        let mut starting = Vec::new();
         if workers.len() < self.pool_size {
             let needed = self.pool_size - workers.len();
-            self.spawn_workers_locked(&mut workers, needed)?;
+            starting = self.spawn_workers_locked(&mut workers, needed)?;
         }
+        // Not across the wait: close takes this lock outside its join budget.
+        drop(workers);
+        self.await_ready(starting)?;
+        #[cfg(test)]
+        super::tests::injected_delay(&super::tests::DELAY_BEFORE_CLEAR);
         self.respawn_pending.store(false, Ordering::Release);
 
         Ok(())

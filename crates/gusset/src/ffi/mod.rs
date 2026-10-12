@@ -438,6 +438,17 @@ pub unsafe extern "C" fn gusset_handle_open(
 /// # Safety
 ///
 /// `handle` must be a valid handle pointer previously returned by `gusset_handle_open`.
+///
+/// Handle pointers are not authenticated. `handle` is an `Arc` turned into a
+/// raw pointer and this call turns it back and drops it, so a second
+/// `gusset_handle_close` on the same pointer, or any call on a handle after its
+/// close, is a use-after-free that no check in this library can detect: there
+/// is no registry to look the pointer up in, and none is planned. That is
+/// inherent to a C ABI that hands out raw pointers. The Go package protects
+/// itself with its own lock (one close, no call after it); a C or Rust host
+/// must provide the same exclusion. `gusset_handle_ring` and
+/// `gusset_ring_release` have the same contract for their pointers
+/// (`DECISIONS.md` 2026-10-12).
 #[no_mangle]
 pub unsafe extern "C" fn gusset_handle_close(handle: *mut Handle, status: *mut FfiStatus) -> i32 {
     if handle.is_null() {
@@ -723,7 +734,9 @@ pub unsafe extern "C" fn gusset_handle_ring(
 /// # Safety
 ///
 /// `ring` must be NULL or a pointer from `gusset_handle_ring` not yet
-/// released, and nothing may read the ring afterwards.
+/// released, and nothing may read the ring afterwards. Ring pointers are not
+/// authenticated: releasing one twice is a use-after-free, the same as
+/// closing a handle twice (see `gusset_handle_close`).
 #[no_mangle]
 pub unsafe extern "C" fn gusset_ring_release(ring: *const Ring) {
     if ring.is_null() {

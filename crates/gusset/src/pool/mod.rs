@@ -217,6 +217,13 @@ pub struct Handle {
     /// this the fast path in `ensure_workers` saw 0 and never retried; with no
     /// workers left, every later submission queued and never ran (I4).
     respawn_pending: AtomicBool,
+    /// Serialises the whole slow path of `ensure_workers`, the wait for new
+    /// workers' startup reports included. The `workers` lock is released across
+    /// that wait (so `close` never queues behind it), which let a second submit
+    /// see a pool that counted a not-yet-confirmed worker as whole, clear
+    /// `respawn_pending` after the first found that worker failed, and leave a
+    /// pool with no worker and no retry (I4). `close` never takes this lock.
+    respawn_lock: Mutex<()>,
     /// Whether the completion pipe holds `pool_size` inline records. If it
     /// could only be sized for bare tickets, inline completions are off and
     /// every caller gets tickets, whatever it asked for.
@@ -328,8 +335,12 @@ impl Handle {
                 pool_size, MAX_POOL_SIZE
             ));
         }
-        sys::check_open(pipe_write_fd)
-            .map_err(|e| format!("pipe write fd {} is not open: {}", pipe_write_fd, e))?;
+        sys::check_pipe_write_end(pipe_write_fd).map_err(|e| {
+            format!(
+                "pipe write fd {} is not the write end of an open pipe: {}",
+                pipe_write_fd, e
+            )
+        })?;
         // I4 keeps unread tickets at or under pool_size, which is only a
         // "the pipe never fills" guarantee if the pipe holds that many. Linux
         // shrinks new pipes to one page (512 tickets) once a user passes
@@ -369,6 +380,7 @@ impl Handle {
             self_weak: Mutex::new(Weak::new()),
             exited: Arc::new(AtomicUsize::new(0)),
             respawn_pending: AtomicBool::new(false),
+            respawn_lock: Mutex::new(()),
             inline_ok,
             ring: std::sync::OnceLock::new(),
         });

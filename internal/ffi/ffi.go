@@ -157,12 +157,25 @@ func checkStatus(code C.int32_t, st *C.FfiStatus) error {
 	return nil
 }
 
+// ffiStatus names the C status struct for the package's tests, which cannot
+// import "C".
+type ffiStatus = C.FfiStatus
+
+// statusToError turns the status an export filled in into an error. Every
+// caller reaches it only because the export returned a non-OK code, so a
+// status that is nil or says FFI_OK is a disagreement between the two. It used
+// to return nil there, and the caller then returned a zero value (a nil
+// handle, buffer or ticket) with a nil error. That is an error, and a loud
+// one: the status is freed and a FFI_ERR describes the disagreement.
 func statusToError(st *C.FfiStatus) error {
-	if st == nil {
-		return nil
-	}
-	if st.code == C.FFI_OK {
-		return nil
+	if st == nil || st.code == C.FFI_OK {
+		if st != nil {
+			C.gusset_status_free(st)
+		}
+		return &Error{
+			Code: FFI_ERR,
+			Msg:  "export returned an error code but its status reports FFI_OK",
+		}
 	}
 
 	code := int(st.code)
