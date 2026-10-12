@@ -7,6 +7,12 @@ on:
     branches: [main]
   # Run by hand on a branch, so a fix is verified before its PR exists.
   workflow_dispatch:
+    inputs:
+      allow_no_base:
+        description: 'Let the bench job go green when no base revision exists (a manual run on main). Off by default: a comparison that did not run is a failure.'
+        required: false
+        default: false
+        type: boolean
 
 # Read-only token for every job; none of them writes to the repository.
 permissions:
@@ -49,10 +55,10 @@ jobs:
       # "macos") code and anything that depends on c_char's signedness was
       # never linted. Each platform lints the code it compiles.
       - name: Clippy on this platform
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Build Rust static library
-        run: cargo build --release
+        run: cargo build --locked --release
 
       - name: Generate Go archive hash
         run: go generate ./internal/ffi
@@ -60,14 +66,14 @@ jobs:
       # Covers the export check (R1), the runtime hardening suite, the shutdown
       # drain, and the adopter-engine test in crates/gusset-example.
       - name: Run Rust tests
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
       # AGENTS.md: the suite runs in both profiles. dev has overflow checks and
       # debug_assertions; release is what adopters link. Only the nightly
       # allocator-api job ran --release before, so the stable release path
       # adopters on 1.97/1.98 build was never tested in release.
       - name: Run Rust tests (release)
-        run: cargo test --workspace --release
+        run: cargo test --locked --workspace --release
 
       # 1.27 has the goroutineleak profile, so the leak gate must run here,
       # never skip.
@@ -110,7 +116,7 @@ jobs:
           cache: false
 
       - name: Build Rust static library
-        run: cargo build --release
+        run: cargo build --locked --release
 
       - name: Generate Go archive hash
         run: go generate ./internal/ffi
@@ -150,17 +156,17 @@ jobs:
           cache: false
 
       - name: Build Rust static library
-        run: cargo build --release
+        run: cargo build --locked --release
 
       - name: Generate Go archive hash
         run: go generate ./internal/ffi
 
       - name: Clippy on the floor
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Rust and Go tests on the floor
         run: |
-          cargo test --workspace
+          cargo test --locked --workspace
           go test -timeout 10m ./...
 
   # The stable Allocator trait lands in Rust 1.100. Until that is the stable
@@ -198,21 +204,21 @@ jobs:
           cache: false
 
       - name: Clippy with the allocator-aware surface compiled in
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Build Rust static library
-        run: cargo build --release
+        run: cargo build --locked --release
 
       - name: Generate Go archive hash
         run: go generate ./internal/ffi
 
       - name: Rust tests (BufferAlloc, Counting as Allocator, zero-copy adoption)
-        run: cargo test --workspace --release
+        run: cargo test --locked --workspace --release
 
       # The optimiser hides a slow test engine in --release; the nightly ASan job
       # runs this suite unoptimised against the 5 s ticket wait (issue #3).
       - name: Allocator suite in a debug build
-        run: cargo test -p gusset --test rust_allocator_api
+        run: cargo test --locked -p gusset --test rust_allocator_api
 
       - name: Go suite against the allocator-backed library
         run: go test -timeout 15m ./...
@@ -229,9 +235,9 @@ jobs:
           GUSSET_EXPECT_ALLOCATOR_API: '0'
           CARGO_TARGET_DIR: target/fallback
         run: |
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo build
-          cargo test --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo build --locked
+          cargo test --locked --workspace
 
   # Every step is one `tools/ci/lint.sh <step>`, the same pipeline `make lint`
   # runs, with the tool versions pinned in tools/ci/versions.env. Each step is
@@ -255,8 +261,7 @@ jobs:
           components: clippy, rustfmt, llvm-tools
 
       # Floats on the 1.27 line so govulncheck scans the newest standard
-      # library. Only the staticcheck step pins a patch release; see
-      # STATICCHECK_GO in tools/ci/versions.env.
+      # library; staticcheck's version is pinned in tools/ci/versions.env.
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -324,7 +329,7 @@ jobs:
           go-version: '1.27.x'
           cache: false
       - name: Build Rust release
-        run: cargo build --release
+        run: cargo build --locked --release
       # R6 and R16 name this job as their enforcer. It was absent, so both rules
       # shipped with no gate at all: nothing checked that Rust never retains Go
       # memory past a call.
@@ -346,15 +351,20 @@ jobs:
           go-version: '1.27.x'
           cache: false
       - name: Build Rust release
-        run: cargo build --release
+        run: cargo build --locked --release
       - name: Allocator stats and AdviseMemoryLimit under a Go heap cap
         run: |
-          GOMEMLIMIT=256MiB go test -v -run 'TestPitfall_AllocatorStatsAndLimit' \
+          GOMEMLIMIT=256MiB go test -v -count=1 \
+            -run 'TestPitfall_AllocatorStatsAndLimit|TestMemLimit' \
             -timeout 10m ./tests/pitfalls/
 
   soak:
-    name: Thread-Cap Soak
-    runs-on: ubuntu-latest
+    name: Thread-Cap Soak (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -372,10 +382,15 @@ jobs:
           cache: false
 
       - name: Build Rust release
-        run: cargo build --release
+        run: cargo build --locked --release
 
-      - name: Run Soak Test
-        run: go test -v -run TestPitfall_ThreadCapBoundedSoak -timeout 20m ./tests/pitfalls/...
+      # Every Soak test, not one by name: the thread-cap soak, the goroutine-
+      # leak profile gate (which must run, never skip, on 1.27) and the
+      # single-handle bookkeeping soak in the root package.
+      - name: Run Soak Tests
+        env:
+          GUSSET_REQUIRE_LEAK_PROFILE: '1'
+        run: go test -v -count=1 -run Soak -timeout 20m . ./tests/pitfalls/
 
   race:
     name: Race & Aggressive GC
@@ -397,7 +412,7 @@ jobs:
           cache: false
 
       - name: Build Rust release
-        run: cargo build --release
+        run: cargo build --locked --release
 
       # The root package is included: the chaos hammer and the waiter-handoff
       # and drain-exit tests live there, and race plus GOGC=1 is what found the
@@ -553,7 +568,7 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Build Rust release
-        run: cargo build --release
+        run: cargo build --locked --release
 
       - name: Deep recursion and worker stack sizing
         run: |
@@ -565,7 +580,7 @@ jobs:
       # fails loudly if the explicit 8 MiB request were ever dropped, instead of
       # waiting for a deep engine to overflow 128 KiB in production.
       - name: Worker stack is explicitly sized
-        run: cargo test -p gusset --lib worker_stack_is_explicitly_sized_not_inherited -- --nocapture
+        run: cargo test --locked -p gusset --lib worker_stack_is_explicitly_sized_not_inherited -- --nocapture
 
   cross:
     name: Cross-compile (supported platform set)
@@ -595,7 +610,7 @@ jobs:
       - name: Windows must fail with a named error, not a symbol cascade
         run: |
           rustup target add x86_64-pc-windows-msvc
-          if cargo check -p gusset --target x86_64-pc-windows-msvc 2>err.txt; then
+          if cargo check --locked -p gusset --target x86_64-pc-windows-msvc 2>err.txt; then
             echo "::error::a Windows build succeeded; docs/platforms.md says it cannot"
             exit 1
           fi
@@ -646,11 +661,15 @@ jobs:
       # when that is the revision under test (a manual run on main itself) is
       # there truly nothing to compare. That case used to exit 0 and skip every
       # later step, so five workflow_dispatch runs went green having compared
-      # nothing. It now raises an error annotation and writes NOT COMPARED to
-      # the job summary, and the allocation gate below still runs.
+      # nothing. It now writes NOT COMPARED to the job summary, still runs the
+      # allocation gate, and then fails the job (last step): a check that could
+      # not run must not read as one that passed. A person who really wants a
+      # no-base manual run green sets the allow_no_base dispatch input; the
+      # error annotation stays either way.
       - name: Build this revision and its base
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          ALLOW_NO_BASE: ${{ inputs.allow_no_base }}
         run: |
           set -euo pipefail
           if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BASE_SHA^{commit}"; then
@@ -666,13 +685,16 @@ jobs:
               echo "No base revision was available, so no regression comparison was made. Only the allocation gate ran."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "BENCH_BASE=" >> "$GITHUB_ENV"
+            if [[ "${ALLOW_NO_BASE:-}" != "true" ]]; then
+              echo "BENCH_NOT_COMPARED=1" >> "$GITHUB_ENV"
+            fi
             exit 0
           fi
           echo "BENCH_BASE=$BASE_SHA" >> "$GITHUB_ENV"
-          cargo build --release
+          cargo build --locked --release
           go test -c -o "$RUNNER_TEMP/new.test" ./bench
           git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
-          (cd "$RUNNER_TEMP/base" && cargo build --release && go test -c -o "$RUNNER_TEMP/old.test" ./bench)
+          (cd "$RUNNER_TEMP/base" && cargo build --locked --release && go test -c -o "$RUNNER_TEMP/old.test" ./bench)
 
       - name: Benchmark both, interleaved
         if: env.BENCH_BASE != ''
@@ -702,7 +724,7 @@ jobs:
         if: env.BENCH_BASE == ''
         run: |
           set -euo pipefail
-          cargo build --release
+          cargo build --locked --release
           go test -run '^$' -bench . -benchtime=1s -benchmem -count=10 ./bench/... > new.txt
 
       # R5's noescape claim is only worth something if the allocation count it
@@ -713,6 +735,14 @@ jobs:
       # cgo call path at its measured 1. A benchmark absent from new.txt fails.
       - name: Allocation gate (ChannelHop 0, cgo path bounded)
         run: make alloc-gate ALLOC_FILE=new.txt
+
+      # After the allocation gate so both results are reported; fails the job
+      # when the regression comparison could not be made.
+      - name: Fail when nothing was compared
+        if: (success() || failure()) && env.BENCH_NOT_COMPARED == '1'
+        run: |
+          echo "::error title=Benchmark regression gate did not run::NOT COMPARED, failing the job; set allow_no_base on a manual run to accept this."
+          exit 1
 
   fuzz:
     name: Fuzz the FFI boundary
@@ -731,7 +761,7 @@ jobs:
           go-version: '1.27.x'
           cache: false
       - name: Build Rust release
-        run: cargo build --release
+        run: cargo build --locked --release
 
       # The matrix named `cargo fuzz run header` and a Go `FuzzStatus`, and neither
       # existed. These use Go's native fuzzing: no dependency to add, and it points
