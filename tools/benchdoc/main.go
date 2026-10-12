@@ -186,7 +186,7 @@ func runBenchstat(path string) (string, error) {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("benchstat failed: %v\n%s\n"+
-			"install it with: go install golang.org/x/perf/cmd/benchstat@latest", err, stderr.String())
+			"install the version pinned as BENCHSTAT_VERSION in tools/ci/versions.env: go install golang.org/x/perf/cmd/benchstat@<that version>", err, stderr.String())
 	}
 	return stdout.String(), nil
 }

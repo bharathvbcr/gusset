@@ -264,6 +264,17 @@ finally live in. The version in it is Gusset's, read from `Cargo.toml`. Run it
 again after every umbrella rebuild: the installed archive is a copy. Paths with
 whitespace are refused, because pkg-config cannot split them.
 
+Go caches the link flags it got from `pkg-config` with the compiled cgo
+package, and the cache key does not include them. Changing the prefix, or
+installing a different archive into a prefix after a build that used another,
+keeps linking the old `-L` directory (observed on Go 1.27.2: `library 'gusset'
+not found` for a prefix that no longer exists, or `Undefined symbols` for the
+wrong archive). Add `-a` to the first build after such a change:
+
+```bash
+PKG_CONFIG_PATH=/opt/myservice/lib/pkgconfig go build -a -tags gusset_pkgconfig ./...
+```
+
 `install.sh` (and `make install` without `ARCHIVE`) installs Gusset's own
 archive. That is what you want for a C host or for Gusset's own diagnostic
 engine, not for an adopter's Go binary.
@@ -381,8 +392,9 @@ Things worth knowing before you hit them:
   ```
 
   The detection is one cached load. On an AVX-512 host this took Gusset's
-  diagnostic kernel from 148 µs to 46 µs per MiB, faster than a
-  `target-cpu=native` build (57 µs); see `pool::sys::sum_squares_chunk`.
+  diagnostic kernel well below its baseline-SSE2 build; the measured figures are
+  in [choosing](choosing.md) (from `bench/results/linux-amd64-vm/`), and the
+  kernel is `pool::sys::sum_squares_chunk`.
 - **`Handle.Close` waits at most 30 seconds.** It cancels, then *joins* its
   worker threads. An engine that checks `JobContext::check` exits promptly and
   `Close` returns `nil`. If a worker is still inside an engine call at the

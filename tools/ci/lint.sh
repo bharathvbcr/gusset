@@ -61,7 +61,9 @@ step_gussetvet() { go run ./tools/gussetvet; }
 
 step_staticcheck() {
 	need staticcheck "(${STATICCHECK_VERSION#v})" "go install honnef.co/go/tools/cmd/staticcheck@$STATICCHECK_VERSION" -version || return 1
-	GOTOOLCHAIN=$STATICCHECK_GO staticcheck ./...
+	# The version in the log is what a future "export data" failure is read against.
+	staticcheck -version
+	staticcheck ./...
 }
 
 step_govulncheck() {
@@ -114,7 +116,7 @@ step_forbidden_patterns() {
 # --all-targets: without it clippy skips test targets, and the R3
 # disallowed-method rules go unenforced in exactly the code most likely to
 # reach for unwrap.
-step_cargo_clippy() { cargo clippy --workspace --all-targets -- -D warnings; }
+step_cargo_clippy() { cargo clippy --locked --workspace --all-targets -- -D warnings; }
 
 step_cargo_fmt() { cargo fmt --all -- --check; }
 
@@ -159,6 +161,9 @@ list)
 esac
 
 [ $# -gt 0 ] || set -- $STEPS
+
+# setup-go's '1.27.x' floats, so the compiler a run used is part of its result.
+echo "toolchain: $(go version)"
 
 summary=""
 status=0

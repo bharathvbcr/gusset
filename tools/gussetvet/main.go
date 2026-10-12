@@ -374,18 +374,45 @@ func preambleLines(file *ast.File) []preambleLine {
 	return out
 }
 
-// walkGo parses every .go file under root, test files included, skipping build
-// output, dependency trees and testdata. Test files count: a cross-free in a
-// test corrupts the heap just as well.
+// walkGo parses every .go file of the module at root, test files included. It
+// visits the directories `go build ./...` would: Go's own rule skips names that
+// start with "." or "_", `testdata`, and any subdirectory holding its own
+// go.mod (another module, which is where "./..." stops). That last rule is what
+// keeps a linked worktree or clone nested under the repository (for example
+// .claude/worktrees/*, each with its own go.mod) out of the scan. A nested
+// module that root's go.mod points at with `replace ... => ./dir` is built into
+// the module's binaries, so it is scanned anyway.
+//
+// Two names are skipped only directly under root, where they are build output
+// and not source: `target` (cargo's output directory) and `vendor` (a dependency
+// tree). Below root they are ordinary directories that Go compiles, so they are
+// scanned: a name-based skip at any depth let internal/target/x.go hide a
+// violation. A .git entry means nothing here; go.mod alone decides whether a
+// directory belongs to the module, so `touch hidden/.git` hides nothing.
+//
+// Test files count: a cross-free in a test corrupts the heap just as well.
 func walkGo(root string, visit func(rel string, fset *token.FileSet, file *ast.File)) error {
 	fset := token.NewFileSet()
+	replaced, err := replacedDirs(root)
+	if err != nil {
+		return err
+	}
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", "target", "vendor", "node_modules", "testdata":
+			if path == root {
+				return nil
+			}
+			name := d.Name()
+			if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || name == "testdata" {
+				return filepath.SkipDir
+			}
+			if filepath.Dir(path) == root && (name == "target" || name == "vendor") {
+				return filepath.SkipDir
+			}
+			if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil && !replaced[path] {
 				return filepath.SkipDir
 			}
 			return nil
@@ -404,6 +431,28 @@ func walkGo(root string, visit func(rel string, fset *token.FileSet, file *ast.F
 		visit(rel, fset, file)
 		return nil
 	})
+}
+
+// replaceTarget matches the local-directory right-hand side of a go.mod replace
+// directive, in the single-line and the block form.
+var replaceTarget = regexp.MustCompile(`=>\s*"?(\.{1,2}/[^\s"]*|\.)"?\s*(//.*)?$`)
+
+// replacedDirs returns the directories root's go.mod replaces a module with.
+func replacedDirs(root string) (map[string]bool, error) {
+	lines, err := readLines(filepath.Join(root, "go.mod"))
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]bool{}, nil // a bare tree has no replacements
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read go.mod in %s: %w", root, err)
+	}
+	dirs := map[string]bool{}
+	for _, line := range lines {
+		if m := replaceTarget.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			dirs[filepath.Join(root, filepath.FromSlash(m[1]))] = true
+		}
+	}
+	return dirs, nil
 }
 
 func readLines(path string) ([]string, error) {

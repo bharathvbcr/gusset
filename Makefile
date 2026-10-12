@@ -24,12 +24,15 @@ ARCHIVE ?= $(TARGET_DIR)/release/libgusset.a
 
 # The one place the version is typed is [workspace.package] in Cargo.toml.
 # `cargo pkgid` prints path+file:///.../crates/gusset#0.0.2 (or #gusset@0.0.2).
-GUSSET_VERSION = $(shell cargo pkgid -p gusset 2>/dev/null | sed 's/.*[#@]//')
+# HASH, not a literal '#': GNU Make 3.81 (macOS's make) reads '#' inside
+# $(shell …) as a comment and stops with "unterminated call to function".
+HASH := \#
+GUSSET_VERSION = $(shell cargo pkgid -p gusset 2>/dev/null | sed 's/.*[$(HASH)@]//')
 
 all: build
 
 build:
-	cargo build --release
+	cargo build --locked --release
 	go generate ./internal/ffi
 	go build ./...
 
@@ -37,7 +40,7 @@ build:
 # its `go generate` rewrites the tracked internal/ffi/archive_hash.go, and an
 # install must leave the source tree exactly as it found it.
 install-build:
-	cargo build --release
+	cargo build --locked --release
 
 # Shell-quote a make value: 'it'\''s'.
 shq = '$(subst ','\'',$(1))'
@@ -76,7 +79,7 @@ uninstall:
 	@echo Gusset uninstalled from $(call shq,$(DESTDIR)$(PREFIX))
 
 test:
-	cargo test --workspace
+	cargo test --locked --workspace
 	go test -v ./...
 
 # -count=10: benchstat refuses to quote a confidence interval below 6 samples, and
@@ -107,7 +110,7 @@ SCALING_COUNT ?= 6
 BENCH_RESULTS ?= bench/results/$(shell go env GOOS)-$(shell go env GOARCH)-go$(shell go env GOVERSION | sed 's/^go//')-rust$(shell rustc --version | cut -d' ' -f2).txt
 
 bench:
-	cargo build --release
+	cargo build --locked --release
 	RECORD_DIR=. RECORD_PKG=./bench/... bench/record.sh $(BENCH_RESULTS) 1s $(BENCH_COUNT) .
 
 # Raw blocking cgo versus Gusset on byte-identical work.
@@ -125,8 +128,8 @@ bench:
 # take minutes to no extra effect.
 CROSS_SUFFIX ?= $(shell go env GOOS)-$(shell go env GOARCH)-go$(shell go env GOVERSION | sed 's/^go//')-rust$(shell rustc --version | cut -d' ' -f2).txt
 bench-crossover:
-	cargo build --release
-	cargo build --release --manifest-path bench/seed/rs/Cargo.toml
+	cargo build --locked --release
+	cargo build --locked --release --manifest-path bench/seed/rs/Cargo.toml
 	@# Each (shape, transport) arm in its own process.
 	@#
 	@# Not tidiness: a parallel blocking-cgo arm leaves a few hundred Ms behind,
@@ -171,8 +174,8 @@ bench-crossover:
 # withholds its absolute peak once it sees a second transport in the process, so
 # a contaminated run now fails benchplot rather than charting a false result.
 bench-scaling:
-	cargo build --release
-	cargo build --release --manifest-path bench/seed/rs/Cargo.toml
+	cargo build --locked --release
+	cargo build --locked --release --manifest-path bench/seed/rs/Cargo.toml
 	@# Repeated, unlike the thread-pressure target's -count=1.
 	@#
 	@# Repetitions of the *same* transport in one process are safe here in a way
@@ -207,7 +210,7 @@ cross:
 	@for t in $(CROSS_TARGETS); do \
 		echo "== cargo check --target $$t"; \
 		rustup target add $$t || { echo "cross: could not install target $$t"; exit 1; }; \
-		cargo check -p gusset --target $$t --all-targets || exit 1; \
+		cargo check --locked -p gusset --target $$t --all-targets || exit 1; \
 	done
 	@echo "cross: all supported targets compile"
 
@@ -261,7 +264,7 @@ ci-local: build test lint docs-check
 docs:
 	@command -v benchstat >/dev/null 2>&1 || { \
 		echo "benchstat not found; install with:"; \
-		echo "  go install golang.org/x/perf/cmd/benchstat@latest"; exit 1; }
+		echo "  . tools/ci/versions.env && go install golang.org/x/perf/cmd/benchstat@\$$BENCHSTAT_VERSION"; exit 1; }
 	go run ./tools/benchdoc
 	@# benchplot redraws docs/img/*.svg from the same committed raw data.
 	@# It shipped with a -check flag that nothing ran and no target invoked, so
@@ -273,7 +276,7 @@ docs:
 docs-check:
 	@command -v benchstat >/dev/null 2>&1 || { \
 		echo "benchstat not found; install with:"; \
-		echo "  go install golang.org/x/perf/cmd/benchstat@latest"; exit 1; }
+		echo "  . tools/ci/versions.env && go install golang.org/x/perf/cmd/benchstat@\$$BENCHSTAT_VERSION"; exit 1; }
 	go run ./tools/benchdoc -check
 	go run ./tools/benchplot -check
 
