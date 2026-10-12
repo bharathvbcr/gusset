@@ -93,6 +93,11 @@ func TestStress_ContainmentUnderLoad(t *testing.T) {
 				return
 			}
 
+			// A slice from Bytes is valid only until Close (see Buffer.Bytes),
+			// and the mid-flight Close below frees every buffer of h. Callers
+			// hold guard's read side while they touch a slice; Close takes the
+			// write side. Every gusset call still races Close freely.
+			var guard sync.RWMutex
 			var wg sync.WaitGroup
 			for c := 0; c < callers; c++ {
 				seed := rng.Int63()
@@ -101,7 +106,7 @@ func TestStress_ContainmentUnderLoad(t *testing.T) {
 					defer wg.Done()
 					r := rand.New(rand.NewSource(seed))
 					for i := 0; i < callsPerCaller; i++ {
-						runOne(h, r, fail, &successes, &panics, &poisoned, &closed)
+						runOne(h, &guard, r, fail, &successes, &panics, &poisoned, &closed)
 					}
 				}()
 			}
@@ -109,7 +114,10 @@ func TestStress_ContainmentUnderLoad(t *testing.T) {
 			// Half the rounds close while calls are still in flight.
 			if round%2 == 0 {
 				time.Sleep(time.Duration(rng.Intn(40)) * time.Millisecond)
-				if err := h.Close(); err != nil {
+				guard.Lock()
+				err := h.Close()
+				guard.Unlock()
+				if err != nil {
 					fail("round %d: Close mid-flight: %v", round, err)
 				}
 				wg.Wait()
@@ -166,7 +174,7 @@ func TestStress_ContainmentUnderLoad(t *testing.T) {
 
 // runOne issues one deadline-free call of a randomly chosen shape and checks
 // its outcome.
-func runOne(h *gusset.Handle, r *rand.Rand, fail func(string, ...any),
+func runOne(h *gusset.Handle, guard *sync.RWMutex, r *rand.Rand, fail func(string, ...any),
 	successes, panics, poisoned, closed *atomic.Int64) {
 	ctx := context.Background()
 
@@ -204,8 +212,10 @@ func runOne(h *gusset.Handle, r *rand.Rand, fail func(string, ...any),
 			err = berr
 			break
 		}
+		guard.RLock()
 		b := in.Bytes()
 		if b == nil { // closed underneath us
+			guard.RUnlock()
 			_ = in.Free()
 			closed.Add(1)
 			return
@@ -215,13 +225,18 @@ func runOne(h *gusset.Handle, r *rand.Rand, fail func(string, ...any),
 			b[j] = byte(j ^ int(r.Int31()))
 		}
 		want = append([]byte(nil), b...)
+		guard.RUnlock()
 		res, cerr := h.CallBuffer(ctx, in)
 		_ = in.Free()
 		err = cerr
 		if cerr == nil {
-			if rb := res.Bytes(); rb != nil {
+			guard.RLock()
+			rb := res.Bytes()
+			if rb != nil {
 				out = append([]byte(nil), rb...)
-			} else {
+			}
+			guard.RUnlock()
+			if rb == nil {
 				_ = res.Free()
 				closed.Add(1)
 				return

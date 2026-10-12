@@ -66,6 +66,10 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	return res.data, nil
 }
 
+// testHookBeforeResultFill runs, when set by a test, just before an inline
+// result is copied into the Rust buffer WaitBuffer allocated for it.
+var testHookBeforeResultFill func(*handleState)
+
 func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, error) {
 	res, takeID, err := s.waitInternal(ctx, ticket)
 	if err != nil {
@@ -86,7 +90,9 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 	s.cgoMu.RUnlock()
 
 	if len(res.data) > 0 {
-		buf, err := s.allocBuffer(len(res.data), false)
+		// Filled under the same cgoMu hold that allocates it: Close cannot
+		// free the buffer between the allocation and the copy.
+		buf, err := s.allocBuffer(len(res.data), false, res.data)
 		if err != nil {
 			if s.closed.Load() {
 				return nil, ErrClosed
@@ -98,12 +104,6 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 			// on the Go heap instead, 64-byte aligned like a Rust buffer.
 			return newHeapBuffer(s, res.data), nil
 		}
-		b := buf.Bytes()
-		if b == nil {
-			_ = buf.Free()
-			return nil, ErrClosed
-		}
-		copy(b, res.data)
 		return buf, nil
 	}
 	if s.closed.Load() {

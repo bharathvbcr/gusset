@@ -164,6 +164,11 @@ type abiReport struct {
 	localSizes [ffi.AbiTypeCount]uint32
 	localAlign [ffi.AbiTypeCount]uint32
 	localFlds  [2][ffi.AbiFieldCount]uint32 // offsets, sizes
+
+	// verified is set by mustCheckABI, and only once checkABI has passed, so
+	// a report that was gathered and stored but never checked is told apart
+	// from one that was.
+	verified bool
 }
 
 func gatherABIReport() abiReport {
@@ -249,10 +254,12 @@ func checkABI(r abiReport) error {
 // mustCheckABI panics when the report drifts: a later struct write through a
 // drifted layout would corrupt memory, so there is no degraded mode to fall
 // back to.
-func mustCheckABI(r abiReport) {
+func mustCheckABI(r abiReport) abiReport {
 	if err := checkABI(r); err != nil {
 		panic(err.Error())
 	}
+	r.verified = true
+	return r
 }
 
 // abiAtInit is the report init verified. It stays the zero value if init never
@@ -262,9 +269,10 @@ var abiAtInit abiReport
 
 func init() {
 	// I6: Validate ABI layout at initialization time.
-	r := gatherABIReport()
-	mustCheckABI(r)
-	abiAtInit = r
+	// Stored only as mustCheckABI returns it, marked verified: skipping the
+	// check leaves abiAtInit unverified, and
+	// TestInit_RanTheABICheckAgainstTheLiveLibrary fails.
+	abiAtInit = mustCheckABI(gatherABIReport())
 
 	if err := ffi.Init(); err != nil {
 		panic(fmt.Sprintf("gusset: failed to initialize runtime: %v", err))

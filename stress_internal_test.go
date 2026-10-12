@@ -384,6 +384,10 @@ func (hm *hammer) step(s *hammerSlot, r *rand.Rand) {
 			hm.verify(op, b, in)
 		}
 		g.RUnlock()
+		// The one-in-ten buffer left to its cleanup is otherwise unreachable
+		// once Bytes returns, and the cleanup frees the Rust memory verify is
+		// still reading; the guard does not exclude cleanups.
+		runtime.KeepAlive(buf)
 		if r.IntN(10) != 0 {
 			_ = buf.Free()
 		}
@@ -417,6 +421,7 @@ func (hm *hammer) step(s *hammerSlot, r *rand.Rand) {
 				hm.verify(op, ob, want)
 			}
 			g.RUnlock()
+			runtime.KeepAlive(out) // see opWaitBuffer
 			if r.IntN(10) != 0 {
 				_ = out.Free()
 			}

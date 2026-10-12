@@ -86,6 +86,24 @@ func misbehave(mode string, out *os.File) int {
 	switch mode {
 	case "corrupt":
 		_, _ = out.Write([]byte{0, 0, 0, 5, 'x', 'x', 'x', 'x', 'x'})
+	case "oversize":
+		// A length one past what the host will ever accept; no body follows.
+		var hdr [4]byte
+		binary.BigEndian.PutUint32(hdr[:], maxResponseFrame+1)
+		_, _ = out.Write(hdr[:])
+	case "truncated":
+		// A frame that promises 1000 bytes, delivers 10, and ends the stream.
+		var hdr [4]byte
+		binary.BigEndian.PutUint32(hdr[:], 1000)
+		_, _ = out.Write(append(hdr[:], "0123456789"...))
+		return 0
+	case "stall":
+		// The same promise, kept alive: the worker is up and silent mid-frame.
+		var hdr [4]byte
+		binary.BigEndian.PutUint32(hdr[:], 1000)
+		_, _ = out.Write(append(hdr[:], "0123456789"...))
+	case "dup", "reorder", "unknown":
+		return scripted(mode, out)
 	case "grandchild":
 		// A grandchild holding every pipe the worker has outlives it.
 		gc := exec.Command("sleep", "4")
