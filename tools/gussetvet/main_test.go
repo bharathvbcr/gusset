@@ -220,3 +220,125 @@ func A() { C.gusset_a() }
 		t.Fatalf("want exactly gusset_b reported, got %v", v)
 	}
 }
+
+// writeAdopterFFI lays out a minimal compliant ffi directory holding one
+// export, the shape an adopter's own cgo shim has.
+func writeAdopterFFI(t *testing.T, exportsBody string) string {
+	t.Helper()
+	mod := t.TempDir()
+	write(t, mod, "go.mod", "module example.com/adopter\n\ngo 1.26\n")
+	ffi := filepath.Join(mod, "shim")
+	if err := os.MkdirAll(ffi, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, ffi, "shim.go", `package shim
+/*
+#cgo noescape myservice_engine_init
+#cgo nocallback myservice_engine_init
+void myservice_engine_init(void);
+*/
+import "C"
+func Init() { C.myservice_engine_init() }
+`)
+	if exportsBody != "" {
+		write(t, ffi, "exports.txt", exportsBody)
+	}
+	return ffi
+}
+
+// An export list with nothing in it checked zero exports, and the run still
+// printed "checks passed". A check that could not run must not look like one
+// that passed.
+func TestRefusesAnEmptyExportList(t *testing.T) {
+	for name, body := range map[string]string{
+		"empty":         " ",
+		"comments only": "# nothing here\n\n   \n# still nothing\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ffi := writeAdopterFFI(t, body)
+			var stdout, stderr strings.Builder
+			if code := run(ffi, &stdout, &stderr); code == 0 {
+				t.Fatalf("passed with no exports to check:\n%s", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "no exports") {
+				t.Errorf("error does not say the list was empty: %s", stderr.String())
+			}
+			if strings.Contains(stdout.String(), "passed") {
+				t.Errorf("reported a pass for a check that did not run:\n%s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestRefusesAMissingExportList(t *testing.T) {
+	ffi := writeAdopterFFI(t, "")
+	var stdout, stderr strings.Builder
+	if code := run(ffi, &stdout, &stderr); code == 0 {
+		t.Fatalf("passed with no exports.txt:\n%s", stdout.String())
+	}
+}
+
+// -h used to be taken as the directory to check.
+func TestHelpExitsZeroWithoutChecking(t *testing.T) {
+	for _, flagName := range []string{"-h", "--help", "-help"} {
+		t.Run(flagName, func(t *testing.T) {
+			var stdout, stderr strings.Builder
+			if code := realMain([]string{flagName}, &stdout, &stderr); code != 0 {
+				t.Fatalf("exit %d, want 0; stderr: %s", code, stderr.String())
+			}
+			out := stdout.String() + stderr.String()
+			if !strings.Contains(out, "Usage") || !strings.Contains(out, "-exports") {
+				t.Errorf("usage text missing:\n%s", out)
+			}
+			if strings.Contains(out, "failed to read") || strings.Contains(out, "passed") {
+				t.Errorf("-h ran a check:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestUsageErrors(t *testing.T) {
+	for name, args := range map[string][]string{
+		"unknown flag":    {"-nope"},
+		"two directories": {"a", "b"},
+		"empty -exports":  {"-exports", "", "x"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr strings.Builder
+			if code := realMain(args, &stdout, &stderr); code != 2 {
+				t.Fatalf("exit %d, want 2; stdout %q stderr %q", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// An adopter keeps its export list wherever it likes, not inside the checked
+// directory, and has no Gusset exports.txt to copy.
+func TestExportsFlagTakesAListOutsideTheDirectory(t *testing.T) {
+	ffi := writeAdopterFFI(t, "")
+	list := filepath.Join(t.TempDir(), "mine.txt")
+	if err := os.WriteFile(list, []byte("# adopter exports\nmyservice_engine_init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	if code := realMain([]string{"-exports", list, ffi}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d; stderr: %s", code, stderr.String())
+	}
+
+	var out2, err2 strings.Builder
+	missing := filepath.Join(t.TempDir(), "absent.txt")
+	if code := realMain([]string{"-exports", missing, ffi}, &out2, &err2); code == 0 {
+		t.Fatalf("a missing -exports file passed:\n%s", out2.String())
+	}
+
+	// A list naming an export the shim never wraps is still caught.
+	bad := filepath.Join(t.TempDir(), "bad.txt")
+	if err := os.WriteFile(bad, []byte("myservice_engine_init\nmyservice_other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out3, err3 strings.Builder
+	if code := realMain([]string{"-exports", bad, ffi}, &out3, &err3); code == 0 ||
+		!strings.Contains(err3.String(), "myservice_other") {
+		t.Fatalf("unwrapped export not reported (exit %d): %s", code, err3.String())
+	}
+}

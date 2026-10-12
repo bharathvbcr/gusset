@@ -1,160 +1,135 @@
 #!/usr/bin/env bash
-# Gusset: One-command installer
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/bharathvbcr/gusset/main/install.sh | bash
-# Or locally:
+# Gusset: installer. Builds the release archive and gussetvet and installs them
+# with `make install`, the one owner of what an install consists of.
+#
+# From a release tag (the default):
+#   curl -fsSL https://raw.githubusercontent.com/bharathvbcr/gusset/<tag>/install.sh | bash
+# From a checkout, building that checkout:
 #   ./install.sh
+#
+# Environment:
+#   GUSSET_REF        tag or branch to clone when not run from a checkout
+#                     (default: GUSSET_DEFAULT_REF below)
+#   GUSSET_COMMIT     if set, the commit the cloned ref must resolve to; the
+#                     install stops before building anything otherwise
+#   GUSSET_REPO_URL   repository to clone (default: the upstream GitHub repository)
+#   GUSSET_PREFIX     install prefix (also PREFIX); GUSSET_LIBDIR, GUSSET_INCLUDEDIR,
+#                     GUSSET_BINDIR override the sub-directories
+#   DESTDIR           staging root, as for `make install`
+#   CARGO_TARGET_DIR  where cargo builds; honoured
+#
+# The script builds the directory it lives in only when it was run from a file
+# inside a Gusset checkout. Piped into bash it never builds the working
+# directory, whatever that directory looks like.
 
 set -euo pipefail
 
-# ANSI colors
-BOLD="\033[1m"
-GREEN="\033[0;32m"
-YELLOW="\033[0;33m"
-RED="\033[0;31m"
-BLUE="\033[0;34m"
-RESET="\033[0m"
+GUSSET_DEFAULT_REF="v0.0.2"
+GUSSET_UPSTREAM_URL="https://github.com/bharathvbcr/gusset.git"
 
-info() {
-    printf "${BLUE}==>${RESET} ${BOLD}%s${RESET}\n" "$1"
-}
+BOLD=$'\033[1m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+RED=$'\033[0;31m'
+BLUE=$'\033[0;34m'
+RESET=$'\033[0m'
 
-success() {
-    printf "${GREEN}==>${RESET} ${BOLD}%s${RESET}\n" "$1"
-}
-
-warn() {
-    printf "${YELLOW}warning:${RESET} %s\n" "$1"
-}
-
+info() { printf '%s==>%s %s%s%s\n' "$BLUE" "$RESET" "$BOLD" "$1" "$RESET"; }
+success() { printf '%s==>%s %s%s%s\n' "$GREEN" "$RESET" "$BOLD" "$1" "$RESET"; }
+warn() { printf '%swarning:%s %s\n' "$YELLOW" "$RESET" "$1"; }
 error() {
-    printf "${RED}error:${RESET} %s\n" "$1" >&2
-    exit 1
+	printf '%serror:%s %s\n' "$RED" "$RESET" "$1" >&2
+	exit 1
 }
 
-# 1. Dependency checks
+# 1. Toolchain
 info "Checking toolchain prerequisites..."
+for tool in cargo go make; do
+	command -v "$tool" >/dev/null 2>&1 || error "$tool is required to build Gusset (Rust: https://rustup.rs, Go >= 1.26: https://go.dev)"
+done
 
-if ! command -v cargo >/dev/null 2>&1; then
-    error "Rust / Cargo is required to build Gusset. Install via https://rustup.rs"
-fi
-
-if ! command -v go >/dev/null 2>&1; then
-    error "Go (>= 1.26) is required to build Gusset. Install via https://golang.org"
-fi
-
-# 2. Workspace acquisition
-SCRIPT_DIR=""
+# 2. Source
 TEMP_DIR=""
 cleanup() {
-    if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
-        rm -rf "$TEMP_DIR"
-    fi
+	if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
+		rm -rf "$TEMP_DIR"
+	fi
 }
 trap cleanup EXIT
 
-if [ -f "Cargo.toml" ] && [ -d "crates/gusset" ] && [ -d "internal/ffi" ]; then
-    SCRIPT_DIR="$(pwd)"
-    info "Installing from local source repository at $SCRIPT_DIR"
-else
-    info "Cloning Gusset from repository..."
-    TEMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'gusset-install')"
-    git clone --depth 1 https://github.com/bharathvbcr/gusset.git "$TEMP_DIR"
-    SCRIPT_DIR="$TEMP_DIR"
+# BASH_SOURCE[0] is empty when the script arrives on stdin. Only a script that is
+# a file inside a checkout builds that checkout.
+SRC=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+	here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	if [ -f "$here/Cargo.toml" ] && [ -d "$here/crates/gusset" ] && [ -d "$here/internal/ffi" ]; then
+		SRC="$here"
+		info "Installing from the checkout at $SRC"
+	fi
 fi
 
-cd "$SCRIPT_DIR"
+if [ -z "$SRC" ]; then
+	command -v git >/dev/null 2>&1 || error "git is required to fetch Gusset"
+	REF="${GUSSET_REF:-$GUSSET_DEFAULT_REF}"
+	case "$REF" in
+	-* | "") error "GUSSET_REF '$REF' is not a tag or branch name" ;;
+	esac
+	URL="${GUSSET_REPO_URL:-$GUSSET_UPSTREAM_URL}"
+	info "Cloning $URL at $REF..."
+	TEMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'gusset-install')"
+	git clone --quiet --depth 1 --branch "$REF" -- "$URL" "$TEMP_DIR/gusset"
+	SRC="$TEMP_DIR/gusset"
+	head="$(git -C "$SRC" rev-parse HEAD)"
+	info "Cloned commit $head"
+	if [ -n "${GUSSET_COMMIT:-}" ] && [ "$head" != "$GUSSET_COMMIT" ]; then
+		error "$REF resolves to $head, not the GUSSET_COMMIT $GUSSET_COMMIT; nothing was built"
+	fi
+fi
 
-# 3. Determine install prefix
+# 3. Prefix
 if [ -n "${GUSSET_PREFIX:-}" ]; then
-    PREFIX="$GUSSET_PREFIX"
+	PREFIX="$GUSSET_PREFIX"
 elif [ -n "${PREFIX:-}" ]; then
-    PREFIX="$PREFIX"
+	PREFIX="$PREFIX"
 elif [ -w "/usr/local" ] || [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    PREFIX="/usr/local"
+	PREFIX="/usr/local"
 else
-    PREFIX="$HOME/.local"
+	PREFIX="$HOME/.local"
 fi
-
 LIBDIR="${GUSSET_LIBDIR:-$PREFIX/lib}"
 INCLUDEDIR="${GUSSET_INCLUDEDIR:-$PREFIX/include}"
 BINDIR="${GUSSET_BINDIR:-$PREFIX/bin}"
 PKGCONFIGDIR="$LIBDIR/pkgconfig"
-
+DESTDIR="${DESTDIR:-}"
 info "Target prefix: $PREFIX"
 
-# 4. Build release artifacts
-info "Compiling Rust static library (release)..."
-cargo build --release --manifest-path "$SCRIPT_DIR/Cargo.toml"
+# 4. Build and install: the Makefile owns both, so this installs exactly what
+# `make install` does. It writes no tracked file.
+info "Building and installing..."
+make -C "$SRC" install \
+	PREFIX="$PREFIX" LIBDIR="$LIBDIR" INCLUDEDIR="$INCLUDEDIR" BINDIR="$BINDIR" \
+	PKGCONFIGDIR="$PKGCONFIGDIR" DESTDIR="$DESTDIR"
 
-STATICLIB="$SCRIPT_DIR/target/release/libgusset.a"
-if [ ! -f "$STATICLIB" ]; then
-    error "Static library not found at $STATICLIB after cargo build"
-fi
-
-info "Updating Go FFI metadata..."
-go generate ./internal/ffi
-
-info "Building gussetvet linter..."
-go build -o "$SCRIPT_DIR/target/gussetvet" ./tools/gussetvet
-
-# 5. Install files
-info "Installing files to $PREFIX..."
-mkdir -p "$LIBDIR" "$INCLUDEDIR" "$BINDIR" "$PKGCONFIGDIR"
-
-cp "$STATICLIB" "$LIBDIR/libgusset.a"
-chmod 644 "$LIBDIR/libgusset.a"
-
-cp "$SCRIPT_DIR/internal/ffi/gusset.h" "$INCLUDEDIR/gusset.h"
-chmod 644 "$INCLUDEDIR/gusset.h"
-
-# In-tree copy for immediate go build / test convenience if in local clone
-if [ -d "$SCRIPT_DIR/internal/ffi" ]; then
-    cp "$STATICLIB" "$SCRIPT_DIR/internal/ffi/libgusset.a" 2>/dev/null || true
-fi
-
-if [ -f "$SCRIPT_DIR/gusset.pc.in" ]; then
-    sed -e "s|@PREFIX@|$PREFIX|g" -e "s|@VERSION@|0.0.2|g" "$SCRIPT_DIR/gusset.pc.in" > "$PKGCONFIGDIR/gusset.pc"
-    chmod 644 "$PKGCONFIGDIR/gusset.pc"
-fi
-
-cp "$SCRIPT_DIR/target/gussetvet" "$BINDIR/gussetvet"
-chmod 755 "$BINDIR/gussetvet"
-
-# Also go install if Go environment is configured
-if command -v go >/dev/null 2>&1; then
-    (cd "$SCRIPT_DIR" && go install ./tools/gussetvet >/dev/null 2>&1 || true)
-fi
-
-# 6. Verification smoke test
+# 5. Verification: the installed linter checks the source it was built from.
 info "Running installation verification..."
-"$BINDIR/gussetvet" "$SCRIPT_DIR/internal/ffi" >/dev/null
+"$DESTDIR$BINDIR/gussetvet" "$SRC/internal/ffi" >/dev/null
 
 success "Gusset installed successfully!"
 
-printf "\n"
-printf "${BOLD}================================================================${RESET}\n"
-printf "  ${GREEN}Gusset Installation Complete${RESET}\n"
-printf "${BOLD}================================================================${RESET}\n"
-printf "  Static Library : %s\n" "$LIBDIR/libgusset.a"
-printf "  C Header       : %s\n" "$INCLUDEDIR/gusset.h"
-printf "  Pkg-config     : %s\n" "$PKGCONFIGDIR/gusset.pc"
-printf "  Linter Tool    : %s\n" "$BINDIR/gussetvet"
-printf "${BOLD}================================================================${RESET}\n\n"
+printf '\n'
+printf '%s================================================================%s\n' "$BOLD" "$RESET"
+printf '  %sGusset Installation Complete%s\n' "$GREEN" "$RESET"
+printf '%s================================================================%s\n' "$BOLD" "$RESET"
+printf '  Static Library : %s\n' "$LIBDIR/libgusset.a"
+printf '  C Header       : %s\n' "$INCLUDEDIR/gusset.h"
+printf '  Pkg-config     : %s\n' "$PKGCONFIGDIR/gusset.pc"
+printf '  Linter Tool    : %s\n' "$BINDIR/gussetvet"
+printf '%s================================================================%s\n\n' "$BOLD" "$RESET"
 
-# Environment hints
-ENV_HINTS=0
 if [[ ":$PATH:" != *":$BINDIR:"* ]]; then
-    warn "$BINDIR is not in your PATH. Add it with:"
-    printf "    export PATH=\"%s:\$PATH\"\n\n" "$BINDIR"
-    ENV_HINTS=1
+	warn "$BINDIR is not in your PATH. Add it with:"
+	printf '    export PATH="%s:$PATH"\n\n' "$BINDIR"
 fi
 
-if [[ ":${PKG_CONFIG_PATH:-}:" != *":$PKGCONFIGDIR:"* ]]; then
-    info "To use gusset with pkg-config, configure:"
-    printf "    export PKG_CONFIG_PATH=\"%s:\${PKG_CONFIG_PATH:-}\"\n\n" "$PKGCONFIGDIR"
-    ENV_HINTS=1
-fi
-
-info "To start using Gusset in your Go code:"
-printf "    go get github.com/bharathvbcr/gusset\n\n"
+info "This is Gusset's own archive. A Go binary links one archive built from your"
+info "umbrella crate; to install that one for pkg-config, see docs/adoption.md (Option A)."
