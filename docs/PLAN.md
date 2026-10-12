@@ -149,6 +149,6 @@ Naming convention: crate `gusset`, Go module `github.com/bharathvbcr/gusset`, ou
 | Rust `panic=abort` in a dependency's profile silently disables the firewall | Medium | Build script asserts `panic=unwind`; the panic zoo test fails otherwise |
 | Two Rust staticlibs in one Go binary (duplicate `std` symbols) | Medium for adopters | Document the umbrella-crate rule; example repo shows it |
 | Solo maintenance stalls after Phase 3 | Medium | Keep the surface small (17 exports); the matrix does the reviewing |
-| iceoryx2 ships its own Go binding before Phase 4 | Low–medium | Good outcome: adopt it and drop Phase 4 |
+| The iceoryx2 Go binding moves to a separate repository synced only on iceoryx2 releases | Medium (upstream raised it on #225) | `gusset-ipc` pins a release tag, never `main`; the module-path change is a mechanical rename before v1; Phase 4 depends only on the request/response and waitset surface |
 
 Open decisions from the first draft are all resolved in `DECISIONS.md`.
