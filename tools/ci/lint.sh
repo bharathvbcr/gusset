@@ -61,6 +61,8 @@ step_gussetvet() { go run ./tools/gussetvet; }
 
 step_staticcheck() {
 	need staticcheck "(${STATICCHECK_VERSION#v})" "go install honnef.co/go/tools/cmd/staticcheck@$STATICCHECK_VERSION" -version || return 1
+	# The version in the log is what a future "export data" failure is read against.
+	staticcheck -version
 	staticcheck ./...
 }
 
@@ -159,6 +161,9 @@ list)
 esac
 
 [ $# -gt 0 ] || set -- $STEPS
+
+# setup-go's '1.27.x' floats, so the compiler a run used is part of its result.
+echo "toolchain: $(go version)"
 
 summary=""
 status=0

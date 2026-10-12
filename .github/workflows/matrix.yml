@@ -7,6 +7,12 @@ on:
     branches: [main]
   # Run by hand on a branch, so a fix is verified before its PR exists.
   workflow_dispatch:
+    inputs:
+      allow_no_base:
+        description: 'Let the bench job go green when no base revision exists (a manual run on main). Off by default: a comparison that did not run is a failure.'
+        required: false
+        default: false
+        type: boolean
 
 # Read-only token for every job; none of them writes to the repository.
 permissions:
@@ -655,11 +661,15 @@ jobs:
       # when that is the revision under test (a manual run on main itself) is
       # there truly nothing to compare. That case used to exit 0 and skip every
       # later step, so five workflow_dispatch runs went green having compared
-      # nothing. It now raises an error annotation and writes NOT COMPARED to
-      # the job summary, and the allocation gate below still runs.
+      # nothing. It now writes NOT COMPARED to the job summary, still runs the
+      # allocation gate, and then fails the job (last step): a check that could
+      # not run must not read as one that passed. A person who really wants a
+      # no-base manual run green sets the allow_no_base dispatch input; the
+      # error annotation stays either way.
       - name: Build this revision and its base
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          ALLOW_NO_BASE: ${{ inputs.allow_no_base }}
         run: |
           set -euo pipefail
           if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BASE_SHA^{commit}"; then
@@ -675,6 +685,9 @@ jobs:
               echo "No base revision was available, so no regression comparison was made. Only the allocation gate ran."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "BENCH_BASE=" >> "$GITHUB_ENV"
+            if [[ "${ALLOW_NO_BASE:-}" != "true" ]]; then
+              echo "BENCH_NOT_COMPARED=1" >> "$GITHUB_ENV"
+            fi
             exit 0
           fi
           echo "BENCH_BASE=$BASE_SHA" >> "$GITHUB_ENV"
@@ -722,6 +735,14 @@ jobs:
       # cgo call path at its measured 1. A benchmark absent from new.txt fails.
       - name: Allocation gate (ChannelHop 0, cgo path bounded)
         run: make alloc-gate ALLOC_FILE=new.txt
+
+      # After the allocation gate so both results are reported; fails the job
+      # when the regression comparison could not be made.
+      - name: Fail when nothing was compared
+        if: (success() || failure()) && env.BENCH_NOT_COMPARED == '1'
+        run: |
+          echo "::error title=Benchmark regression gate did not run::NOT COMPARED, failing the job; set allow_no_base on a manual run to accept this."
+          exit 1
 
   fuzz:
     name: Fuzz the FFI boundary

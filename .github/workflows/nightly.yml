@@ -291,7 +291,7 @@ jobs:
       - name: Install cargo-fuzz
         run: |
           . tools/ci/versions.env
-          cargo install cargo-fuzz --locked --version "$CARGO_FUZZ_VERSION" 
+          cargo install cargo-fuzz --locked --version "$CARGO_FUZZ_VERSION"
 
       # cargo-fuzz has no --locked of its own, so the lockfile is checked here:
       # this fails when fuzz/Cargo.lock is missing or out of date, instead of
