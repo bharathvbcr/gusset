@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 
@@ -26,6 +28,27 @@ var ErrBufferUnsupported = errors.New("isolate: *gusset.Buffer input needs a sha
 // errProcClosed is what a waiter released by Close gets, with the text an
 // in-process waiter released by the drain reader sees.
 var errProcClosed error = &remoteError{msg: "gusset: handle closed", base: gusset.ErrClosed}
+
+// waitDelay bounds cmd.Wait once the worker is dead: a grandchild that
+// inherited one of the worker's stderr or stdout pipes cannot hold it open.
+const waitDelay = 500 * time.Millisecond
+
+// EnvProtocolFD names the environment variable Start sets for the worker: the
+// descriptor number of the pipe the worker writes its protocol frames to. The
+// protocol is off stdout so an engine's own prints (println!, a log line)
+// cannot corrupt the framing.
+const EnvProtocolFD = "GUSSET_ISOLATE_PROTOCOL_FD"
+
+// ProtocolOut is the worker half's writer for Serve: the protocol pipe Start
+// passed this process. Stdout stays the engine's own.
+func ProtocolOut() (*os.File, error) {
+	v := os.Getenv(EnvProtocolFD)
+	fd, err := strconv.Atoi(v)
+	if err != nil || fd < 3 {
+		return nil, fmt.Errorf("isolate: %s=%q is not a protocol descriptor; was this process started by isolate.Start?", EnvProtocolFD, v)
+	}
+	return os.NewFile(uintptr(fd), "gusset-protocol"), nil
+}
 
 type result struct {
 	out []byte
@@ -47,6 +70,7 @@ type ticketState struct {
 type Proc struct {
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
+	rd    *os.File // read end of the protocol pipe; closed to unwedge the reader
 	sem   chan struct{}
 
 	wmu sync.Mutex // serializes frames on stdin
@@ -63,9 +87,11 @@ type Proc struct {
 	closeErr   error
 }
 
-// Start runs cmd as a worker. cmd must run Serve on its stdin and stdout;
-// Start owns both, and leaves cmd.Stderr as the caller set it. ctx bounds the
-// handshake only: a worker that has not announced itself by then is killed.
+// Start runs cmd as a worker. cmd must run Serve reading its stdin and
+// writing ProtocolOut; Start owns stdin and appends the protocol pipe to
+// cmd.ExtraFiles, naming its descriptor in EnvProtocolFD. cmd.Stdout and
+// cmd.Stderr stay as the caller set them. ctx bounds the handshake only: a
+// worker that has not announced itself by then is killed.
 func Start(ctx context.Context, cmd *exec.Cmd) (*Proc, error) {
 	if ctx == nil {
 		return nil, gusset.ErrNilContext
@@ -74,14 +100,27 @@ func Start(ctx context.Context, cmd *exec.Cmd) (*Proc, error) {
 	if err != nil {
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
+	rd, wr, err := os.Pipe()
 	if err != nil {
+		_ = stdin.Close()
 		return nil, err
 	}
-	if err := cmd.Start(); err != nil {
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = append(cmd.Env, EnvProtocolFD+"="+strconv.Itoa(3+len(cmd.ExtraFiles)))
+	cmd.ExtraFiles = append(cmd.ExtraFiles, wr)
+	if cmd.WaitDelay == 0 {
+		cmd.WaitDelay = waitDelay
+	}
+	err = cmd.Start()
+	_ = wr.Close() // the child holds the only write end that matters
+	if err != nil {
+		_ = rd.Close()
+		_ = stdin.Close()
 		return nil, err
 	}
-	br := bufio.NewReader(stdout)
+	br := bufio.NewReader(rd)
 
 	hello := make(chan error, 1)
 	var h response
@@ -99,6 +138,7 @@ func Start(ctx context.Context, cmd *exec.Cmd) (*Proc, error) {
 	}
 	if err != nil {
 		_ = cmd.Process.Kill()
+		_ = rd.Close()
 		_ = stdin.Close()
 		_ = cmd.Wait()
 		return nil, fmt.Errorf("isolate: worker handshake: %w", err)
@@ -107,6 +147,7 @@ func Start(ctx context.Context, cmd *exec.Cmd) (*Proc, error) {
 	p := &Proc{
 		cmd:        cmd,
 		stdin:      stdin,
+		rd:         rd,
 		sem:        make(chan struct{}, h.PoolSize),
 		tickets:    make(map[uint64]*ticketState),
 		readerDone: make(chan struct{}),
@@ -124,6 +165,10 @@ func (p *Proc) read(br *bufio.Reader) {
 		var resp response
 		if err := readFrame(br, maxResponseFrame, &resp); err != nil {
 			cause = err
+			// Any read error means the stream cannot be trusted again, and a
+			// worker that is still alive would park every waiter for as long
+			// as it lives: end it before Wait.
+			_ = p.cmd.Process.Kill()
 			break
 		}
 		if !p.deliver(resp) {
@@ -132,6 +177,9 @@ func (p *Proc) read(br *bufio.Reader) {
 			break
 		}
 	}
+	// A grandchild that inherited the protocol pipe keeps it open past the
+	// worker's death; closing the read end is what ends it for this side.
+	_ = p.rd.Close()
 	waitErr := p.cmd.Wait()
 
 	p.mu.Lock()
@@ -280,7 +328,11 @@ func (p *Proc) submit(ctx context.Context, in []byte) (uint64, error) {
 		}
 		p.mu.Unlock()
 		// A failed write means the worker is gone; the reader latches why.
-		<-p.readerDone
+		select {
+		case <-p.readerDone:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
 		if refusal := p.refusal(); refusal != nil {
 			return 0, refusal
 		}
@@ -428,16 +480,17 @@ func (p *Proc) close(budget time.Duration) error {
 	p.mu.Unlock()
 	defer close(p.closeDone)
 
-	p.wmu.Lock()
-	_ = p.stdin.Close()
-	p.wmu.Unlock()
-
+	// The budget starts before anything that can block. stdin is closed
+	// without wmu: a writer parked on a full pipe holds it, and Close ending
+	// the pipe is what releases that writer.
 	timer := time.NewTimer(budget)
 	defer timer.Stop()
+	_ = p.stdin.Close()
 	select {
 	case <-p.readerDone:
 	case <-timer.C:
 		_ = p.cmd.Process.Kill()
+		_ = p.rd.Close()
 		<-p.readerDone
 		p.closeErr = fmt.Errorf("isolate: worker did not exit within %v of Close and was killed", budget)
 	}
