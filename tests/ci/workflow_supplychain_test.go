@@ -13,8 +13,16 @@ import (
 // files and over a planted violation: a rule that cannot fail is not a rule,
 // and TestPlanted* proves each one can.
 
-// buildFiles are the files whose cargo and tool invocations CI trusts.
-var buildFiles = []string{"../../Makefile", "../../tools/ci/lint.sh"}
+// buildFiles are the files whose cargo and tool invocations CI trusts: the
+// Makefile and every script a workflow runs (TestWorkflowScriptsAreAudited
+// fails when a workflow runs one that is not listed here or exempted below).
+//
+// tests/adopter/walkthrough.sh is exempt: it generates a throwaway adopter
+// crate that has no Cargo.lock by design, so --locked would always fail there.
+var scriptExempt = map[string]string{
+	"tests/adopter/walkthrough.sh": "builds a generated adopter crate with no lockfile",
+}
+var buildFiles = []string{"../../Makefile", "../../tools/ci/lint.sh", "../../bench/r14/run.sh"}
 
 func readLines(t *testing.T, path string) []string {
 	t.Helper()
@@ -28,8 +36,8 @@ func readLines(t *testing.T, path string) []string {
 func isComment(l string) bool { return strings.HasPrefix(strings.TrimSpace(l), "#") }
 
 var (
-	cargoSubcmd = regexp.MustCompile(`\bcargo(?: \+\S+| \+\$\{\{[^}]*\}\})? (build|test|clippy|check)\b`)
-	cargoRun    = regexp.MustCompile(`\bcargo(?: \+\S+| \+\$\{\{[^}]*\}\})? install\b`)
+	cargoSubcmd = regexp.MustCompile(`\bcargo(?: \+\S+| \+\$\{\{[^}]*\}\}| \$\{[^}]*\})? (build|test|clippy|check|run|bench|doc|metadata)\b`)
+	cargoRun    = regexp.MustCompile(`\bcargo(?: \+\S+| \+\$\{\{[^}]*\}\}| \$\{[^}]*\})? install\b`)
 	envAssign   = regexp.MustCompile(`^\s+[A-Za-z_][A-Za-z0-9_]*:\s*\$\{\{`)
 	untrusted   = regexp.MustCompile(`\$\{\{\s*(inputs\.|github\.event\.|github\.head_ref)`)
 )
@@ -43,31 +51,65 @@ var (
 // own sysroot build). Echo lines print a command and do not run it.
 func lockedViolations(name string, lines []string) []string {
 	var out []string
-	for i, l := range lines {
-		if isComment(l) || strings.Contains(l, "-Zbuild-std") || strings.Contains(l, "cargo miri") || strings.Contains(l, "echo ") {
-			continue
-		}
-		if cargoSubcmd.MatchString(l) && !strings.Contains(l, "--locked") {
-			out = append(out, name+":"+strconv.Itoa(i+1)+": cargo without --locked: "+strings.TrimSpace(l))
+	for _, ll := range logicalLines(lines) {
+		for _, seg := range commandSegments(ll.text) {
+			if strings.Contains(seg, "-Zbuild-std") || strings.Contains(seg, "cargo miri") {
+				continue
+			}
+			if cargoSubcmd.MatchString(seg) && !strings.Contains(seg, "--locked") {
+				out = append(out, name+":"+strconv.Itoa(ll.n)+": cargo without --locked: "+strings.TrimSpace(seg))
+			}
 		}
 	}
 	return out
 }
 
+type logicalLine struct {
+	n    int // 1-based number of its first physical line
+	text string
+}
+
+var echoString = regexp.MustCompile(`\becho\s+("[^"]*"|'[^']*')`)
+
+// logicalLines joins backslash continuations, drops comments, and blanks the
+// string an echo prints: that text is not a command, but a command after it on
+// the same line (`echo "cargo check"; cargo check`) still is, and `&& echo ok`
+// no longer hides the command before it.
+func logicalLines(lines []string) []logicalLine {
+	var out []logicalLine
+	for i := 0; i < len(lines); i++ {
+		if isComment(lines[i]) {
+			continue
+		}
+		start, text := i+1, lines[i]
+		for strings.HasSuffix(strings.TrimRight(text, " \t"), `\`) && i+1 < len(lines) {
+			text = strings.TrimSuffix(strings.TrimRight(text, " \t"), `\`) + " " + strings.TrimSpace(lines[i+1])
+			i++
+		}
+		out = append(out, logicalLine{start, echoString.ReplaceAllString(text, "echo")})
+	}
+	return out
+}
+
+var commandSplit = regexp.MustCompile(`;|&&|\|\||\||\)`)
+
+// commandSegments splits a logical line at shell command separators, so
+// --locked has to appear in the same command as the cargo it governs.
+func commandSegments(s string) []string { return commandSplit.Split(s, -1) }
+
 // toolInstallViolations reports an unpinned tool install: @latest, or a cargo
 // install that is not both --locked and --version.
 func toolInstallViolations(name string, lines []string) []string {
 	var out []string
-	for i, l := range lines {
-		if isComment(l) || strings.Contains(l, "echo ") {
-			continue
+	for _, ll := range logicalLines(lines) {
+		at := name + ":" + strconv.Itoa(ll.n) + ": "
+		if strings.Contains(ll.text, "@latest") {
+			out = append(out, at+"@latest: "+strings.TrimSpace(ll.text))
 		}
-		at := name + ":" + strconv.Itoa(i+1) + ": "
-		if strings.Contains(l, "@latest") {
-			out = append(out, at+"@latest: "+strings.TrimSpace(l))
-		}
-		if cargoRun.MatchString(l) && (!strings.Contains(l, "--locked") || !strings.Contains(l, "--version")) {
-			out = append(out, at+"cargo install needs --locked and --version: "+strings.TrimSpace(l))
+		for _, seg := range commandSegments(ll.text) {
+			if cargoRun.MatchString(seg) && (!strings.Contains(seg, "--locked") || !strings.Contains(seg, "--version")) {
+				out = append(out, at+"cargo install needs --locked and --version: "+strings.TrimSpace(seg))
+			}
 		}
 	}
 	return out
@@ -108,16 +150,40 @@ func topLevelPermissionViolations(name string, lines []string) []string {
 func untrustedExpressionViolations(name string, lines []string) []string {
 	var out []string
 	for i, l := range lines {
-		if isComment(l) || !untrusted.MatchString(l) || envAssign.MatchString(l) {
+		if isComment(l) || !untrusted.MatchString(l) {
 			continue
 		}
-		// `if:` and `with:` expressions are evaluated by the runner, not a shell.
-		if t := strings.TrimSpace(l); strings.HasPrefix(t, "if:") || strings.HasPrefix(t, "description:") {
+		t := strings.TrimSpace(l)
+		// `if:` is evaluated by the runner, not a shell.
+		if strings.HasPrefix(t, "if:") {
 			continue
 		}
-		out = append(out, name+":"+strconv.Itoa(i+1)+": untrusted expression outside env: "+strings.TrimSpace(l))
+		// Exempt only a `KEY: ${{ ... }}` mapping entry whose enclosing block is
+		// `env:`. `run:`, `script:` and `with:` inputs are script-like or reach
+		// a script, so they are never exempt even though they have the same
+		// `key: ${{` shape.
+		if envAssign.MatchString(l) && enclosingKey(lines, i) == "env:" {
+			continue
+		}
+		out = append(out, name+":"+strconv.Itoa(i+1)+": untrusted expression outside an env: block: "+t)
 	}
 	return out
+}
+
+func indentOf(l string) int { return len(l) - len(strings.TrimLeft(l, " ")) }
+
+// enclosingKey is the nearest earlier line indented less than line i, trimmed.
+func enclosingKey(lines []string, i int) string {
+	n := indentOf(lines[i])
+	for j := i - 1; j >= 0; j-- {
+		if strings.TrimSpace(lines[j]) == "" || isComment(lines[j]) {
+			continue
+		}
+		if indentOf(lines[j]) < n {
+			return strings.TrimSpace(lines[j])
+		}
+	}
+	return ""
 }
 
 func TestEveryCargoInvocationIsLocked(t *testing.T) {
@@ -129,6 +195,29 @@ func TestEveryCargoInvocationIsLocked(t *testing.T) {
 	for _, p := range buildFiles {
 		for _, v := range lockedViolations(p, readLines(t, p)) {
 			t.Error(v)
+		}
+	}
+}
+
+var scriptInvocation = regexp.MustCompile(`(?:^|[\s;&(|])((?:\./)?(?:bench|tests|tools)/[\w./-]+\.sh)\b`)
+
+// Every shell script a workflow runs is scanned for unlocked cargo, or exempted
+// above with a reason; a new script cannot slip past the audit.
+func TestWorkflowScriptsAreAudited(t *testing.T) {
+	audited := map[string]bool{}
+	for _, p := range buildFiles {
+		audited[strings.TrimPrefix(p, "../../")] = true
+	}
+	for name, lines := range workflows(t) {
+		for _, ll := range logicalLines(lines) {
+			if m := scriptInvocation.FindStringSubmatch(ll.text); m != nil {
+				s := strings.TrimPrefix(m[1], "./")
+				if _, err := os.Stat("../../" + s); err != nil {
+					t.Errorf("%s:%d runs %s, which does not exist", name, ll.n, s)
+				} else if !audited[s] && scriptExempt[s] == "" {
+					t.Errorf("%s:%d runs %s, which is neither in buildFiles nor exempted", name, ll.n, s)
+				}
+			}
 		}
 	}
 }
@@ -255,6 +344,22 @@ func TestGateWiring(t *testing.T) {
 	if !strings.Contains(matrix, "::error title=Benchmark regression gate did not run") {
 		t.Error("the bench job's no-base path no longer raises an error annotation")
 	}
+	// A comparison that could not run must fail the job unless a person opted
+	// out with the dispatch input; the opt-out arrives through env, not inline.
+	for _, want := range []string{
+		"allow_no_base:",
+		"ALLOW_NO_BASE: ${{ inputs.allow_no_base }}",
+		`"${ALLOW_NO_BASE:-}" != "true"`,
+		`echo "BENCH_NOT_COMPARED=1" >> "$GITHUB_ENV"`,
+		"if: (success() || failure()) && env.BENCH_NOT_COMPARED == '1'",
+	} {
+		if !strings.Contains(matrix, want) {
+			t.Errorf("the bench no-base path lost %q: a skipped comparison would read as a pass", want)
+		}
+	}
+	if m := regexp.MustCompile(`(?s)name: Fail when nothing was compared.*?exit 1`).FindString(matrix); m == "" {
+		t.Error("the bench job has no step that fails when nothing was compared")
+	}
 	if !strings.Contains(matrix, "benchgate regress") {
 		t.Error("the bench job does not run the regression gate")
 	}
@@ -279,7 +384,18 @@ func TestPlantedViolationsAreCaught(t *testing.T) {
 		{"cargo install without --locked", toolInstallViolations("x", []string{"cargo install cargo-fuzz --version 0.13.2"}), nil},
 		{"no top-level permissions", topLevelPermissionViolations("x", []string{"name: x", "on: push", "jobs:", "  a:"}), topLevelPermissionViolations("x", []string{"permissions:", "  contents: read", "", "jobs:"})},
 		{"top-level write", topLevelPermissionViolations("x", []string{"permissions:", "  contents: read", "  issues: write", "jobs:"}), nil},
-		{"injection through run", untrustedExpressionViolations("x", []string{"        run: echo ${{ inputs.seed }}"}), untrustedExpressionViolations("x", []string{"          SEED: ${{ inputs.seed }}"})},
+		{"injection through run body", untrustedExpressionViolations("x", []string{"      - name: s", "        run: echo ${{ inputs.seed }}"}), untrustedExpressionViolations("x", []string{"      - name: s", "        env:", "          SEED: ${{ inputs.seed }}", "        run: echo \"$SEED\""})},
+		{"run: is the expression", untrustedExpressionViolations("x", []string{"      - name: s", "        run: ${{ inputs.hammer_seed }}"}), nil},
+		{"github-script script: is the expression", untrustedExpressionViolations("x", []string{"        with:", "          script: ${{ github.event.issue.title }}"}), nil},
+		{"expression in a block-scalar body", untrustedExpressionViolations("x", []string{"        run: |", "          echo ${{ github.head_ref }}"}), nil},
+		{"with: input carrying head_ref", untrustedExpressionViolations("x", []string{"        with:", "          ref: ${{ github.head_ref }}"}), nil},
+		{"echo hides an unlocked cargo", lockedViolations("x", []string{"        run: cargo test -p gusset && echo ok"}), lockedViolations("x", []string{"        run: cargo test --locked -p gusset && echo ok"})},
+		{"unlocked cargo run", lockedViolations("x", []string{"  cargo run --release"}), nil},
+		{"unlocked cargo bench", lockedViolations("x", []string{"  cargo bench"}), nil},
+		{"unlocked cargo doc", lockedViolations("x", []string{"  cargo doc --no-deps"}), nil},
+		{"unlocked in a shell function", lockedViolations("x", []string{`	(cd "$dir" && cargo ${tc:+"+$tc"} build --release -q \`, `		${target:+--target "$target"} "$@")`}), lockedViolations("x", []string{`	(cd "$dir" && cargo ${tc:+"+$tc"} build --release -q \`, `		--locked "$@")`})},
+		{"--locked on the continuation line", lockedViolations("x", []string{"        run: cargo build --release \\", "          --target x"}), lockedViolations("x", []string{"        run: cargo build --release \\", "          --locked"})},
+		{"locked echo string does not launder a bare cargo", lockedViolations("x", []string{`echo "cargo check --locked"; cargo check -p gusset`}), nil},
 	}
 	for _, c := range cases {
 		if len(c.got) == 0 {
