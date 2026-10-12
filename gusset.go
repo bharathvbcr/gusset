@@ -15,9 +15,9 @@
 // Go GC blindness to the foreign heap.
 //
 // Gusset is not a foreign function interface binding generator (like cbindgen
-// or uniffi-bindgen-go), not a cgo-free assembly trampoline (like purego or
-// asmcgocall), and not an out-of-process IPC bus. It is an in-process hardening
-// layer.
+// or uniffi-bindgen-go), not a cgo-free assembly trampoline (like purego, or a
+// direct call into the runtime's own assembly trampoline), and not an
+// out-of-process IPC bus. It is an in-process hardening layer.
 package gusset
 
 import (

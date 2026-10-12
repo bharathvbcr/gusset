@@ -229,22 +229,34 @@ jobs:
         with:
           components: clippy, rustfmt, llvm-tools
 
+      # Pinned to a patch release, unlike the test jobs. Staticcheck reads the
+      # compiler's export data, and go1.27.2 bumped its version under a
+      # '1.27.x' spec: the same staticcheck passed on go1.27.1 and failed on
+      # go1.27.2. Move this pin and the tool pins below together.
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: '1.27.x'
+          go-version: '1.27.2'
           cache: false
+
+      # Every audit after this point runs even when an earlier one failed
+      # (`!cancelled()`), so a broken tool cannot turn the audits after it into
+      # `skipped`. A skipped audit reads as "nothing to report" when nothing ran.
+      # The job still fails if any one of them fails.
 
       # --all-targets matters: without it clippy skips test targets entirely, and
       # the R3 disallowed-method rules went unenforced in exactly the code most
       # likely to reach for unwrap.
       - name: Cargo Clippy
+        if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Cargo fmt
+        if: ${{ !cancelled() }}
         run: cargo fmt --all -- --check
 
       - name: Gofmt
+        if: ${{ !cancelled() }}
         run: |
           unformatted=$(gofmt -l . | grep -v '^bench/seed/' || true)
           if [ -n "$unformatted" ]; then
@@ -252,19 +264,28 @@ jobs:
           fi
 
       - name: Gussetvet Analyzer (R5)
+        if: ${{ !cancelled() }}
         run: go run ./tools/gussetvet
 
       - name: Go Vet
+        if: ${{ !cancelled() }}
         run: go vet ./...
 
+      # A master commit, not a release. 2026.2.1 (v0.8.1) cannot read go1.27.2's
+      # export data ("export data version 5 is greater than maximum supported
+      # version 4", dominikh/go-tools#1832). The fix (f1838cc) is on master but
+      # not yet in a release. Replace this with the first release that contains
+      # it.
       - name: Staticcheck
+        if: ${{ !cancelled() }}
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0-0.dev.0.20261009230814-452d5bb86b45
           staticcheck ./...
 
       - name: Govulncheck
+        if: ${{ !cancelled() }}
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           govulncheck ./...
 
       # Forbidden-pattern audit (R13 and the GODEBUG ban).
@@ -283,6 +304,7 @@ jobs:
       # file:line. Two enforcers for one rule means the cruder one eventually fires
       # on the stricter one's source.
       - name: Forbidden pattern audit
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           sources=$(git ls-files '*.go' '*.rs')
@@ -309,6 +331,7 @@ jobs:
           exit $fail
 
       - name: Cargo Deny (licenses and advisories)
+        if: ${{ !cancelled() }}
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
