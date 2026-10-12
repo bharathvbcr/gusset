@@ -408,7 +408,13 @@ func TestShutdown_CloseWaitsForARunningNonCooperativeEngine(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 
-	const engineRuns = 700 * time.Millisecond
+	// 2.5 s, not the 700 ms it was: the bound below is engineRuns/2 measured
+	// from Close, and the worker must already hold the job when Close lands.
+	// Slack for a host that is slow to start the job or to schedule this
+	// goroutine is engineRuns/2 minus the 50 ms nap, so it has to be wide for a
+	// loaded host not to look like "Close returned without joining". A Close that
+	// does not join returns in microseconds, far below either figure.
+	const engineRuns = 2500 * time.Millisecond
 
 	sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if _, err := h.Submit(sctx, nonCoop(engineRuns)); err != nil {

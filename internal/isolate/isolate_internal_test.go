@@ -249,18 +249,39 @@ func TestParity_TicketIsAwaitedOnce(t *testing.T) {
 
 func TestParity_SecondWaiterIsBusy(t *testing.T) {
 	forEachMode(t, func(t *testing.T, c Caller) {
-		ticket, err := c.Submit(bg(t), []byte{9, 30}) // 300 ms
+		const jobRuns = time.Second
+		submitted := time.Now()
+		ticket, err := c.Submit(bg(t), []byte{9, byte(jobRuns / (10 * time.Millisecond))})
 		if err != nil {
 			t.Fatal(err)
 		}
-		first := make(chan error, 1)
-		go func() { _, err := c.Wait(bg(t), ticket); first <- err }()
-		time.Sleep(50 * time.Millisecond) // let the first waiter register
-		if _, err := c.Wait(bg(t), ticket); !errors.Is(err, gusset.ErrTicketBusy) {
-			t.Fatalf("second Wait = %v; want ErrTicketBusy", err)
+		// Two waiters start together. Which registers first is not for the
+		// test to arrange (it used to nap 50 ms and hope, and a loaded host
+		// let the second one win): exactly one is refused with ErrTicketBusy
+		// at once, and the other owns the ticket and gets the result.
+		results := make(chan error, 2)
+		gate := make(chan struct{})
+		for i := 0; i < 2; i++ {
+			go func() {
+				<-gate
+				_, err := c.Wait(bg(t), ticket)
+				results <- err
+			}()
 		}
-		if err := <-first; err != nil {
-			t.Fatalf("first Wait = %v; want the result", err)
+		close(gate)
+		refused := <-results
+		if !errors.Is(refused, gusset.ErrTicketBusy) {
+			// The owner cannot finish before the job does, so a first return
+			// before then that is not the refusal is a defect; after it, the
+			// host stalled the refused waiter past the job and there is
+			// nothing left to probe.
+			if since := time.Since(submitted); since < jobRuns {
+				t.Fatalf("first Wait to return (after %v, before the job could end) = %v; want ErrTicketBusy", since, refused)
+			}
+			t.Skip("the first waiter returned past the job's end: nothing left to probe on this host")
+		}
+		if err := <-results; err != nil {
+			t.Fatalf("owner Wait = %v; want the result", err)
 		}
 	})
 }
@@ -269,7 +290,11 @@ func TestParity_SecondWaiterIsBusy(t *testing.T) {
 // deadline while a non-cooperative engine keeps running. The bound is
 // relative to the engine, as that row requires.
 func TestParity_DeadlineBoundsTheCaller(t *testing.T) {
-	const engineRuns = time.Second
+	// 2.5 s of engine against a 50 ms deadline and a 1.25 s bound: a caller
+	// detached at its deadline lands near 50 ms and one that waited for the
+	// engine lands past 2.5 s, so a host that is slow to schedule the caller
+	// still falls on the right side of the gap.
+	const engineRuns = 2500 * time.Millisecond
 	forEachMode(t, func(t *testing.T, c Caller) {
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
@@ -471,19 +496,32 @@ func TestIsolation_UncatchableFaultEndsOnlyTheWorker(t *testing.T) {
 // memory is its own. In process that is the 2026-09-30 close-budget error and
 // the pool stays allocated.
 func TestIsolation_CloseKillsAWedgedWorker(t *testing.T) {
-	p := startWorker(t)
-	if _, err := p.Submit(bg(t), []byte{9, 255}); err != nil { // 2.55 s, non-cooperative
-		t.Fatal(err)
+	// The job has to be inside the engine when Close lands: closing first
+	// cancels it before it starts, and the worker then exits inside the budget
+	// with nothing to kill. There is no signal for "the engine has it" across
+	// the process boundary, so a nap stands in for one, and a host too loaded
+	// for the first nap to cover the job's start gets a longer one on a fresh
+	// worker. A Close that does not kill a wedged worker fails every attempt,
+	// because the engine outlasts all the naps (2.55 s against 1.5 s).
+	var err error
+	var elapsed time.Duration
+	for _, nap := range []time.Duration{100 * time.Millisecond, 500 * time.Millisecond, 1500 * time.Millisecond} {
+		p := startWorker(t)
+		if _, serr := p.Submit(bg(t), []byte{9, 255}); serr != nil { // 2.55 s, non-cooperative
+			t.Fatal(serr)
+		}
+		time.Sleep(nap)
+		start := time.Now()
+		err = p.close(100 * time.Millisecond)
+		elapsed = time.Since(start)
+		if err != nil && strings.Contains(err.Error(), "killed") {
+			break
+		}
 	}
-	// Let the job reach the engine. Closing first cancels it before it
-	// starts, and the worker then exits inside the budget.
-	time.Sleep(100 * time.Millisecond)
-	start := time.Now()
-	err := p.close(100 * time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "killed") {
 		t.Fatalf("close past budget = %v; want the kill reported", err)
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
+	if elapsed > time.Second {
 		t.Fatalf("close took %v with a 100ms budget", elapsed)
 	}
 }

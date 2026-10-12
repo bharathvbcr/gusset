@@ -158,12 +158,17 @@ func TestPitfall_DeadlineEnforcement(t *testing.T) {
 	}
 	defer h.Close()
 
-	// Short deadline of 50ms, while Mode 5 sleeps 10ms per iteration for 50 iterations (500ms)
+	// Short deadline of 50ms, while Mode 5 sleeps 10ms per iteration for 250
+	// iterations (2.5s). The engine is far slower than any scheduling delay a
+	// loaded host adds, so "returned at the deadline" (~50ms) and "waited out
+	// the engine" (>=2.5s) stay apart; the 1s bound only asks which side of
+	// that gap the caller landed on. It used to be 500ms of engine against a
+	// 250ms bound, a 2x gap that a stalled scheduler closed.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
 	start := time.Now()
-	_, err = h.Call(ctx, []byte{5, 50})
+	_, err = h.Call(ctx, []byte{5, 250})
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -173,8 +178,8 @@ func TestPitfall_DeadlineEnforcement(t *testing.T) {
 		t.Fatalf("deadline must surface as a context error, got %v", err)
 	}
 
-	// Must return promptly around the deadline, not hanging for the full 500ms
-	if elapsed > 250*time.Millisecond {
+	// Must return promptly around the deadline, not hanging for the full 2.5s
+	if elapsed > time.Second {
 		t.Fatalf("call took %v, deadline was not enforced promptly", elapsed)
 	}
 	t.Logf("deadline correctly interrupted execution after %v: %v", elapsed, err)

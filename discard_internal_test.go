@@ -133,8 +133,12 @@ func TestDiscard_RunningTicketKeepsItsPermitUntilTheWorkStops(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Mode 9: 300 ms without checking for cancellation.
-	ticket, err := h.Submit(ctx, []byte{9, 30})
+	// Mode 9: 1.5 s without checking for cancellation. It was 300 ms against a
+	// 50 ms probe, so a host that stalled this goroutine for 250 ms let the job
+	// finish and the probe succeed, which reads as an I4 breach and is not one.
+	const jobRuns = 1500 * time.Millisecond
+	submitted := time.Now()
+	ticket, err := h.Submit(ctx, []byte{9, byte(jobRuns / (10 * time.Millisecond))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,8 +154,18 @@ func TestDiscard_RunningTicketKeepsItsPermitUntilTheWorkStops(t *testing.T) {
 	}
 
 	short, shortCancel := context.WithTimeout(ctx, 50*time.Millisecond)
-	_, err = h.Submit(short, []byte{0})
+	probeTicket, err := h.Submit(short, []byte{0})
 	shortCancel()
+	if err == nil {
+		// Admitted. Before the job could have ended that is a breach whatever
+		// the load; after, the host stalled the probe past the job and it
+		// proves nothing.
+		if since := time.Since(submitted); since < jobRuns {
+			t.Fatalf("a second Submit was admitted %v after a %v job was submitted, while its worker was still busy (I4)", since, jobRuns)
+		}
+		_ = h.Discard(probeTicket)
+		t.Skip("the probe ran past the job's end: it proves nothing on this host")
+	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("a second Submit on a 1-worker pool whose worker is still busy: got %v, want DeadlineExceeded (I4)", err)
 	}

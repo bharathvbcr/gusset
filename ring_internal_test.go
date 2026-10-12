@@ -235,10 +235,29 @@ func TestSpinBudgetFollowsRecentCompletionGaps(t *testing.T) {
 	if tr.gapEWMA != 0 {
 		t.Fatal("the first completion has no gap to record")
 	}
-	tr.lastTicket = time.Now().Add(-80 * time.Microsecond)
-	tr.completed()
-	if tr.gapEWMA < 10*time.Microsecond || tr.gapEWMA > 20*time.Microsecond {
-		t.Fatalf("one 80 us gap moved the average to %v, want ~10 us", tr.gapEWMA)
+	// completed() reads the clock itself, so the gap it sees is the 80 us
+	// planted here plus however long the host leaves this goroutine
+	// descheduled between the two statements: hundreds of microseconds on a
+	// loaded machine, which moved the average past its 20 us bound. A stall
+	// can only add to the gap, so no attempt may land below the planted
+	// figure's share (10 us), and one undisturbed attempt must land within
+	// 20 us. A wrong weight misses the window on every attempt.
+	var moved time.Duration
+	for attempt := 0; attempt < 1000; attempt++ {
+		tr = &ticketReader{}
+		tr.completed()
+		tr.lastTicket = time.Now().Add(-80 * time.Microsecond)
+		tr.completed()
+		moved = tr.gapEWMA
+		if moved < 10*time.Microsecond {
+			t.Fatalf("one 80 us gap moved the average to %v, want ~10 us", moved)
+		}
+		if moved <= 20*time.Microsecond {
+			break
+		}
+	}
+	if moved > 20*time.Microsecond {
+		t.Fatalf("one 80 us gap moved the average to %v in every one of 1000 attempts, want ~10 us", moved)
 	}
 	before := tr.gapEWMA
 	tr.lastTicket = time.Now().Add(-time.Second)

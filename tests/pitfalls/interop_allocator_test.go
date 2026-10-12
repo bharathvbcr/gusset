@@ -262,8 +262,12 @@ func TestInterop_ConcurrentCloseWaitsForTheFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 40 units (400 ms) without a cancellation check: close must join it.
-	if _, err := h.Submit(context.Background(), []byte{9, 40}); err != nil {
+	// 250 units (2.5 s) without a cancellation check: close must join it. The
+	// bug this pins returned the second Close the whole join early, so the
+	// slack below can be wide enough that a loaded host stalling the first
+	// goroutine between its Close returning and its timestamp is not mistaken
+	// for it.
+	if _, err := h.Submit(context.Background(), []byte{9, 250}); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(20 * time.Millisecond)
@@ -281,9 +285,11 @@ func TestInterop_ConcurrentCloseWaitsForTheFirst(t *testing.T) {
 	second := time.Now().UnixNano()
 	wg.Wait()
 	// Both calls wake on the same closeDone, and the first goroutine stamps
-	// its time a few microseconds after its Close returns, so allow slack.
-	// The bug this pins returned the second Close ~330 ms early.
-	const slack = int64(50 * time.Millisecond)
+	// its time after its Close returns, which is microseconds on an idle host
+	// and a scheduling quantum on a loaded one, so allow slack. The bug this
+	// pins returned the second Close ~2.4 s early (the join less the 70 ms
+	// before it was called).
+	const slack = int64(500 * time.Millisecond)
 	if first := firstDone.Load(); second < first-slack {
 		t.Fatalf("second Close returned %v before the first finished", time.Duration(first-second))
 	}
@@ -298,8 +304,11 @@ func TestInterop_ForgottenHandleCleanupDoesNotStallOtherCleanups(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// 150 units: 1.5 s, never checks ctx.
-		if _, err := h.Submit(context.Background(), []byte{9, 150}); err != nil {
+		// 250 units: 2.5 s, never checks ctx. The defect stalls the unrelated
+		// cleanup for about that long; a healthy host runs it in milliseconds,
+		// so the 1.5 s allowance below sits in the middle of a 2.5 s gap
+		// instead of the 1 s against 1.5 s it used to be.
+		if _, err := h.Submit(context.Background(), []byte{9, 250}); err != nil {
 			t.Fatal(err)
 		}
 	}()
@@ -311,12 +320,12 @@ func TestInterop_ForgottenHandleCleanupDoesNotStallOtherCleanups(t *testing.T) {
 		obj := new([64]byte)
 		runtime.AddCleanup(obj, func(ch chan struct{}) { close(ch) }, fired)
 	}()
-	deadline := time.After(1 * time.Second)
+	deadline := time.After(1500 * time.Millisecond)
 	for {
 		runtime.GC()
 		select {
 		case <-fired:
-			time.Sleep(1600 * time.Millisecond) // let the background close finish
+			time.Sleep(2600 * time.Millisecond) // let the background close finish
 			return
 		case <-deadline:
 			t.Fatal("an unrelated cleanup was stalled behind a forgotten handle's close")
