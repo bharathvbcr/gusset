@@ -372,6 +372,14 @@ func TestPitfall_DeepRecursionOnWorkerStack(t *testing.T) {
 // The thread count after the run says nothing about the run: Go never destroys
 // an M, so it can only have grown, but a transient spike that settled would not
 // have been seen by a single late reading either way.
+//
+// Limitation. Because Go never destroys an OS thread, the scheduler total only
+// rises, and a run's baseline includes every thread an earlier test in the same
+// process created. Under -count>1, or after threads-heavy tests, the baseline is
+// already inflated and the thread bound is looser than its +pool+GOMAXPROCS+8
+// statement; it can fail to catch a regression on a repeat run, but it cannot
+// fail without one. The in-flight assertion above it is not affected: it reads
+// the engine's own gauge, reset at the start of this test.
 func TestPitfall_ThreadCapBoundedSoak(t *testing.T) {
 	const poolSize = 4
 	h, err := gusset.Open(gusset.WithPoolSize(poolSize), gusset.WithDiagnosticEngine())
