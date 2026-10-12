@@ -224,9 +224,14 @@ func TestDisrupt_NonCooperativeEngineAbandonmentUnderHighConcurrency(t *testing.
 	}
 	defer h.Close()
 
-	// Mode 9 with input[1]=5 sleeps for 50ms without calling ctx.check()
-	// Submit 8 concurrent calls with a tight deadline of 10ms
+	// Mode 9 with input[1]=100 sleeps for 1s without calling ctx.check().
+	// Submit 8 concurrent calls with a 15ms deadline. The engine is far
+	// slower than any scheduling delay a loaded host adds, so "detached at
+	// the deadline" (~15ms) and "waited for the engine" (>=1s, ~2s with 8
+	// calls on 4 workers) stay apart: the bound below is about which side of
+	// that gap the callers land on, not about how fast this host is.
 	const calls = 8
+	const engineSleep = 100 // units of 10ms
 	var wg sync.WaitGroup
 	var timeoutCount atomic.Int32
 
@@ -238,7 +243,7 @@ func TestDisrupt_NonCooperativeEngineAbandonmentUnderHighConcurrency(t *testing.
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
 			defer cancel()
 
-			_, err := h.Call(ctx, []byte{9, 5, 0, byte(id)})
+			_, err := h.Call(ctx, []byte{9, engineSleep, 0, byte(id)})
 			if err != nil && errors.Is(err, context.DeadlineExceeded) {
 				timeoutCount.Add(1)
 			}
@@ -248,19 +253,19 @@ func TestDisrupt_NonCooperativeEngineAbandonmentUnderHighConcurrency(t *testing.
 	wg.Wait()
 	elapsed := time.Since(start)
 
-	// All callers should have detached within ~30ms, not waited for 50ms+
+	// Every caller detached at its deadline rather than waiting out the 1s
+	// engine sleep.
 	if timeoutCount.Load() != calls {
 		t.Fatalf("expected %d DeadlineExceeded errors, got %d", calls, timeoutCount.Load())
 	}
-	if elapsed > 100*time.Millisecond {
-		t.Fatalf("callers were not detached promptly: took %v", elapsed)
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("callers were not detached promptly: took %v (the engine sleeps %v)", elapsed, engineSleep*10*time.Millisecond)
 	}
 
-	// Wait for the workers to finish sleeping (50ms) so permits are reclaimed
-	time.Sleep(80 * time.Millisecond)
-
-	// Now all pool permits should be restored and normal calls should succeed instantly
-	normalCtx, normalCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// The abandoned jobs keep their permits until the engine returns (I4);
+	// normal calls queue on the semaphore and must all succeed once the
+	// workers finish, without any leaked permit.
+	normalCtx, normalCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer normalCancel()
 
 	for i := 0; i < poolSize*2; i++ {
