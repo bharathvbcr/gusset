@@ -328,8 +328,12 @@ impl Handle {
                 pool_size, MAX_POOL_SIZE
             ));
         }
-        sys::check_open(pipe_write_fd)
-            .map_err(|e| format!("pipe write fd {} is not open: {}", pipe_write_fd, e))?;
+        sys::check_pipe_write_end(pipe_write_fd).map_err(|e| {
+            format!(
+                "pipe write fd {} is not the write end of an open pipe: {}",
+                pipe_write_fd, e
+            )
+        })?;
         // I4 keeps unread tickets at or under pool_size, which is only a
         // "the pipe never fills" guarantee if the pipe holds that many. Linux
         // shrinks new pipes to one page (512 tickets) once a user passes

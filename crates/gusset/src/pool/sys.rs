@@ -447,12 +447,18 @@ pub fn ensure_pipe_capacity(fd: i32, bytes: usize) -> std::result::Result<(), St
     Ok(())
 }
 
-/// Checks that `fd` is an open descriptor without changing anything about it.
+/// Checks that `fd` is the write end of a pipe, without changing anything
+/// about it.
 ///
 /// `Handle::open` validates the completion descriptor with this before any
-/// side effect, so a closed descriptor is refused before a thread exists and
-/// a refused open leaves the caller's descriptor exactly as it was.
-pub fn check_open(fd: i32) -> Result<()> {
+/// side effect, so a closed, read-only or non-pipe descriptor is refused
+/// before a thread exists and a refused open leaves the caller's descriptor
+/// exactly as it was. Open is not enough: a read-only end makes every
+/// completion write fail with EBADF after the pool is up, and a regular file
+/// or socket is not what the reader polls. Sockets are refused as well: the
+/// contract and every caller is `pipe(2)`/`os.Pipe`, and
+/// `ensure_pipe_capacity` sizes it with `F_SETPIPE_SZ`.
+pub fn check_pipe_write_end(fd: i32) -> Result<()> {
     if fd < 0 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
@@ -460,8 +466,27 @@ pub fn check_open(fd: i32) -> Result<()> {
         ));
     }
     // SAFETY: F_GETFL only reads the descriptor's status flags.
-    if unsafe { libc::fcntl(fd, libc::F_GETFL) } < 0 {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
         return Err(Error::last_os_error());
+    }
+    // SAFETY: `st` is a valid out-pointer and fstat only reads the descriptor.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(Error::last_os_error());
+    }
+    if st.st_mode & libc::S_IFMT != libc::S_IFIFO {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "descriptor is not a pipe",
+        ));
+    }
+    let access = flags & libc::O_ACCMODE;
+    if access != libc::O_WRONLY && access != libc::O_RDWR {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "descriptor is not open for writing",
+        ));
     }
     Ok(())
 }

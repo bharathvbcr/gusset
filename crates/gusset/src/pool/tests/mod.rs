@@ -564,3 +564,56 @@ fn respawn_and_failed_open_release_threads_and_mappings() {
         "partial opens leaked resources"
     );
 }
+
+/// I4/I5: the completion descriptor must be the write end of a pipe. An open
+/// descriptor of any other kind used to pass the old open-only check: a read-only end
+/// made every completion write fail with EBADF after the pool was up, and a
+/// regular file or socket took 8-byte tickets that no reader would ever poll.
+/// Each is refused before a thread exists, and the caller's descriptor is
+/// left as it was handed in.
+#[test]
+fn open_refuses_a_descriptor_that_is_not_a_pipe_write_end() {
+    let (r, w) = make_pipe();
+    let res = Handle::open(1, r);
+    assert!(res.is_err(), "the read end of a pipe was accepted");
+    // SAFETY: both ends are still this test's.
+    unsafe {
+        libc::close(r);
+        libc::close(w);
+    }
+
+    // A regular file opened for writing: open, writable, not a pipe.
+    let path = std::env::temp_dir().join(format!("gusset-fdkind-{}", std::process::id()));
+    let cpath = std::ffi::CString::new(path.to_str().must("utf8 path")).must("path");
+    // SAFETY: cpath is a valid NUL-terminated string.
+    let file = unsafe {
+        libc::open(
+            cpath.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+            0o600,
+        )
+    };
+    assert!(file >= 0, "could not create a scratch file");
+    let res = Handle::open(1, file);
+    // SAFETY: file is this test's descriptor; the path is this test's file.
+    unsafe {
+        libc::close(file);
+        libc::unlink(cpath.as_ptr());
+    }
+    assert!(res.is_err(), "a regular file was accepted");
+
+    // A socket: writable, but not the pipe the reader polls.
+    let mut sv = [0i32; 2];
+    // SAFETY: sv is a valid two-element array.
+    assert_eq!(
+        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr()) },
+        0
+    );
+    let res = Handle::open(1, sv[0]);
+    // SAFETY: both ends are this test's.
+    unsafe {
+        libc::close(sv[0]);
+        libc::close(sv[1]);
+    }
+    assert!(res.is_err(), "a socket was accepted");
+}
