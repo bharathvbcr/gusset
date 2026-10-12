@@ -79,7 +79,12 @@ func TestInit_RanTheABICheckAgainstTheLiveLibrary(t *testing.T) {
 	if abiAtInit.rust.Version != ExpectedAbiVersion {
 		t.Fatalf("init did not verify an ABI report: version %d, want %d", abiAtInit.rust.Version, ExpectedAbiVersion)
 	}
-	if fresh := gatherABIReport(); fresh != abiAtInit {
+	if !abiAtInit.verified {
+		t.Fatal("init stored an ABI report that mustCheckABI never passed: the load-time check did not run (I6/R12)")
+	}
+	fresh := gatherABIReport()
+	fresh.verified = true
+	if fresh != abiAtInit {
 		t.Fatalf("the report init verified differs from the live library's now:\n init  %+v\n live  %+v", abiAtInit, fresh)
 	}
 }

@@ -340,17 +340,47 @@ func TestInterop_ForgottenBufferCleanupDoesNotStallDuringClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(200 * time.Millisecond) // running, so Close has a join to wait on
-	func() {
-		for i := 0; i < 20; i++ {
-			if _, err := h.NewBuffer(4096); err != nil {
-				t.Fatal(err)
-			}
+	// Held until Close is under way, then dropped and collected before the
+	// unrelated objects below exist. The cleanup goroutine runs its queue in
+	// order and the claim is about what sits behind a buffer's cleanup, so a
+	// buffer's has to come first; left to the collector, the unrelated ones
+	// could all run ahead of it and the test would pass on the defect.
+	bufs := make([]*gusset.Buffer, 0, 20)
+	for i := 0; i < 20; i++ {
+		b, err := h.NewBuffer(4096)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}()
+		bufs = append(bufs, b)
+	}
 	closed := make(chan struct{})
 	go func() { _ = h.Close(); close(closed) }()
-	waitClosing(t, h) // Close has set closed and is heading into the join
-	time.Sleep(20 * time.Millisecond)
+	waitClosing(t, h)                 // Close has set closed and is heading into the join
+	time.Sleep(50 * time.Millisecond) // Close holds the lock for the join by now
+	runtime.KeepAlive(bufs)           // the slice is live up to here, not just to its last append
+	bufs = nil
+	for i := 0; i < 3; i++ {
+		runtime.GC()
+	}
+	time.Sleep(100 * time.Millisecond) // the buffer cleanups run, or park
+
+	// What the defect is, seen directly: a buffer's cleanup parked on the lock
+	// Close holds across the join. Counting how many unrelated cleanups run
+	// behind it no longer shows it, because this Go runtime keeps the others
+	// going when one blocks (the mutant that parks it passed that count in 3
+	// of 3 runs); the parked goroutine itself is the evidence.
+	select {
+	case <-closed:
+		t.Skip("Close returned before the check: the host stalled this test past the job it was joining")
+	default:
+	}
+	stacks := make([]byte, 1<<20)
+	stacks = stacks[:runtime.Stack(stacks, true)]
+	for _, g := range strings.Split(string(stacks), "\n\n") {
+		if strings.Contains(g, "bufFreeCleanup") {
+			t.Fatalf("a forgotten buffer's cleanup is parked while Close joins the engine (a blocked cleanup stalls the queue behind it):\n%s", g)
+		}
+	}
 
 	fired := make(chan struct{}, 100)
 	func() {
@@ -361,16 +391,45 @@ func TestInterop_ForgottenBufferCleanupDoesNotStallDuringClose(t *testing.T) {
 	}()
 	start := time.Now()
 	got := 0
-	deadline := time.After(1500 * time.Millisecond)
-	for got < 100 {
+	drain := func() {
+		for {
+			select {
+			case <-fired:
+				got++
+			default:
+				return
+			}
+		}
+	}
+	// The defect this guards parks the one cleanup goroutine on Close's lock, so
+	// nothing queued behind it runs until Close returns. A wall-clock count
+	// ("100 within 1.5 s") measured the host instead: each runtime.GC hands over
+	// only the cleanups it found, a handful per 200 ms on a loaded machine. So
+	// the claim is progress while Close is still joining the job: after every GC,
+	// take everything that has fired, and require at least one before Close
+	// returns. Then every one of them must still arrive.
+	for got == 0 {
 		runtime.GC()
+		drain()
 		select {
-		case <-fired:
-			got++
-		case <-deadline:
-			t.Fatalf("only %d/100 unrelated cleanups ran in %v: stalled behind a buffer cleanup waiting on Close", got, time.Since(start))
+		case <-closed:
+			drain()
+			if got == 0 {
+				t.Fatalf("no unrelated cleanup ran in the %v until Close returned: stalled behind a buffer cleanup waiting on Close", time.Since(start))
+			}
 		case <-time.After(10 * time.Millisecond):
 		}
+		if got == 0 && time.Since(start) > 60*time.Second {
+			t.Fatal("no unrelated cleanup ran in 60 s")
+		}
+	}
+	for stop := time.Now().Add(60 * time.Second); got < 100; {
+		if time.Now().After(stop) {
+			t.Fatalf("only %d/100 unrelated cleanups ran in 60 s", got)
+		}
+		runtime.GC()
+		drain()
+		time.Sleep(10 * time.Millisecond)
 	}
 	<-closed
 }

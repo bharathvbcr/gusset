@@ -139,6 +139,14 @@ func TestPitfall_HandlePoisoning(t *testing.T) {
 		if !errors.Is(err, gusset.ErrPoisoned) {
 			t.Fatalf("call %d: expected ErrPoisoned, got: %v", i, err)
 		}
+		// R10 is enforced twice: Rust refuses at the export, and Go latches
+		// before entering Rust. Both answer ErrPoisoned, so the code alone
+		// passes with either layer removed. Go's refusal is the one that says
+		// the job panicked (the Rust one is the bare "handle is poisoned"),
+		// and it is set before the caller sees ErrPanic.
+		if !strings.Contains(err.Error(), "a job panicked; Close it and open a new handle") {
+			t.Fatalf("call %d: refused by Rust, not by Go's poison latch: %v", i, err)
+		}
 	}
 }
 
@@ -364,6 +372,14 @@ func TestPitfall_DeepRecursionOnWorkerStack(t *testing.T) {
 // The thread count after the run says nothing about the run: Go never destroys
 // an M, so it can only have grown, but a transient spike that settled would not
 // have been seen by a single late reading either way.
+//
+// Limitation. Because Go never destroys an OS thread, the scheduler total only
+// rises, and a run's baseline includes every thread an earlier test in the same
+// process created. Under -count>1, or after threads-heavy tests, the baseline is
+// already inflated and the thread bound is looser than its +pool+GOMAXPROCS+8
+// statement; it can fail to catch a regression on a repeat run, but it cannot
+// fail without one. The in-flight assertion above it is not affected: it reads
+// the engine's own gauge, reset at the start of this test.
 func TestPitfall_ThreadCapBoundedSoak(t *testing.T) {
 	const poolSize = 4
 	h, err := gusset.Open(gusset.WithPoolSize(poolSize), gusset.WithDiagnosticEngine())

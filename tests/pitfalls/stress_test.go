@@ -148,26 +148,38 @@ func TestBug_SemaphoreInFlightBreachOnTimeout(t *testing.T) {
 	defer h.Close()
 	_ = peakInEngine(t, h) // reset the gauge
 
-	// Caller 1: a 20 ms deadline against a 250 ms non-cooperative job.
-	ctx1, cancel1 := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	// Caller 1 submits the job and abandons its ticket with Discard.
+	//
+	// It used to abandon by a 20 ms context deadline. Go hands that deadline to
+	// Rust, so on a loaded host the job could still be queued when it passed;
+	// a job cancelled before it starts never runs the engine and rightly gives
+	// its permit back, so the second caller was admitted and the test reported
+	// an I4 breach that was not one. Discard does not cancel, so the job runs to
+	// its end and the permit has to stay with it.
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel1()
 	jobStart := time.Now()
-	_, err1 := h.Call(ctx1, holdInEngine(jobHold))
-	if !errors.Is(err1, context.DeadlineExceeded) {
-		t.Fatalf("caller 1: want its own deadline, got %v", err1)
+	t1, err := h.Submit(ctx1, holdInEngine(jobHold))
+	if err != nil {
+		t.Fatalf("caller 1: Submit: %v", err)
 	}
-	if time.Since(jobStart) >= jobHold*time.Millisecond/2 {
-		t.Fatalf("caller 1 was held until the job ended (%v); the deadline must release the caller", time.Since(jobStart))
+	if err := h.Discard(t1); err != nil {
+		t.Fatalf("caller 1: Discard: %v", err)
 	}
 
-	// Caller 1 has returned but its job has ~230 ms left to run. A second caller
-	// must NOT get a permit: the worker is still inside the engine.
+	// The job runs for jobHold from some point after the submit. A second caller
+	// must NOT get a permit while it does. Admission less than jobHold after the
+	// submit is a breach whatever the load; admission later proves nothing.
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel2()
 	t2, err := h.Submit(ctx2, holdInEngine(1))
 	if err == nil {
-		_, _ = h.Wait(context.Background(), t2)
-		t.Fatalf("a second job was admitted while the first was still running in the engine (I4 breach)")
+		admitted := time.Since(jobStart)
+		_ = h.Discard(t2) // not Wait: a breach may leave nothing to wait for
+		if admitted < jobHold*time.Millisecond {
+			t.Fatalf("a second job was admitted %v after a %d ms job was submitted, while it was still running in the engine (I4 breach)", admitted, jobHold)
+		}
+		t.Skipf("the probe ran %v after the submit, past the job's end: it proves nothing on this host", admitted)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("caller 2 should have timed out waiting for a permit, got %v", err)
@@ -203,7 +215,9 @@ func TestStress_HeavyConcurrentLoadAndPoisoning(t *testing.T) {
 	var panicReported atomic.Bool
 	var poisonReported atomic.Bool
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Generous: the bound only guards a hang. It was 5 s, which a loaded host
+	// spent before goroutine 42 reached its panic, so no panic was ever injected.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	for g := 0; g < numGoroutines; g++ {
@@ -212,7 +226,7 @@ func TestStress_HeavyConcurrentLoadAndPoisoning(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < 20; i++ {
 				var payload []byte
-				if id == 42 && i == 10 {
+				if id == 42 && i == 0 {
 					// Inject deliberate panic in default_dispatch (Mode 1)
 					payload = []byte{1}
 				} else {
