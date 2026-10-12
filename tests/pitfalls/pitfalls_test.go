@@ -139,6 +139,14 @@ func TestPitfall_HandlePoisoning(t *testing.T) {
 		if !errors.Is(err, gusset.ErrPoisoned) {
 			t.Fatalf("call %d: expected ErrPoisoned, got: %v", i, err)
 		}
+		// R10 is enforced twice: Rust refuses at the export, and Go latches
+		// before entering Rust. Both answer ErrPoisoned, so the code alone
+		// passes with either layer removed. Go's refusal is the one that says
+		// the job panicked (the Rust one is the bare "handle is poisoned"),
+		// and it is set before the caller sees ErrPanic.
+		if !strings.Contains(err.Error(), "a job panicked; Close it and open a new handle") {
+			t.Fatalf("call %d: refused by Rust, not by Go's poison latch: %v", i, err)
+		}
 	}
 }
 
