@@ -1,4 +1,4 @@
-.PHONY: all build test bench bench-crossover bench-scaling lint ci-local docs docs-check cross fuzz clean install install-build uninstall
+.PHONY: all build test bench bench-crossover bench-scaling lint alloc-gate ci-local docs docs-check cross fuzz clean install install-build uninstall
 
 export PATH := $(PATH):$(shell go env GOPATH)/bin
 
@@ -197,11 +197,16 @@ bench-scaling:
 # Supported platform set, compile-verified. Gusset is unix-only by construction
 # (POSIX pipe, sigaltstack, pthread stack accounting); lib.rs fails the build on a
 # non-unix target rather than letting it fail deep inside pool::sys.
-CROSS_TARGETS ?= x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-apple-darwin
+#
+# x86_64-apple-darwin is in the set because docs/platforms.md and CONTRIBUTING.md
+# call it supported; it was the one claim `make cross` never compiled. Adding a
+# target that cannot be installed is an error, not a skip: a platform that was
+# not compiled must not read as one that was.
+CROSS_TARGETS ?= x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin
 cross:
 	@for t in $(CROSS_TARGETS); do \
 		echo "== cargo check --target $$t"; \
-		rustup target add $$t >/dev/null 2>&1 || true; \
+		rustup target add $$t || { echo "cross: could not install target $$t"; exit 1; }; \
 		cargo check -p gusset --target $$t --all-targets || exit 1; \
 	done
 	@echo "cross: all supported targets compile"
@@ -226,17 +231,29 @@ fuzz:
 		go test -run '^$$' -fuzz "^$$t\$$" -fuzztime $(FUZZTIME) -fuzzminimizetime 10x . || exit 1; \
 	done
 
+# One pipeline, shared with the CI "Lint & Boundary Audits" job: gofmt, go vet,
+# gussetvet, staticcheck, govulncheck, the forbidden-pattern audit, clippy
+# (--all-targets, so the R3 disallowed-method rules reach test code), cargo fmt
+# and cargo-deny over both the root and fuzz/ workspaces. A missing or wrongly
+# versioned tool fails the step with the command that installs it; see
+# tools/ci/lint.sh and tools/ci/versions.env.
 lint:
-	# --all-targets: without it clippy skips test targets, and the R3
-	# disallowed-method rules go unenforced in exactly the code most likely
-	# to reach for unwrap.
-	cargo clippy --workspace --all-targets -- -D warnings
-	cargo fmt --all -- --check
-	go run ./tools/gussetvet
-	go vet ./...
+	tools/ci/lint.sh
+
+# The zero-allocation gate (R5), shared with the CI bench job. Reads raw
+# `go test -bench -benchmem` output. ChannelHop is the pure-Go control and must
+# stay at 0; the cgo call path measures 1 alloc/op (1 B/op) today, so
+# CallNoop and SubmitWait are bounded at 1. A benchmark missing from the file
+# fails the gate rather than passing it.
+ALLOC_FILE ?= bench/results/allocs.tmp
+ALLOC_BOUNDS ?= -max ChannelHop=0 -max GussetCallNoop=1 -max GussetSubmitWait=1
+alloc-gate:
+	go run ./tools/ci/benchgate allocs $(ALLOC_BOUNDS) $(ALLOC_FILE)
 
 ci-local: build test lint docs-check
-	go test -bench . -benchtime=100ms ./bench/...
+	go test -run '^$$' -bench . -benchtime=100ms -benchmem ./bench/... > $(ALLOC_FILE) || { cat $(ALLOC_FILE); exit 1; }
+	@cat $(ALLOC_FILE)
+	$(MAKE) alloc-gate
 
 # R15: every performance number in the docs is generated from committed raw data.
 # This target used to print "Documentation up to date" and regenerate nothing,

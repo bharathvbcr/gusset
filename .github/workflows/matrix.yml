@@ -8,6 +8,10 @@ on:
   # Run by hand on a branch, so a fix is verified before its PR exists.
   workflow_dispatch:
 
+# Read-only token for every job; none of them writes to the repository.
+permissions:
+  contents: read
+
 # Pinned by date per AGENTS.md; bump together with RUST_NIGHTLY in nightly.yml.
 env:
   RUST_NIGHTLY: nightly-2026-10-05
@@ -25,15 +29,18 @@ jobs:
         # that clippy -D warnings rejects on ARM Linux and nowhere else.
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
+          toolchain: stable
           components: clippy, rustfmt, llvm-tools
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           cache: false
@@ -87,13 +94,17 @@ jobs:
     name: Go 1.26 floor
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.x'
           cache: false
@@ -122,16 +133,18 @@ jobs:
     name: Rust 1.97 floor
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: '1.97'
           components: clippy, llvm-tools
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           cache: false
@@ -166,10 +179,12 @@ jobs:
       GUSSET_ALLOCATOR_API: '1'
       GUSSET_EXPECT_ALLOCATOR_API: '1'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust (1.100+)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: ${{ env.RUST_NIGHTLY }}
           # llvm-tools: exports_match reads the fat-LTO archive with llvm-nm;
@@ -177,7 +192,7 @@ jobs:
           components: clippy, llvm-tools
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           cache: false
@@ -218,131 +233,93 @@ jobs:
           cargo build
           cargo test --workspace
 
+  # Every step is one `tools/ci/lint.sh <step>`, the same pipeline `make lint`
+  # runs, with the tool versions pinned in tools/ci/versions.env. Each step is
+  # `if: success() || failure()` so one broken tool never skips the others:
+  # staticcheck dying on a new Go export-data version used to leave govulncheck,
+  # the forbidden-pattern audit and cargo-deny `skipped`, which reads the same
+  # as a check nobody wrote. They now report success or failure, always. (Not
+  # `always()`: a cancelled run should stop, not keep going.)
   lint:
     name: Lint & Boundary Audits
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
+          toolchain: stable
           components: clippy, rustfmt, llvm-tools
 
-      # Pinned to a patch release, unlike the test jobs. Staticcheck reads the
-      # compiler's export data, and go1.27.2 bumped its version under a
-      # '1.27.x' spec: the same staticcheck passed on go1.27.1 and failed on
-      # go1.27.2. Move this pin and the tool pins below together.
+      # Floats on the 1.27 line so govulncheck scans the newest standard
+      # library. Only the staticcheck step pins a patch release; see
+      # STATICCHECK_GO in tools/ci/versions.env.
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.2'
+          go-version: '1.27.x'
           cache: false
 
-      # Every audit after this point runs even when an earlier one failed
-      # (`!cancelled()`), so a broken tool cannot turn the audits after it into
-      # `skipped`. A skipped audit reads as "nothing to report" when nothing ran.
-      # The job still fails if any one of them fails.
+      - name: Install the pinned lint tools
+        run: tools/ci/lint.sh install
+
+      - name: Gofmt
+        if: success() || failure()
+        run: tools/ci/lint.sh gofmt
+
+      - name: Go Vet
+        if: success() || failure()
+        run: tools/ci/lint.sh go-vet
+
+      - name: Gussetvet Analyzer (R5)
+        if: success() || failure()
+        run: tools/ci/lint.sh gussetvet
+
+      - name: Staticcheck
+        if: success() || failure()
+        run: tools/ci/lint.sh staticcheck
+
+      - name: Govulncheck
+        if: success() || failure()
+        run: tools/ci/lint.sh govulncheck
+
+      # R13 and the GODEBUG ban; see the step's own comment in tools/ci/lint.sh
+      # for why R4 is gussetvet's job and not this one's.
+      - name: Forbidden pattern audit
+        if: success() || failure()
+        run: tools/ci/lint.sh forbidden-patterns
 
       # --all-targets matters: without it clippy skips test targets entirely, and
       # the R3 disallowed-method rules went unenforced in exactly the code most
       # likely to reach for unwrap.
       - name: Cargo Clippy
-        if: ${{ !cancelled() }}
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        if: success() || failure()
+        run: tools/ci/lint.sh cargo-clippy
 
       - name: Cargo fmt
-        if: ${{ !cancelled() }}
-        run: cargo fmt --all -- --check
+        if: success() || failure()
+        run: tools/ci/lint.sh cargo-fmt
 
-      - name: Gofmt
-        if: ${{ !cancelled() }}
-        run: |
-          unformatted=$(gofmt -l . | grep -v '^bench/seed/' || true)
-          if [ -n "$unformatted" ]; then
-            echo "gofmt needed for:"; echo "$unformatted"; exit 1
-          fi
-
-      - name: Gussetvet Analyzer (R5)
-        if: ${{ !cancelled() }}
-        run: go run ./tools/gussetvet
-
-      - name: Go Vet
-        if: ${{ !cancelled() }}
-        run: go vet ./...
-
-      # A master commit, not a release. 2026.2.1 (v0.8.1) cannot read go1.27.2's
-      # export data ("export data version 5 is greater than maximum supported
-      # version 4", dominikh/go-tools#1832). The fix (f1838cc) is on master but
-      # not yet in a release. Replace this with the first release that contains
-      # it.
-      - name: Staticcheck
-        if: ${{ !cancelled() }}
-        run: |
-          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0-0.dev.0.20261009230814-452d5bb86b45
-          staticcheck ./...
-
-      - name: Govulncheck
-        if: ${{ !cancelled() }}
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
-          govulncheck ./...
-
-      # Forbidden-pattern audit (R13 and the GODEBUG ban).
-      #
-      # Scoped to tracked Go and Rust sources. The previous version grepped the whole
-      # tree, so it matched the rules as written in AGENTS.md and docs/PLAN.md — and
-      # the patterns written into this very workflow file — and therefore failed on
-      # every commit. A gate that can never pass is not a gate; it just trains people
-      # to ignore a red job.
-      #
-      # R4 is deliberately NOT checked here. A blanket `grep -F C.free` cannot tell
-      # a call from prose about the rule, and it hit the same wall a second time
-      # once `tools/gussetvet` grew comments describing R4. `gussetvet` — which runs
-      # a few steps above — strips comments, carries an explicit allowlist for the
-      # one package permitted to hold the deliberate violation, and reports
-      # file:line. Two enforcers for one rule means the cruder one eventually fires
-      # on the stricter one's source.
-      - name: Forbidden pattern audit
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          sources=$(git ls-files '*.go' '*.rs')
-          fail=0
-          check() {
-            local pattern="$1" message="$2"
-            local hits
-            hits=$(printf '%s\n' "$sources" | xargs -r grep -nF -- "$pattern" || true)
-            if [ -n "$hits" ]; then
-              echo "::error::$message"
-              echo "$hits"
-              fail=1
-            fi
-          }
-          check '//go:linkname' 'linkname forbidden (R13)'
-          check 'asmcgocall'    'asmcgocall forbidden (R13)'
-          check 'cgocheck=0'    'GODEBUG cgocheck=0 forbidden'
-          check 'invalidptr=0'  'GODEBUG invalidptr=0 forbidden'
-          # //nolint is golangci-lint syntax; staticcheck ignores it, so the
-          # suppression silently does nothing and the lint job goes red (SA1012
-          # in tests/pitfalls). Use `//lint:ignore <CHECK> <reason>` on the line
-          # above instead.
-          check '//nolint'      '//nolint is not honored by staticcheck; use //lint:ignore <CHECK> <reason>'
-          exit $fail
-
-      - name: Cargo Deny (licenses and advisories)
-        if: ${{ !cancelled() }}
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
+      # Licenses and advisories, for the root workspace and for fuzz/, which is
+      # its own workspace and was outside the check.
+      - name: Cargo Deny
+        if: success() || failure()
+        run: tools/ci/lint.sh cargo-deny
 
   cgocheck2:
     name: cgocheck2 (R6, R16)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           cache: false
@@ -358,9 +335,13 @@ jobs:
     name: Memory Limit Bridge
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           cache: false
@@ -375,13 +356,17 @@ jobs:
     name: Thread-Cap Soak
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           cache: false
@@ -396,13 +381,17 @@ jobs:
     name: Race & Aggressive GC
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           cache: false
@@ -432,17 +421,21 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Installed first so stable below stays the default; run.sh builds engine B
       # with `cargo +1.97` for the toolchain-skew scenario.
       - name: Set up Rust 1.97 (skew scenario)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: '1.97'
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
 
       # asan-rust builds libgusset.a and both engines with -Zsanitizer=address.
       # run.sh reads the same RUST_NIGHTLY pin; `toolchain install` leaves the
@@ -462,7 +455,7 @@ jobs:
           rustup target add --toolchain 1.97 x86_64-apple-darwin
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           cache: false
@@ -510,7 +503,9 @@ jobs:
     runs-on: ubuntu-latest
     container: golang:1.27-alpine
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install toolchain
         run: |
@@ -540,7 +535,9 @@ jobs:
     runs-on: ubuntu-latest
     container: golang:1.27-alpine
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # R8's only real enforcer. musl's default thread stack is 128 KiB against
       # 8 MiB on glibc and darwin, so a deep-recursion test anywhere else passes
@@ -574,9 +571,12 @@ jobs:
     name: Cross-compile (supported platform set)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
           targets: >-
             x86_64-unknown-linux-gnu,
             aarch64-unknown-linux-gnu,
@@ -610,17 +610,22 @@ jobs:
     name: Benchmarks (R15)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v7
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           cache: false
 
       - name: Install benchstat
-        run: go install golang.org/x/perf/cmd/benchstat@latest
+        run: |
+          . tools/ci/versions.env
+          go install "golang.org/x/perf/cmd/benchstat@$BENCHSTAT_VERSION"
 
       # R15 named this job and it did not exist: `make docs` printed
       # "Documentation up to date" and regenerated nothing, while the README's
@@ -635,13 +640,31 @@ jobs:
       # origin/${base_ref || main}, which on a push to main is the pushed
       # commit itself: the job measured identical code twice in a row and
       # failed on "+137%" of noise.
+      #
+      # A manual run on a branch, or the first push of a new branch, has no
+      # such commit. The branch's merge-base with main stands in for it; only
+      # when that is the revision under test (a manual run on main itself) is
+      # there truly nothing to compare. That case used to exit 0 and skip every
+      # later step, so five workflow_dispatch runs went green having compared
+      # nothing. It now raises an error annotation and writes NOT COMPARED to
+      # the job summary, and the allocation gate below still runs.
       - name: Build this revision and its base
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           set -euo pipefail
           if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BASE_SHA^{commit}"; then
-            echo "no base revision to compare against; the regression gate cannot run" >&2
+            BASE_SHA=$(git merge-base HEAD origin/main || true)
+            if [[ -n "$BASE_SHA" && "$BASE_SHA" == "$(git rev-parse HEAD)" ]]; then
+              BASE_SHA=
+            fi
+          fi
+          if [[ -z "$BASE_SHA" ]]; then
+            echo "::error title=Benchmark regression gate did not run::NOT COMPARED: no base revision (no PR base, no prior push commit, and HEAD is main's tip). Only the allocation gate ran."
+            {
+              echo "### Benchmarks: NOT COMPARED"
+              echo "No base revision was available, so no regression comparison was made. Only the allocation gate ran."
+            } >> "$GITHUB_STEP_SUMMARY"
             echo "BENCH_BASE=" >> "$GITHUB_ENV"
             exit 0
           fi
@@ -658,35 +681,38 @@ jobs:
           : > old.txt
           : > new.txt
           for _ in $(seq 10); do
-            (cd "$RUNNER_TEMP/base/bench" && "$RUNNER_TEMP/old.test" -test.run '^$' -test.bench . -test.benchtime=1s -test.count=1) >> old.txt
-            (cd bench && "$RUNNER_TEMP/new.test" -test.run '^$' -test.bench . -test.benchtime=1s -test.count=1) >> new.txt
+            (cd "$RUNNER_TEMP/base/bench" && "$RUNNER_TEMP/old.test" -test.run '^$' -test.bench . -test.benchtime=1s -test.count=1 -test.benchmem) >> old.txt
+            (cd bench && "$RUNNER_TEMP/new.test" -test.run '^$' -test.bench . -test.benchtime=1s -test.count=1 -test.benchmem) >> new.txt
           done
 
-      # benchstat exits non-zero only on error, so the threshold is applied here:
-      # a row that regressed more than 10% fails the job rather than being printed
-      # into a log nobody reads.
+      # benchstat exits non-zero only on error, so the threshold is applied by
+      # tools/ci/benchgate: a sec/op row fails the job when it is more than 10%
+      # slower AND its confidence interval does not overlap the base's. A raw
+      # percentage grep failed run 37855657375 on GussetBufferLarge +14.55%
+      # with +-9% and +-7% dispersion, on a commit that only touched tools/.
       - name: Compare and enforce the 10% threshold
         if: env.BENCH_BASE != ''
         run: |
+          set -euo pipefail
           benchstat old.txt new.txt | tee delta.txt
-          if grep -qE '\+[1-9][0-9]{1,}\.[0-9]+%' delta.txt; then
-            echo "::error::a benchmark regressed by more than 10%"
-            exit 1
-          fi
-          echo "no regression beyond 10%"
+          benchstat -format csv old.txt new.txt > delta.csv
+          go run ./tools/ci/benchgate regress -threshold 10 delta.csv
 
       - name: Benchmark this revision
         if: env.BENCH_BASE == ''
         run: |
+          set -euo pipefail
           cargo build --release
-          go test -bench . -benchtime=1s -count=10 ./bench/... | tee new.txt
+          go test -run '^$' -bench . -benchtime=1s -benchmem -count=10 ./bench/... > new.txt
 
       # R5's noescape claim is only worth something if the allocation count it
-      # enables is actually held.
-      - name: Channel-hop baseline must stay at zero allocations
-        run: |
-          benchstat new.txt | tee summary.txt
-          grep -E 'ChannelHop' summary.txt
+      # enables is actually held. This used to run `benchstat | grep
+      # ChannelHop`, which matched the benchmark's name and never read a
+      # number. The bounds live in the Makefile (ALLOC_BOUNDS) so `make
+      # ci-local` enforces the same ones: ChannelHop (pure Go control) at 0, the
+      # cgo call path at its measured 1. A benchmark absent from new.txt fails.
+      - name: Allocation gate (ChannelHop 0, cgo path bounded)
+        run: make alloc-gate ALLOC_FILE=new.txt
 
   fuzz:
     name: Fuzz the FFI boundary
@@ -694,9 +720,13 @@ jobs:
     # 13 targets; a per-push smoke. The nightly go-fuzz job runs each longer.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.x'
           cache: false
@@ -713,7 +743,7 @@ jobs:
       # runner.
       - name: Upload any crashers
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-crashers
           path: |
