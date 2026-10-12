@@ -62,9 +62,12 @@ func TestSerialCall_HandsOffWithoutScheduling(t *testing.T) {
 		}
 	}
 	got := schedTransitions(t) - before
-	// Room for GC workers and for calls a loaded machine stalls past the poll
-	// window; none for scheduling on every call.
-	if limit := uint64(calls / 8); got > limit {
+	// One sampled transition per call. The code this guards made four to eight
+	// per call (16k-30k for 4000), so one per call sits well below it; the old
+	// quiet path made tens, but a loaded host or the race detector adds GC
+	// workers and stalled calls (510-1385 were seen with a limit of calls/8, on
+	// a build that was correct), so a tighter bound measured the host.
+	if limit := uint64(calls); got > limit {
 		t.Fatalf("%d serial Calls made %d sampled scheduler transitions, want <= %d: "+
 			"the waiter parked or the reader yielded on the handoff", calls, got, limit)
 	}
@@ -98,6 +101,31 @@ func TestSerialCall_LeavesAPForOtherGoroutines(t *testing.T) {
 	}
 	defer h.Close()
 
+	const nap = 200 * time.Microsecond
+	// wakes times a goroutine's sleeps and returns how late each one ended.
+	wakes := func() []time.Duration {
+		var late []time.Duration
+		for deadline := time.Now().Add(2 * time.Second); len(late) < 300 && time.Now().Before(deadline); {
+			t0 := time.Now()
+			time.Sleep(nap)
+			late = append(late, time.Since(t0)-nap)
+		}
+		slices.Sort(late)
+		return late
+	}
+
+	// The same sleeps with no Call running: what this host does to a 200 us
+	// nap on its own. A fixed limit measured the host (a median of 127-170 us
+	// was seen on a build with nothing wrong, under load), so the claim is
+	// relative to this.
+	baseline := wakes()
+	base := baseline[len(baseline)/2]
+	if base > 100*time.Microsecond {
+		t.Skipf("this host wakes a 200 us nap %v late at the median with no Calls running: "+
+			"too noisy to show the cost of a handoff (TestPollResult_Gates and "+
+			"TestQuietProcs_FollowsGOMAXPROCS check the gate itself)", base)
+	}
+
 	var stop atomic.Bool
 	done := make(chan error, 1)
 	go func() {
@@ -112,29 +140,22 @@ func TestSerialCall_LeavesAPForOtherGoroutines(t *testing.T) {
 		done <- nil
 	}()
 
-	const nap = 200 * time.Microsecond
-	var late []time.Duration
 	time.Sleep(20 * time.Millisecond) // past the first-call and refresh paths
-	for deadline := time.Now().Add(2 * time.Second); len(late) < 300 && time.Now().Before(deadline); {
-		t0 := time.Now()
-		time.Sleep(nap)
-		late = append(late, time.Since(t0)-nap)
-	}
+	late := wakes()
 	stop.Store(true)
 	if err := <-done; err != nil {
 		t.Fatalf("serial Call: %v", err)
 	}
 
-	slices.Sort(late)
 	median := late[len(late)/2]
-	// 10x the median measured with a P to spare, and a third of the lowest
-	// median measured with both Ps held.
-	if limit := 100 * time.Microsecond; median > limit {
+	// 100 us over the baseline: 10x the median measured with a P to spare, and
+	// a third of the lowest median measured with both Ps held.
+	if limit := base + 100*time.Microsecond; median > limit {
 		t.Fatalf("a goroutine sleeping %v beside serial Calls at GOMAXPROCS=2 woke %v late "+
-			"at the median over %d wakes (max %v), want <= %v: the waiter and the reader "+
-			"held both Ps", nap, median, len(late), late[len(late)-1], limit)
+			"at the median over %d wakes (max %v), want <= %v (%v with no Calls, plus 100 us): "+
+			"the waiter and the reader held both Ps", nap, median, len(late), late[len(late)-1], limit, base)
 	}
-	t.Logf("%d wakes beside serial Calls: median %v late, max %v", len(late), median, late[len(late)-1])
+	t.Logf("%d wakes beside serial Calls: median %v late (%v with none), max %v", len(late), median, base, late[len(late)-1])
 }
 
 // pollResult polls only for a lone call, and only with a P to spare.
@@ -166,12 +187,14 @@ func TestPollResult_Gates(t *testing.T) {
 		{"two in flight", quietMinProcs, 2},
 	} {
 		ch := make(chan callResult, 1)
-		start := time.Now()
-		if _, ok := newState(tc.procs, tc.inFlight).pollResult(ctx, ch); ok {
-			t.Fatalf("%s: pollResult took a result that was never sent", tc.name)
-		}
-		if d := time.Since(start); d >= waiterSpin {
-			t.Fatalf("%s: pollResult polled for %v; it must not poll at all", tc.name, d)
+		s := newState(tc.procs, tc.inFlight)
+		d := minElapsed(5, func() {
+			if _, ok := s.pollResult(ctx, ch); ok {
+				t.Fatalf("%s: pollResult took a result that was never sent", tc.name)
+			}
+		})
+		if d >= waiterSpin {
+			t.Fatalf("%s: pollResult polled for %v at best of 5; it must not poll at all", tc.name, d)
 		}
 	}
 
@@ -191,13 +214,32 @@ func TestPollResult_Gates(t *testing.T) {
 	// An ended context stops the poll at once.
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
-	start := time.Now()
-	if _, ok := newState(quietMinProcs, 1).pollResult(cctx, make(chan callResult, 1)); ok {
-		t.Fatal("pollResult reported a result on a cancelled context")
+	ended := newState(quietMinProcs, 1)
+	d := minElapsed(5, func() {
+		if _, ok := ended.pollResult(cctx, make(chan callResult, 1)); ok {
+			t.Fatal("pollResult reported a result on a cancelled context")
+		}
+	})
+	if d >= waiterSpin {
+		t.Fatalf("pollResult ran %v past a cancelled context at best of 5", d)
 	}
-	if d := time.Since(start); d >= waiterSpin {
-		t.Fatalf("pollResult ran %v past a cancelled context", d)
+}
+
+// minElapsed is the fastest of n runs of f. A poll that does not stop when it
+// should takes the whole spin window on every run, so its fastest run still
+// shows it; a correct one is only slowed by the host, and one run in n that
+// the scheduler leaves alone is enough to show that. A single timed run
+// failed under cgocheck2 on a loaded host (258 us past a cancelled context).
+func minElapsed(n int, f func()) time.Duration {
+	best := time.Duration(1<<63 - 1)
+	for i := 0; i < n; i++ {
+		start := time.Now()
+		f()
+		if d := time.Since(start); d < best {
+			best = d
+		}
 	}
+	return best
 }
 
 // The quiet handoff follows GOMAXPROCS while a handle is open, both ways.
