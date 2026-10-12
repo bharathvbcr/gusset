@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -53,7 +54,10 @@ func scripted(mode string, out *os.File) int {
 			return 1
 		}
 	}
-	time.Sleep(time.Minute)
+	// Alive until the host ends it, as a worker with nothing left to do would
+	// be, but leaving is prompt: stdin closing is the host's Close, so the
+	// worker goes with it instead of holding Close to its whole budget.
+	_, _ = io.Copy(io.Discard, br)
 	return 0
 }
 
