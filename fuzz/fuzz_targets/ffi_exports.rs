@@ -419,6 +419,8 @@ impl Rig {
                         1 => u32::MAX,
                         n => u32::from(n) % 3,
                     };
+                    // -1 for a descriptor that is not open, before and after.
+                    let flags_before = libc::fcntl(fd, libc::F_GETFL);
                     let mut h: *mut Handle = ptr::null_mut();
                     let out = if c.u8().is_multiple_of(16) {
                         ptr::null_mut()
@@ -438,6 +440,14 @@ impl Rig {
                         w_open = false;
                     } else {
                         assert!(h.is_null(), "a refused open wrote a handle");
+                        // The descriptor stays the caller's: still open (or
+                        // still not), with its status flags untouched (no
+                        // O_NONBLOCK left behind by a refused open).
+                        assert_eq!(
+                            libc::fcntl(fd, libc::F_GETFL),
+                            flags_before,
+                            "a refused open changed the caller's descriptor"
+                        );
                     }
                     if w_open {
                         close_fd(w);
