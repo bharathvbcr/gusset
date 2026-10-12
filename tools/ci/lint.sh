@@ -61,7 +61,7 @@ step_gussetvet() { go run ./tools/gussetvet; }
 
 step_staticcheck() {
 	need staticcheck "(${STATICCHECK_VERSION#v})" "go install honnef.co/go/tools/cmd/staticcheck@$STATICCHECK_VERSION" -version || return 1
-	GOTOOLCHAIN=$STATICCHECK_GO staticcheck ./...
+	staticcheck ./...
 }
 
 step_govulncheck() {
@@ -114,7 +114,7 @@ step_forbidden_patterns() {
 # --all-targets: without it clippy skips test targets, and the R3
 # disallowed-method rules go unenforced in exactly the code most likely to
 # reach for unwrap.
-step_cargo_clippy() { cargo clippy --workspace --all-targets -- -D warnings; }
+step_cargo_clippy() { cargo clippy --locked --workspace --all-targets -- -D warnings; }
 
 step_cargo_fmt() { cargo fmt --all -- --check; }
 
