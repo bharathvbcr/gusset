@@ -24,7 +24,10 @@ ARCHIVE ?= $(TARGET_DIR)/release/libgusset.a
 
 # The one place the version is typed is [workspace.package] in Cargo.toml.
 # `cargo pkgid` prints path+file:///.../crates/gusset#0.0.2 (or #gusset@0.0.2).
-GUSSET_VERSION = $(shell cargo pkgid -p gusset 2>/dev/null | sed 's/.*[#@]//')
+# HASH, not a literal '#': GNU Make 3.81 (macOS's make) reads '#' inside
+# $(shell …) as a comment and stops with "unterminated call to function".
+HASH := \#
+GUSSET_VERSION = $(shell cargo pkgid -p gusset 2>/dev/null | sed 's/.*[$(HASH)@]//')
 
 all: build
 
