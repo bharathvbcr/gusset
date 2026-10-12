@@ -17,7 +17,7 @@ completion path works there.
 | :--- | :--- | :--- |
 | `aarch64-apple-darwin` | supported | `unit`, `soak`, `allocator-api`, `r14`, `adopter` (runtime); `cross` (compile) |
 | `x86_64-apple-darwin` | supported | `r14` under Rosetta on the arm64 runner (runtime); `cross` (compile) |
-| `x86_64-unknown-linux-gnu` | supported | `unit`, `race-gc`, `soak`, `cgocheck2`, `memlimit`, `lint`, `bench`, `fuzz`, `r14`, `adopter`, the two floor jobs; nightly `asan`, `miri`, `hammer`, `hammer-heap` (runtime) |
+| `x86_64-unknown-linux-gnu` | supported | `unit`, `race-gc`, `soak`, `cgocheck2`, `memlimit`, `lint`, `bench`, `fuzz`, `r14`, `adopter`, the two floor jobs; nightly `sanitizer` (ASan), `miri`, `hammer`, `hammer-heap` (runtime) |
 | `aarch64-unknown-linux-gnu` | supported | `unit` and `r14` on a native arm64 runner (runtime); `cross` (compile) |
 | `x86_64-unknown-linux-musl` | supported | `musl`, `r14-musl` (runtime), `cross` (compile) |
 | `*-pc-windows-*` | **not supported** | build fails with a named error |
