@@ -5,7 +5,11 @@
 
 mod completion;
 mod engine;
+mod respawn;
 mod submit;
+pub(super) use respawn::{
+    injected_delay, DELAY_BEFORE_CLEAR, DELAY_BEFORE_REMOVE, FAILING_WORKER_MS,
+};
 
 use super::*;
 use crate::header::GUSSET_FLAG_DIAGNOSTIC_ENGINE;
@@ -723,8 +727,16 @@ fn a_panic_after_the_engine_still_completes_the_ticket() {
     assert_eq!(read_ticket(r), ticket);
     assert!(matches!(handle.take(ticket), Ok(JobResult::Panic { .. })));
     assert!(handle.is_poisoned(), "the panic must poison the handle");
-    // The unit left flight: shutdown's drain must not wait on it.
-    assert_eq!(handle.in_flight(), 0);
+    // The unit leaves flight: shutdown's drain must not wait on it. `deliver`
+    // removes the cancel flag after the completion write, so poll.
+    let start = std::time::Instant::now();
+    while handle.in_flight() != 0 {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "the unit never left flight"
+        );
+        std::thread::yield_now();
+    }
     handle.close().must("close");
     // SAFETY: the read end is still this test's.
     unsafe {

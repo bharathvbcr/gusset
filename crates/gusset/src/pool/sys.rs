@@ -341,6 +341,16 @@ pub(crate) const WRITE_TICKET_TIMEOUT: std::time::Duration = std::time::Duration
 pub(crate) const WRITE_TICKET_MAX_BACKOFF: std::time::Duration =
     std::time::Duration::from_millis(8);
 
+/// How long a short write may stay stuck, with no further byte accepted, before
+/// the record is reported torn. Generous on purpose: it only decides when to
+/// give up on a reader that has stopped, and a slow one must never qualify.
+///
+/// On a real pipe this is unreachable: records are at most 64 bytes, under
+/// `PIPE_BUF`, so the kernel writes them whole or not at all, and `open` now
+/// refuses any descriptor that is not a pipe. It stays for a descriptor that
+/// is not (tests hand in a socketpair) so a stuck one cannot hang a worker.
+pub(crate) const TORN_WRITE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// One non-blocking attempt to write a whole completion record (a bare ticket,
 /// or an inline-result record of at most 64 bytes). Records are far below
 /// `PIPE_BUF`, so on a pipe the write is all-or-nothing; the short-write
@@ -361,7 +371,8 @@ pub fn write_record_attempt(fd: i32, bytes: &[u8]) -> Result<()> {
 
     let mut remaining = bytes;
     let mut committed = false;
-    let mut partial_spins = 0u32;
+    let mut stalled_since: Option<std::time::Instant> = None;
+    let mut backoff = std::time::Duration::ZERO;
 
     while !remaining.is_empty() {
         let n = unsafe {
@@ -380,14 +391,23 @@ pub fn write_record_attempt(fd: i32, bytes: &[u8]) -> Result<()> {
                     if !committed {
                         return Err(Error::new(ErrorKind::WouldBlock, "completion pipe full"));
                     }
-                    partial_spins = partial_spins.saturating_add(1);
-                    if partial_spins > 10_000 {
+                    // Time-based, not a spin count: a live reader that is only
+                    // slow (a loaded machine) must not be told it stalled. The
+                    // clock restarts whenever a byte lands.
+                    let stalled_since = *stalled_since.get_or_insert_with(std::time::Instant::now);
+                    if stalled_since.elapsed() >= TORN_WRITE_DEADLINE {
                         return Err(Error::new(
                             ErrorKind::TimedOut,
                             "torn completion write; pipe stayed full after a short write",
                         ));
                     }
-                    std::thread::yield_now();
+                    if backoff.is_zero() {
+                        std::thread::yield_now();
+                        backoff = std::time::Duration::from_micros(50);
+                    } else {
+                        std::thread::sleep(backoff);
+                        backoff = (backoff * 2).min(WRITE_TICKET_MAX_BACKOFF);
+                    }
                     continue;
                 }
                 _ => return Err(err),
@@ -396,7 +416,8 @@ pub fn write_record_attempt(fd: i32, bytes: &[u8]) -> Result<()> {
             return Err(Error::new(ErrorKind::WriteZero, "pipe write zero bytes"));
         } else {
             committed = true;
-            partial_spins = 0;
+            stalled_since = None;
+            backoff = std::time::Duration::ZERO;
             remaining = &remaining[n as usize..];
         }
     }

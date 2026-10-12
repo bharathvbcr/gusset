@@ -242,6 +242,8 @@ impl Handle {
                 )),
             };
             let Err(msg) = outcome else { continue };
+            #[cfg(test)]
+            super::tests::injected_delay(&super::tests::DELAY_BEFORE_REMOVE);
             let removed = {
                 let mut workers = lock_recover(&self.workers);
                 workers
@@ -352,6 +354,10 @@ impl Handle {
                                 worker_id
                             );
                             crate::ffi::log_event(&format!("gusset: {}", msg));
+                            #[cfg(test)]
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                super::tests::FAILING_WORKER_MS.load(Ordering::Acquire),
+                            ));
                             // The spawner may have given up waiting; nothing to do then.
                             let _ = ready_tx.send(Err(msg));
                             return;
@@ -482,6 +488,14 @@ impl Handle {
         {
             return Ok(());
         }
+        // One respawn at a time, across the wait for startup reports too. The
+        // condition is re-read once the lock is held: whoever held it before
+        // may have finished the job (or failed it and left it pending).
+        let _respawn = lock_recover(&self.respawn_lock);
+        if self.exited.load(Ordering::Acquire) == 0 && !self.respawn_pending.load(Ordering::Acquire)
+        {
+            return Ok(());
+        }
         let mut workers = lock_recover(&self.workers);
         // Re-check under the lock: close drains this vec and then joins. A spawn
         // that raced past a pre-lock closed check would leave JoinHandles nobody
@@ -519,6 +533,8 @@ impl Handle {
         // Not across the wait: close takes this lock outside its join budget.
         drop(workers);
         self.await_ready(starting)?;
+        #[cfg(test)]
+        super::tests::injected_delay(&super::tests::DELAY_BEFORE_CLEAR);
         self.respawn_pending.store(false, Ordering::Release);
 
         Ok(())
