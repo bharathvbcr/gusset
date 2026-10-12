@@ -86,7 +86,7 @@ archive() { echo "$out/cargo_$1/$rel/libengine_${1%%_*}.a"; }
 cargo_build() { # dir target-dir toolchain-or-empty [cargo args...]
 	dir=$1 tdir=$2 tc=$3
 	shift 3
-	(cd "$dir" && CARGO_TARGET_DIR="$tdir" cargo ${tc:+"+$tc"} build --release -q \
+	(cd "$dir" && CARGO_TARGET_DIR="$tdir" cargo ${tc:+"+$tc"} build --locked --release -q \
 		${target:+--target "$target"} "$@")
 }
 
