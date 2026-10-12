@@ -1,4 +1,4 @@
-.PHONY: all build test bench bench-crossover bench-scaling lint ci-local docs docs-check cross fuzz clean install uninstall
+.PHONY: all build test bench bench-crossover bench-scaling lint ci-local docs docs-check cross fuzz clean install install-build uninstall
 
 export PATH := $(PATH):$(shell go env GOPATH)/bin
 
@@ -7,6 +7,24 @@ LIBDIR ?= $(PREFIX)/lib
 INCLUDEDIR ?= $(PREFIX)/include
 BINDIR ?= $(PREFIX)/bin
 PKGCONFIGDIR ?= $(LIBDIR)/pkgconfig
+# Staging root for packagers. Every file lands under $(DESTDIR)<dir>; the
+# generated gusset.pc names the final <dir>, never DESTDIR.
+DESTDIR ?=
+
+# Cargo's output directory, as cargo itself resolves it from the environment.
+TARGET_DIR ?= $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)
+
+# The archive `install` puts at $(LIBDIR)/libgusset.a. By default Gusset's own,
+# built here. Pass ARCHIVE=<umbrella>/target/release/libgusset.a to install the
+# adopter's umbrella archive instead (docs/adoption.md, Option A): that is the
+# only archive a Go binary can link, so it is the one gusset.pc must describe.
+# An explicit ARCHIVE is not rebuilt.
+INSTALL_BUILD := $(if $(filter undefined,$(origin ARCHIVE)),install-build)
+ARCHIVE ?= $(TARGET_DIR)/release/libgusset.a
+
+# The one place the version is typed is [workspace.package] in Cargo.toml.
+# `cargo pkgid` prints path+file:///.../crates/gusset#0.0.2 (or #gusset@0.0.2).
+GUSSET_VERSION = $(shell cargo pkgid -p gusset 2>/dev/null | sed 's/.*[#@]//')
 
 all: build
 
@@ -15,24 +33,47 @@ build:
 	go generate ./internal/ffi
 	go build ./...
 
-install: build
-	@mkdir -p $(LIBDIR) $(INCLUDEDIR) $(BINDIR) $(PKGCONFIGDIR)
-	@cp target/release/libgusset.a $(LIBDIR)/libgusset.a
-	@chmod 644 $(LIBDIR)/libgusset.a
-	@cp internal/ffi/gusset.h $(INCLUDEDIR)/gusset.h
-	@chmod 644 $(INCLUDEDIR)/gusset.h
-	@sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@VERSION@|0.0.2|g' gusset.pc.in > $(PKGCONFIGDIR)/gusset.pc
-	@chmod 644 $(PKGCONFIGDIR)/gusset.pc
-	@go build -o $(BINDIR)/gussetvet ./tools/gussetvet
-	@chmod 755 $(BINDIR)/gussetvet
-	@echo "Gusset installed successfully to $(PREFIX)"
+# Installing builds the archive and gussetvet only. `build` is not a dependency:
+# its `go generate` rewrites the tracked internal/ffi/archive_hash.go, and an
+# install must leave the source tree exactly as it found it.
+install-build:
+	cargo build --release
+
+# Shell-quote a make value: 'it'\''s'.
+shq = '$(subst ','\'',$(1))'
+
+# gusset.pc is filled by awk reading the values from the environment, so a path
+# holding `|`, `&` or `\` is copied byte for byte. pkg-config splits Libs and
+# Cflags on whitespace, so a directory with whitespace in it is refused rather
+# than installed as a file that cannot be used.
+install: $(INSTALL_BUILD)
+	@version=$(call shq,$(GUSSET_VERSION)); \
+	case "$$version" in [0-9]*.[0-9]*.[0-9]*) ;; \
+		*) echo "install: cannot read the version from Cargo.toml (cargo pkgid gave '$$version')" >&2; exit 1;; esac; \
+	for d in $(call shq,$(LIBDIR)) $(call shq,$(INCLUDEDIR)); do \
+		case "$$d" in *[[:space:]]*) echo "install: '$$d' contains whitespace; pkg-config cannot use it" >&2; exit 1;; esac; \
+	done; \
+	[ -f $(call shq,$(ARCHIVE)) ] || { echo "install: archive $(call shq,$(ARCHIVE)) does not exist" >&2; exit 1; }; \
+	go build -o $(call shq,$(TARGET_DIR))/gussetvet ./tools/gussetvet || exit 1; \
+	install -d $(call shq,$(DESTDIR)$(LIBDIR)) $(call shq,$(DESTDIR)$(INCLUDEDIR)) \
+		$(call shq,$(DESTDIR)$(BINDIR)) $(call shq,$(DESTDIR)$(PKGCONFIGDIR)) || exit 1; \
+	install -m 644 $(call shq,$(ARCHIVE)) $(call shq,$(DESTDIR)$(LIBDIR))/libgusset.a || exit 1; \
+	install -m 644 internal/ffi/gusset.h $(call shq,$(DESTDIR)$(INCLUDEDIR))/gusset.h || exit 1; \
+	install -m 755 $(call shq,$(TARGET_DIR))/gussetvet $(call shq,$(DESTDIR)$(BINDIR))/gussetvet || exit 1; \
+	GUSSET_PC_LIBDIR=$(call shq,$(LIBDIR)) GUSSET_PC_INCLUDEDIR=$(call shq,$(INCLUDEDIR)) GUSSET_PC_VERSION="$$version" \
+	awk 'function repl(s, from, to,   out, i) { out = ""; while ((i = index(s, from)) > 0) { out = out substr(s, 1, i - 1) to; s = substr(s, i + length(from)) } return out s } \
+		{ $$0 = repl($$0, "@LIBDIR@", ENVIRON["GUSSET_PC_LIBDIR"]); $$0 = repl($$0, "@INCLUDEDIR@", ENVIRON["GUSSET_PC_INCLUDEDIR"]); \
+		  $$0 = repl($$0, "@VERSION@", ENVIRON["GUSSET_PC_VERSION"]); print }' gusset.pc.in \
+		> $(call shq,$(DESTDIR)$(PKGCONFIGDIR))/gusset.pc || exit 1; \
+	chmod 644 $(call shq,$(DESTDIR)$(PKGCONFIGDIR))/gusset.pc; \
+	echo "Gusset $$version installed to" $(call shq,$(DESTDIR)$(PREFIX))
 
 uninstall:
-	@rm -f $(LIBDIR)/libgusset.a
-	@rm -f $(INCLUDEDIR)/gusset.h
-	@rm -f $(PKGCONFIGDIR)/gusset.pc
-	@rm -f $(BINDIR)/gussetvet
-	@echo "Gusset uninstalled from $(PREFIX)"
+	@rm -f $(call shq,$(DESTDIR)$(LIBDIR))/libgusset.a
+	@rm -f $(call shq,$(DESTDIR)$(INCLUDEDIR))/gusset.h
+	@rm -f $(call shq,$(DESTDIR)$(PKGCONFIGDIR))/gusset.pc
+	@rm -f $(call shq,$(DESTDIR)$(BINDIR))/gussetvet
+	@echo Gusset uninstalled from $(call shq,$(DESTDIR)$(PREFIX))
 
 test:
 	cargo test --workspace

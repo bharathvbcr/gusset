@@ -216,10 +216,13 @@ flowchart LR
 ## Installation
 
 ### One-Command Install
-Install Gusset runtime library, C headers, pkg-config definition, and `gussetvet` linter:
+Install Gusset's runtime library, C header, pkg-config definition, and `gussetvet` linter from a **release tag**, never from `main`. Fetch the script from the tag you want (the script at tag `T` clones `T` by default), read it, then run it:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bharathvbcr/gusset/main/install.sh | bash
+curl -fsSLO https://raw.githubusercontent.com/bharathvbcr/gusset/<tag>/install.sh
+less install.sh
+bash install.sh
 ```
+`GUSSET_REF` overrides the ref to clone. To verify what gets built, pin the commit you reviewed: `GUSSET_REF=<tag> GUSSET_COMMIT=<sha> bash install.sh` stops before building if the tag resolves to any other commit (`git ls-remote https://github.com/bharathvbcr/gusset <tag>` prints it). Piped into `bash`, the script never builds the current directory. Scripts from tags up to and including v0.0.2 predate this and clone `main`; use a later tag's script.
 
 ### Local / From Source
 ```bash
@@ -227,7 +230,7 @@ git clone https://github.com/bharathvbcr/gusset.git
 cd gusset
 make install
 ```
-By default, this installs into `~/.local` (or `/usr/local` if run with write permissions or as root). Custom prefix can be provided via `PREFIX=/path/to/prefix make install`.
+By default, this installs into `~/.local` (or `/usr/local` if run with write permissions or as root). Custom prefix can be provided via `PREFIX=/path/to/prefix make install`; `DESTDIR` stages for packagers. `./install.sh` from a checkout installs the same files. The installed archive is Gusset's own; a Go binary links the archive built from its umbrella crate, installed with `make install ARCHIVE=...` (see [`docs/adoption.md`](docs/adoption.md)).
 
 ---
 

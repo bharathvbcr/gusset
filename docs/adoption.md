@@ -61,7 +61,8 @@ crate-type = ["staticlib"]
 [dependencies]
 # Renamed, because this crate cannot also be called `gusset`. Gusset is not on
 # crates.io: pin a release tag, or use `path = ".../gusset/crates/gusset"` for a
-# local checkout, as the known adopters do.
+# local checkout, as the known adopters do. `Handle.Discard` (step 4) is newer than
+# v0.0.2: until a later tag exists, use `rev = "<commit>"` or `path`.
 gusset_core = { package = "gusset", git = "https://github.com/bharathvbcr/gusset", tag = "v0.0.2" }
 my-engine  = { path = "../my-engine" }
 
@@ -224,9 +225,10 @@ ld: library 'gusset' not found
 
 ```mermaid
 flowchart LR
-    subgraph OptionA ["Option A: pkg-config (Recommended)"]
-        Install["make install PREFIX=/usr/local"] --> Artifacts["libgusset.a\ngusset.h\ngusset.pc"]
-        Artifacts --> GoPkgConfig["PKG_CONFIG_PATH=/usr/local/lib/pkgconfig\ngo build -tags gusset_pkgconfig ./..."]
+    subgraph OptionA ["Option A: pkg-config (installed umbrella archive)"]
+        Build["cargo build --release\n(in umbrella crate)"] --> Install["make install ARCHIVE=umbrella/target/release/libgusset.a\nPREFIX=/opt/myservice (in a Gusset checkout)"]
+        Install --> Artifacts["libgusset.a (yours)\ngusset.h\ngusset.pc"]
+        Artifacts --> GoPkgConfig["PKG_CONFIG_PATH=/opt/myservice/lib/pkgconfig\ngo build -tags gusset_pkgconfig ./..."]
     end
 
     subgraph OptionB ["Option B: Direct Linker Flags"]
@@ -237,12 +239,34 @@ flowchart LR
 
 Pick one of the two supported ways out.
 
-### Option A — pkg-config (recommended for installed libraries)
+### Option A — pkg-config, for the umbrella archive you install
+
+A Go binary links exactly one archive: the umbrella's (step 1). `-tags
+gusset_pkgconfig` makes cgo ask `pkg-config gusset` for its flags, so the
+`gusset.pc` it finds must describe *your* `libgusset.a`. Installing Gusset's own
+archive does not work. It holds none of your engine's symbols, and the link fails
+with `Undefined symbols ... _myservice_engine_init`.
+
+So hand `make install` your archive. Run it in a Gusset checkout (the one your
+`path` dependency points at, or a clone at the tag you depend on):
 
 ```bash
-make install PREFIX=/usr/local          # writes libgusset.a, gusset.h, gusset.pc
-PKG_CONFIG_PATH=/usr/local/lib/pkgconfig go build -tags gusset_pkgconfig ./...
+cargo build --release --manifest-path ./engine/Cargo.toml
+make -C /path/to/gusset install \
+  ARCHIVE="$PWD/engine/target/release/libgusset.a" PREFIX=/opt/myservice
+PKG_CONFIG_PATH=/opt/myservice/lib/pkgconfig go build -tags gusset_pkgconfig ./...
 ```
+
+`make install` writes `libgusset.a` (your archive, not rebuilt), `gusset.h`,
+`gusset.pc` and `gussetvet` under `PREFIX`; `LIBDIR`, `INCLUDEDIR`, `BINDIR` and
+`DESTDIR` override where, and the `.pc` names the directories the files
+finally live in. The version in it is Gusset's, read from `Cargo.toml`. Run it
+again after every umbrella rebuild: the installed archive is a copy. Paths with
+whitespace are refused, because pkg-config cannot split them.
+
+`install.sh` (and `make install` without `ARCHIVE`) installs Gusset's own
+archive. That is what you want for a C host or for Gusset's own diagnostic
+engine, not for an adopter's Go binary.
 
 ### Option B — point the linker at the archive
 
@@ -254,8 +278,24 @@ cargo build --release --manifest-path ./engine/Cargo.toml
 CGO_LDFLAGS="-L$PWD/engine/target/release" go build ./...
 ```
 
-Both were verified end to end against the module-cache layout, not just in a source
-checkout.
+Both options are exercised by `tests/adopter/walkthrough.sh`, which extracts the
+code blocks from this page, builds a toy adopter against a read-only copy of the
+module that has no `target/` (the module-cache layout), and runs it. CI runs it
+on Linux and macOS (`.github/workflows/adopter.yml`).
+
+### Checking your shim with `gussetvet`
+
+`make install` puts `gussetvet` in `BINDIR`. Point it at the directory holding your
+cgo shim and at the list of C symbols that shim imports:
+
+```bash
+gussetvet -exports engine-exports.txt ./internal/engine
+```
+
+The list is one symbol per line (`#` comments allowed). It checks that each symbol
+carries `#cgo noescape` and `#cgo nocallback` (R5), has a Go wrapper, and that
+nothing in your module calls `C.free` or exports a Go callback. An empty or missing
+list is an error: nothing was checked.
 
 ## 4. Use the handle
 
@@ -385,9 +425,9 @@ no copy on the worker and none on the cgo thread, and the memory is 64-byte
 aligned:
 
 ```rust
-use gusset::{BufferAlloc, JobOutput};
+use gusset_core::{BufferAlloc, JobOutput};
 
-gusset::register_engine(7, |ctx, input| {
+gusset_core::register_engine(7, |ctx, input| {
     let mut out: Vec<u8, BufferAlloc> = Vec::new_in(BufferAlloc);
     out.try_reserve(estimate(input)).map_err(|e| e.to_string())?; // fallible
     render_into(&mut out, input, ctx)?;
