@@ -393,12 +393,13 @@ use the warm `devmap mcp`.
 
 The audited document's firewall contained a fatal vulnerability: converting panic messages via `CString::new(msg).unwrap()`. A panic message with an embedded NUL byte panicked a second time inside the unwinding path, causing an uncatchable `SIGABRT` that destroyed the Go process.
 
-Gusset's panic firewall passes all 5 cases in `tests/panic_zoo/`:
+Gusset's panic firewall passes all 6 panic cases in `tests/panic_zoo/` (plus a success-path control), each asserted against the engine's exact panic text and location:
 1. `&str` panic payload
 2. `String` panic payload
 3. Non-string arbitrary payload (`panic_any(42)`)
 4. **Embedded NUL byte** in panic message (survives without SIGABRT)
 5. Panic inside the error's `Display` implementation
+6. A panic payload whose destructor panics again (`panic_any` of a type with a panicking `Drop`)
 
 ---
 

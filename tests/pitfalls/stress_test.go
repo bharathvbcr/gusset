@@ -124,56 +124,67 @@ func TestBug_PanicLocationWorkerThread(t *testing.T) {
 	}
 }
 
-// TestBug_SemaphoreInFlightBreachOnTimeout proves that when a caller's context times out,
-// the semaphore was prematurely released while the worker was still executing, allowing
-// another caller to enter and breach Invariant I4 (in-flight calls bounded by pool size).
+// TestBug_SemaphoreInFlightBreachOnTimeout proves that when a caller's context times out
+// against a NON-COOPERATIVE engine, the pool permit stays with the still-running job.
+// Releasing it at the caller's deadline would let another caller in while the
+// worker is busy and breach Invariant I4 (in-flight calls bounded by pool size).
+//
+// The job is diagnostic mode 17: it ignores cancellation (never calls ctx.check()),
+// so the Rust side cannot end it early and the test cannot pass by the engine
+// happening to stop. Mode 17 also counts itself in an engine-side atomic, so the
+// result does not rest on Go's view alone: the engine reports the most jobs it ever
+// ran at once, and that must be 1 on a pool of 1.
+//
+// This test used to log instead of failing, and took the log-only branch in every
+// run it was checked in. Every assertion here is a t.Fatal.
 func TestBug_SemaphoreInFlightBreachOnTimeout(t *testing.T) {
 	const poolSize = 1
+	const jobHold = 250 // ms the first job holds the engine (mode 17 takes one byte)
+
 	h, err := gusset.Open(gusset.WithPoolSize(poolSize), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
 	defer h.Close()
+	_ = peakInEngine(t, h) // reset the gauge
 
-	// Caller 1 submits slow job (takes 100ms) with 20ms timeout
+	// Caller 1: a 20 ms deadline against a 250 ms non-cooperative job.
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel1()
-
-	var started1, finished1 atomic.Bool
-	go func() {
-		started1.Store(true)
-		_, _ = h.Call(ctx1, []byte{5, 10}) // 10 iterations * 10ms = 100ms
-		finished1.Store(true)
-	}()
-
-	// Wait for Caller 1 to start and then time out
-	time.Sleep(35 * time.Millisecond)
-	if !started1.Load() {
-		t.Fatal("caller 1 never started")
+	jobStart := time.Now()
+	_, err1 := h.Call(ctx1, holdInEngine(jobHold))
+	if !errors.Is(err1, context.DeadlineExceeded) {
+		t.Fatalf("caller 1: want its own deadline, got %v", err1)
+	}
+	if time.Since(jobStart) >= jobHold*time.Millisecond/2 {
+		t.Fatalf("caller 1 was held until the job ended (%v); the deadline must release the caller", time.Since(jobStart))
 	}
 
-	t.Logf("finished1 at 35ms: %v", finished1.Load())
-
-	var caller2Acquired atomic.Bool
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	// Caller 1 has returned but its job has ~230 ms left to run. A second caller
+	// must NOT get a permit: the worker is still inside the engine.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel2()
+	t2, err := h.Submit(ctx2, holdInEngine(1))
+	if err == nil {
+		_, _ = h.Wait(context.Background(), t2)
+		t.Fatalf("a second job was admitted while the first was still running in the engine (I4 breach)")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("caller 2 should have timed out waiting for a permit, got %v", err)
+	}
 
-	// Caller 2 attempts to Submit while Caller 1 is still in-flight.
-	// We want to test that Caller 2 CANNOT acquire the semaphore permit
-	// until Caller 1 has actually finished draining!
-	if !finished1.Load() {
-		// If Caller 1 is still running, Submit must fail with timeout (no permit available)
-		t2, err := h.Submit(ctx2, []byte{0})
-		if err == nil {
-			caller2Acquired.Store(true)
-			_, _ = h.Wait(context.Background(), t2)
-		}
-		if caller2Acquired.Load() {
-			t.Fatalf("semaphore token was prematurely available while worker was still running cancelled job (I4 breach)")
-		}
-	} else {
-		// Caller 1 has finished and drained properly!
-		t.Logf("Caller 1 properly finished and drained before releasing permit!")
+	// Once the first job really finishes the permit comes back and work flows.
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel3()
+	if _, err := h.Call(ctx3, holdInEngine(1)); err != nil {
+		t.Fatalf("the permit was never returned after the abandoned job finished: %v", err)
+	}
+	if time.Since(jobStart) < jobHold*time.Millisecond {
+		t.Fatalf("caller 3 ran %v after submit, before the 250 ms job finished: the permit was released early (I4)", time.Since(jobStart))
+	}
+
+	if peak := peakInEngine(t, h); peak != poolSize {
+		t.Fatalf("engine saw a peak of %d concurrent jobs on a pool of %d (I4)", peak, poolSize)
 	}
 }
 

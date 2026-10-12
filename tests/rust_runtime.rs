@@ -16,7 +16,7 @@ use gusset::pool::{Handle, MAX_POOL_SIZE};
 use std::time::{Duration, Instant};
 
 mod common;
-use common::{make_pipe, read_ticket_within};
+use common::{make_pipe, read_ticket_within, Must};
 
 /// Reports whether a descriptor number is currently open in this process.
 fn fd_is_open(fd: i32) -> bool {
@@ -577,5 +577,93 @@ fn shared_ticket_reader_reassembles_a_split_ticket_and_refuses_a_torn_one() {
     assert_eq!(read_ticket_within(r, Duration::from_secs(5)), Some(ticket));
     assert!(writer.join().is_ok());
     assert_eq!(read_ticket_within(r, Duration::from_secs(5)), None);
+    unsafe { libc::close(r) };
+}
+
+/// I3 with no help from Go: Go's context also sets the cancel flag when its
+/// deadline fires, which masks a Rust deadline that does nothing. Here only
+/// `timeout_ns` is set and the cancel flag is never touched, so the only thing
+/// that can stop a multi-unit job early is `JobContext::check` reading the
+/// deadline Rust derived from the header.
+///
+/// Diagnostic mode 5 checks once per 10 ms unit and runs `input[1]` units: 200
+/// units is 2 s of work against a 60 ms deadline. The result must be
+/// `Cancelled(DeadlineExceeded)`, delivered within one unit of the deadline,
+/// not after the job ran out.
+#[test]
+fn deadline_alone_stops_a_multi_unit_job_within_one_unit() {
+    use gusset::header::CancelReason;
+    use gusset::pool::JobResult;
+
+    const DEADLINE: Duration = Duration::from_millis(60);
+    let (r, w) = make_pipe();
+    let handle = Handle::open(1, w).must("open");
+    let header = CallHeader {
+        timeout_ns: DEADLINE.as_nanos() as u64,
+        flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+        ..Default::default()
+    };
+
+    let started = Instant::now();
+    let ticket = handle.submit(header, &[5, 200], 0).must("submit");
+    assert_eq!(read_ticket_within(r, Duration::from_secs(5)), Some(ticket));
+    let elapsed = started.elapsed();
+
+    match handle.take(ticket).must("take") {
+        JobResult::Cancelled(CancelReason::DeadlineExceeded) => {}
+        other => {
+            panic!("want Cancelled(DeadlineExceeded) from the Rust deadline alone, got {other:?}")
+        }
+    }
+    assert!(
+        elapsed >= DEADLINE,
+        "stopped after {elapsed:?}, before the {DEADLINE:?} deadline"
+    );
+    // One 10 ms unit past the deadline plus scheduler slack; the full job is 2 s.
+    assert!(
+        elapsed < DEADLINE + Duration::from_millis(400),
+        "took {elapsed:?} to notice a {DEADLINE:?} deadline: the deadline is not enforced in Rust (I3)"
+    );
+    assert!(handle.close().is_ok());
+    unsafe { libc::close(r) };
+}
+
+/// The same deadline path at its edges: a timeout that has already passed by
+/// the time the worker starts is refused before any unit runs, and a timeout
+/// too large to add to an `Instant` never fires early.
+#[test]
+fn deadline_edges_expire_at_once_or_never_early() {
+    use gusset::header::CancelReason;
+    use gusset::pool::JobResult;
+
+    let (r, w) = make_pipe();
+    let handle = Handle::open(1, w).must("open");
+
+    let expired = CallHeader {
+        timeout_ns: 1,
+        flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+        ..Default::default()
+    };
+    let started = Instant::now();
+    let t1 = handle.submit(expired, &[5, 200], 0).must("submit expired");
+    assert_eq!(read_ticket_within(r, Duration::from_secs(5)), Some(t1));
+    assert!(started.elapsed() < Duration::from_millis(400));
+    assert!(matches!(
+        handle.take(t1).must("take"),
+        JobResult::Cancelled(CancelReason::DeadlineExceeded)
+    ));
+
+    let far = CallHeader {
+        timeout_ns: u64::MAX,
+        flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+        ..Default::default()
+    };
+    let t2 = handle.submit(far, &[5, 3], 0).must("submit far");
+    assert_eq!(read_ticket_within(r, Duration::from_secs(5)), Some(t2));
+    match handle.take(t2).must("take") {
+        JobResult::Ok(out) => assert_eq!(out, vec![5, 0]),
+        other => panic!("a u64::MAX timeout must not expire a 30 ms job, got {other:?}"),
+    }
+    assert!(handle.close().is_ok());
     unsafe { libc::close(r) };
 }

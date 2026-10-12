@@ -42,7 +42,7 @@ make test
 ```
 This runs:
 - `cargo test --workspace`: 20 Rust unit and integration tests (including symbol export verification and header type diffs).
-- `go test -v ./...`: Go unit tests, 5-case panic zoo (`tests/panic_zoo`), and 13 pitfall tests (`tests/pitfalls`).
+- `go test -v ./...`: Go unit tests, 6-case panic zoo (`tests/panic_zoo`), and 13 pitfall tests (`tests/pitfalls`).
 
 ### 3. Run Linters and Custom Analyzers
 ```bash
