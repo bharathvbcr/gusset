@@ -289,14 +289,13 @@ func TestNegativeBSDNameLengthIsRefused(t *testing.T) {
 // 8-byte round-up of an already aligned object would show.
 func TestArchivePaddingAtEveryAlignment(t *testing.T) {
 	bsd := func(data []byte) []byte { return append([]byte("odd.o\x00\x00\x00"), data...) }
-	for _, n := range []int{512, 513, 515, 519, 520} {
+	for n, want := range map[int]int{512: 0, 513: 7, 515: 5, 519: 1, 520: 0} { // want is typed, not computed by roundup8
 		obj := bytes.Repeat([]byte{0xcf}, n)
 		o := filepath.Join(t.TempDir(), "odd.o")
 		if err := os.WriteFile(o, obj, 0o644); err != nil {
 			t.Fatal(err)
 		}
 		withTail := func(k int) []byte { return append(append([]byte(nil), obj...), bytes.Repeat([]byte{'\n'}, k)...) }
-		want := roundup8(n) - n
 		if err := archiveHoldsExactly(arFile(t, "#1/8", bsd(withTail(want))), o); err != nil {
 			t.Errorf("%d bytes with the %d-byte padding Apple writes was refused: %v", n, want, err)
 		}
