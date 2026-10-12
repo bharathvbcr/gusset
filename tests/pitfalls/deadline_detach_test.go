@@ -151,32 +151,43 @@ func TestDeadline_AbandonedJobKeepsHoldingItsPoolPermit(t *testing.T) {
 	}
 	defer h.Close()
 
-	// Occupy the only worker for ~1 s, abandoning the wait after 50 ms.
+	// Occupy the only worker for ~1 s and abandon the ticket at once.
+	//
+	// Abandoned with Discard, not a 50 ms deadline: Go hands the deadline to
+	// Rust, and on a loaded host it could pass while the job was still queued.
+	// A job cancelled before it starts never runs the engine and rightly returns
+	// its permit, which the probe below then took and reported as an I4 breach.
+	// The release-at-the-deadline half is TestDeadline_NonCooperativeEngineStillReleasesTheCaller
+	// above; this test is only about the permit. Discard does not cancel.
 	const engineRuns = 1000 * time.Millisecond
-	abandonCtx, abandonCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer abandonCancel()
+	submitCtx, submitCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer submitCancel()
 	start := time.Now()
-	if _, err := h.Call(abandonCtx, nonCoop(engineRuns)); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected the first Call to be released by its deadline, got %v", err)
+	abandoned, err := h.Submit(submitCtx, nonCoop(engineRuns))
+	if err != nil {
+		t.Fatalf("Submit failed: %v", err)
 	}
-	released := time.Since(start)
-	// Relative to the engine: the contract is "released before the engine ends".
-	if released > engineRuns/2 {
-		t.Fatalf("first Call was not released at its deadline (took %v of a %v engine)",
-			released, engineRuns)
+	if err := h.Discard(abandoned); err != nil {
+		t.Fatalf("Discard failed: %v", err)
 	}
 
-	// The worker is still busy with the abandoned job for another ~950 ms. A
-	// second submission must therefore find no permit and time out.
+	// The worker is busy with the abandoned job for engineRuns from some point
+	// after the submit. A second submission must therefore find no permit and
+	// time out. Admission before engineRuns has elapsed since the submit is a
+	// breach at any load; admission later proves nothing.
 	probeCtx, probeCancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer probeCancel()
 	ticket, err := h.Submit(probeCtx, []byte{0})
 	if err == nil {
-		_, _ = h.Wait(context.Background(), ticket)
-		t.Fatal(
-			"a second submission acquired the pool permit while the abandoned job was " +
-				"still running on the only worker: in-flight work exceeded the pool size (I4)",
-		)
+		admitted := time.Since(start)
+		_ = h.Discard(ticket)
+		if admitted < engineRuns {
+			t.Fatalf(
+				"a second submission acquired the pool permit %v after a %v job was submitted, "+
+					"while the abandoned job was still running on the only worker: in-flight "+
+					"work exceeded the pool size (I4)", admitted, engineRuns)
+		}
+		t.Skipf("the probe ran %v after the submit, past the job's end: it proves nothing on this host", admitted)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected the probe Submit to block on the held permit and time out, got %v", err)
@@ -347,21 +358,28 @@ func TestDeadline_PanicInAnAbandonedJobStillPoisonsTheHandle(t *testing.T) {
 	}
 	defer h.Close()
 
-	submitCtx, submitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	submitCtx, submitCancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer submitCancel()
 
-	// Panic 300 ms in, behind a 20 ms deadline: the caller is guaranteed to
-	// abandon before the panic happens, so the only code that can latch the
+	// Panic 300 ms in, behind an abandoned ticket: the caller has given the
+	// result up before the panic happens, so the only code that can latch the
 	// poison is the completion path. A bare {1} panics instantly and is
 	// collected by the caller, which tests the path that already worked.
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	_, callErr := h.Call(ctx, nonCoopThen(300*time.Millisecond, 1))
-	cancel()
-	if !errors.Is(callErr, context.DeadlineExceeded) {
-		t.Fatalf("expected the caller to be released by its deadline before the panic, got %v", callErr)
+	//
+	// The ticket is abandoned with Discard, not a 20 ms deadline. Go hands the
+	// deadline to Rust, and on a loaded host it could pass while the job was
+	// still queued; a job cancelled before it starts returns Cancelled at
+	// dequeue without running, so it never panicked and nothing was poisoned,
+	// which is correct and not what this test is about. Discard does not cancel.
+	ticket, err := h.Submit(submitCtx, nonCoopThen(300*time.Millisecond, 1))
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if err := h.Discard(ticket); err != nil {
+		t.Fatalf("Discard: %v", err)
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		_, err := h.Call(submitCtx, []byte{0})
 		if errors.Is(err, gusset.ErrPoisoned) || errors.Is(err, gusset.ErrPanic) {

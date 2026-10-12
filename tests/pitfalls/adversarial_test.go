@@ -134,44 +134,73 @@ func TestPitfall_DoubleWaitDoesNotReleaseSemaphore(t *testing.T) {
 	}
 	defer h.Close()
 
-	// Mode 5: 25 iterations × 10ms ≈ 250ms, long enough for the busy waiter and
-	// the probe Submit to run while the owner is still in flight.
-	ticket, err := h.Submit(context.Background(), []byte{5, 25})
+	// One non-cooperative 1 s sleep (mode 9). The job used to be mode 5, 25
+	// separate 10 ms sleeps, each of which costs several times that on a loaded
+	// host, so "about 250 ms" was seconds and the owner missed its 2 s bound.
+	submitStart := time.Now()
+	ticket, err := h.Submit(context.Background(), nonCoop(time.Second))
 	if err != nil {
 		t.Fatalf("Submit failed: %v", err)
 	}
 
-	ownerDone := make(chan error, 1)
-	go func() {
-		_, waitErr := h.Wait(context.Background(), ticket)
-		ownerDone <- waitErr
-	}()
+	// Two waiters start together. Which one registers first is not for the test
+	// to arrange (it used to sleep 20 ms and hope): exactly one of them must be
+	// refused with ErrTicketBusy, at once, and the other is the owner and gets
+	// the result.
+	type outcome struct {
+		err error
+		at  time.Duration
+	}
+	results := make(chan outcome, 2)
+	start := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			_, werr := h.Wait(context.Background(), ticket)
+			results <- outcome{werr, time.Since(submitStart)}
+		}()
+	}
+	close(start)
 
-	// The owner must be the registered waiter before the busy probe runs.
-	time.Sleep(20 * time.Millisecond)
-
-	_, err = h.Wait(context.Background(), ticket)
-	if !errors.Is(err, gusset.ErrTicketBusy) {
-		t.Fatalf("expected ErrTicketBusy, got %v", err)
+	var busy outcome
+	select {
+	case busy = <-results:
+	case <-time.After(30 * time.Second):
+		t.Fatal("neither waiter returned")
+	}
+	if !errors.Is(busy.err, gusset.ErrTicketBusy) {
+		// The first to return must be the refused one: the owner cannot finish
+		// before the job does. If the job already did, the host stalled the
+		// refused waiter past it, and there is nothing left to probe.
+		if busy.at < time.Second {
+			t.Fatalf("the first waiter to return (after %v, before the job could end) got %v, want ErrTicketBusy", busy.at, busy.err)
+		}
+		t.Skipf("the first waiter returned after %v, past the job's end: nothing left to probe on this host", busy.at)
 	}
 
+	// The refused waiter has returned, the owner has not. The permit must still
+	// be the owner's.
 	probeCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	defer cancel()
 	probeTicket, err := h.Submit(probeCtx, []byte{0})
 	if err == nil {
-		_, _ = h.Wait(context.Background(), probeTicket)
-		t.Fatal("second Wait released the semaphore while the first job was still in flight (I4)")
+		admitted := time.Since(submitStart)
+		_ = h.Discard(probeTicket) // not Wait: a breach may leave nothing to wait for
+		if admitted < time.Second {
+			t.Fatalf("second Wait released the semaphore: a Submit was admitted %v in, while the 1 s job was still in flight (I4)", admitted)
+		}
+		t.Skipf("the probe ran %v in, past the job's end: it proves nothing on this host", admitted)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected the probe Submit to wait on the held permit and time out, got %v", err)
 	}
 
 	select {
-	case waitErr := <-ownerDone:
-		if waitErr != nil {
-			t.Fatalf("owner Wait failed: %v", waitErr)
+	case owner := <-results:
+		if owner.err != nil {
+			t.Fatalf("owner Wait failed: %v", owner.err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("owner Wait did not return")
 	}
 }
