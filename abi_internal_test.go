@@ -72,6 +72,57 @@ func TestCheckABI_RefusesEveryDrift(t *testing.T) {
 	}
 }
 
+// init() must have run the check, not merely have it available to call: the
+// report it verified is kept, and a package that never ran the check leaves it
+// zero. This is what fails if the ABI checks are removed from init (I6/R12).
+func TestInit_RanTheABICheckAgainstTheLiveLibrary(t *testing.T) {
+	if abiAtInit.rust.Version != ExpectedAbiVersion {
+		t.Fatalf("init did not verify an ABI report: version %d, want %d", abiAtInit.rust.Version, ExpectedAbiVersion)
+	}
+	if fresh := gatherABIReport(); fresh != abiAtInit {
+		t.Fatalf("the report init verified differs from the live library's now:\n init  %+v\n live  %+v", abiAtInit, fresh)
+	}
+}
+
+// What init verified covers every layer the check compares: all four structs,
+// all named fields, both Rust's and cgo's side.
+func TestInit_VerifiedReportCoversEveryStructAndField(t *testing.T) {
+	r := abiAtInit
+	for i, n := range ffi.AbiTypeNames {
+		if r.rust.Sizes[i] == 0 || r.rust.Aligns[i] == 0 || r.localSizes[i] == 0 || r.localAlign[i] == 0 {
+			t.Errorf("init verified no layout for %s", n)
+		}
+	}
+	if r.rustCount != ffi.AbiFieldCount {
+		t.Errorf("init verified %d fields, want %d", r.rustCount, ffi.AbiFieldCount)
+	}
+	for i, n := range ffi.AbiFieldNames {
+		if r.rustFields[1][i] == 0 || r.localFlds[1][i] == 0 {
+			t.Errorf("init verified no size for field %s", n)
+		}
+	}
+	if err := checkABI(r); err != nil {
+		t.Errorf("the report init accepted fails the check now: %v", err)
+	}
+}
+
+// init panics on drift rather than logging and carrying on.
+func TestMustCheckABI_PanicsOnDriftAndNamesIt(t *testing.T) {
+	mustCheckABI(abiAtInit) // a clean report does not panic
+
+	drifted := abiAtInit
+	drifted.rust.Version++
+	defer func() {
+		v := recover()
+		msg, _ := v.(string)
+		if !strings.Contains(msg, "ABI version mismatch") {
+			t.Fatalf("want a panic naming the version mismatch, got %v", v)
+		}
+	}()
+	mustCheckABI(drifted)
+	t.Fatal("mustCheckABI accepted a drifted report")
+}
+
 func fieldIndex(t *testing.T, name string) int {
 	t.Helper()
 	for i, n := range ffi.AbiFieldNames {

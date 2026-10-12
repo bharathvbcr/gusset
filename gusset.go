@@ -246,12 +246,25 @@ func checkABI(r abiReport) error {
 	return nil
 }
 
-func init() {
-	// I6: Validate ABI layout at initialization time. A drifted layout panics:
-	// a later struct write would corrupt memory.
-	if err := checkABI(gatherABIReport()); err != nil {
+// mustCheckABI panics when the report drifts: a later struct write through a
+// drifted layout would corrupt memory, so there is no degraded mode to fall
+// back to.
+func mustCheckABI(r abiReport) {
+	if err := checkABI(r); err != nil {
 		panic(err.Error())
 	}
+}
+
+// abiAtInit is the report init verified. It stays the zero value if init never
+// ran the check, which is what lets a test tell "checked and passed" from
+// "never checked".
+var abiAtInit abiReport
+
+func init() {
+	// I6: Validate ABI layout at initialization time.
+	r := gatherABIReport()
+	mustCheckABI(r)
+	abiAtInit = r
 
 	if err := ffi.Init(); err != nil {
 		panic(fmt.Sprintf("gusset: failed to initialize runtime: %v", err))
