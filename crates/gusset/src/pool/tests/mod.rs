@@ -643,6 +643,43 @@ fn open_refuses_a_descriptor_that_is_not_a_pipe_write_end() {
 /// code that stores and announces the result. Compiled only under `cfg(test)`.
 pub(super) const POST_ENGINE_PANIC_TRACE: [u8; 16] = *b"gusset:post-pnic";
 
+/// Trace id that makes `deliver` itself panic after both of its inner guards,
+/// so only the worker loop's outer guard can catch it.
+pub(super) const DELIVER_PANIC_TRACE: [u8; 16] = *b"gusset:deliv-pnc";
+
+/// I2: a panic in `deliver` that no inner guard covers is caught by the loop's
+/// outer guard, which poisons the handle and still takes the unit out of
+/// flight. Before, the payload was dropped silently: the handle stayed
+/// healthy and the cancel flag stayed registered, so a drain never finished.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_outer_guard_panic_poisons_the_handle_and_releases_the_unit() {
+    let (r, w) = make_pipe();
+    let handle = Handle::open(1, w).must("open");
+    let header = CallHeader {
+        trace_id: DELIVER_PANIC_TRACE,
+        flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+        ..Default::default()
+    };
+    let ticket = handle.submit(header, &[9, 2], 0).must("submit");
+    assert!(completion_ready_within(r, 5_000));
+    assert_eq!(read_ticket(r), ticket);
+    let start = std::time::Instant::now();
+    while handle.in_flight() != 0 {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "the cancel flag was never removed"
+        );
+        std::thread::yield_now();
+    }
+    assert!(handle.is_poisoned(), "an unexplained worker fault must poison");
+    handle.close().must("close");
+    // SAFETY: the read end is still this test's.
+    unsafe {
+        libc::close(r);
+    }
+}
+
 /// Whether the next worker spawned by the arming thread must behave as if its
 /// sigaltstack install failed. Scoped to the arming thread like
 /// [`spawn_should_fail`], for the same cross-talk reason.
