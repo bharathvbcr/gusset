@@ -738,9 +738,19 @@ func TestAdversarial_NoGoroutineLeakAfterChurn(t *testing.T) {
 		}
 	}
 
-	runtime.GC()
-	time.Sleep(200 * time.Millisecond)
-	after := runtime.NumGoroutine()
+	// Readers exit on the host's schedule once their handle closes, so read the
+	// count until it settles instead of once after a fixed nap. A leaked reader
+	// never exits, and the count stays above the bound until the deadline.
+	var after int
+	settle := time.Now().Add(30 * time.Second)
+	for {
+		runtime.GC()
+		after = runtime.NumGoroutine()
+		if after <= before+10 || time.Now().After(settle) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 
 	t.Logf("goroutines before %d cycles: %d, after: %d", cycles, before, after)
 	if after > before+10 {

@@ -93,17 +93,22 @@ func TestZeroCopyEgress_WaitBufferAddCleanupFreesOnGC(t *testing.T) {
 	}
 	abandonBuffers()
 
-	// Force GC and give finalizers / cleanups time to run
-	for i := 0; i < 5; i++ {
+	// All abandoned buffers must be reclaimed by AddCleanup. Each GC hands the
+	// cleanup goroutine only the objects it found, and that goroutine is as
+	// slow as the host, so collect until the counter returns instead of napping
+	// a fixed 100 ms and reading it once. A buffer nothing reclaims never
+	// returns it, and fails when the deadline passes.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
 		runtime.GC()
+		live := gusset.Stats().LiveBytes
+		if live == statsBefore.LiveBytes {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("unfreed buffers leaked memory: before=%d live=%d", statsBefore.LiveBytes, live)
+		}
 		time.Sleep(20 * time.Millisecond)
-	}
-
-	statsAfter := gusset.Stats()
-
-	// All abandoned buffers must be reclaimed by AddCleanup
-	if statsAfter.LiveBytes != statsBefore.LiveBytes {
-		t.Fatalf("unfreed buffers leaked memory: before=%d live=%d", statsBefore.LiveBytes, statsAfter.LiveBytes)
 	}
 }
 
@@ -136,13 +141,20 @@ func TestZeroCopyEgress_WaitBufferTimeoutCleansUpBuffer(t *testing.T) {
 		t.Fatalf("expected DeadlineExceeded, got: %v", err)
 	}
 
-	// Wait for the slow task to finish and pipe drainer to process it
-	time.Sleep(150 * time.Millisecond)
-
-	statsAfter := gusset.Stats()
-
-	if statsAfter.LiveBytes != statsBefore.LiveBytes {
-		t.Fatalf("timed-out buffer leaked: before=%d, after=%d", statsBefore.LiveBytes, statsAfter.LiveBytes)
+	// Wait for the slow task to finish and the drainer to reclaim its result.
+	// Each of mode 5's ten 10 ms sleeps costs several times that on a loaded
+	// host, so a fixed nap measured the host. Poll for the counter to return to
+	// where it started; a leaked buffer never does, and fails after the deadline.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		after := gusset.Stats().LiveBytes
+		if after == statsBefore.LiveBytes {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed-out buffer leaked: before=%d, after=%d", statsBefore.LiveBytes, after)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

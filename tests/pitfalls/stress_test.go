@@ -29,6 +29,23 @@ func osThreadCount(t *testing.T) int {
 	return len(lines) - 1
 }
 
+// settledThreads collects garbage and re-reads the OS thread count until it is
+// at most limit, and returns the last reading. Threads exit and cleanups run
+// on the host's schedule, so one reading after a fixed nap measures the host;
+// a real leak keeps the count above limit and fails when the deadline passes.
+func settledThreads(t *testing.T, limit int) int {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		runtime.GC()
+		n := osThreadCount(t)
+		if n <= limit || time.Now().After(deadline) {
+			return n
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+}
+
 // TestBug_HandleCloseLeak proves that Handle.Close() leaked worker threads and memory
 // because worker threads held an Arc<Handle> cycle that kept the SyncSender alive.
 func TestBug_HandleCloseLeak(t *testing.T) {
@@ -410,10 +427,7 @@ func TestStress_RapidHandleLifecycle(t *testing.T) {
 		}
 	}
 
-	runtime.GC()
-	time.Sleep(50 * time.Millisecond)
-
-	finalThreads := osThreadCount(t)
+	finalThreads := settledThreads(t, initialThreads+15)
 	t.Logf("final OS threads after 40 open/close cycles (8 workers each = 320 threads total): %d", finalThreads)
 
 	// If threads leaked, thread count would be initial + 320!
@@ -447,13 +461,10 @@ func TestStress_UnclosedHandleGCAddCleanup(t *testing.T) {
 		}()
 	}
 
-	// Trigger GC repeatedly to ensure AddCleanup runs
-	for i := 0; i < 5; i++ {
-		runtime.GC()
-		time.Sleep(30 * time.Millisecond)
-	}
-
-	finalThreads := osThreadCount(t)
+	// Collect until the AddCleanup backstop has run for the handles; the
+	// backstop closes at most four at a time, so on a loaded host that takes
+	// well over the 150 ms this used to allow.
+	finalThreads := settledThreads(t, initialThreads+15)
 	t.Logf("final OS threads after 10 unclosed handles collected: %d", finalThreads)
 
 	// If AddCleanup failed to collect the 10 handles with 4 workers each,
