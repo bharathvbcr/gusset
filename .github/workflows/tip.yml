@@ -27,7 +27,7 @@ jobs:
           toolchain: stable
 
       - name: Build Rust static library
-        run: cargo build --release
+        run: cargo build --locked --release
 
       # Go tip (1.28) requires a bootstrap >= Go 1.26.0: src/make.bash sets
       # bootgo=1.26.0, and src/cmd/dist/notgo126.go is //go:build !go1.26.

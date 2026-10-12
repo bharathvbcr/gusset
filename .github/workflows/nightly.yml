@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: '0 4 * * *'
   workflow_dispatch:
+    inputs:
+      hammer_seed:
+        description: 'Replay one chaos-hammer seed (decimal uint64, as a failing run printed it); empty draws a fresh seed'
+        required: false
+        default: ''
+        type: string
 
 # Read-only token by default; the report job below is the only one that writes.
 permissions:
@@ -40,7 +46,7 @@ jobs:
       # and pretending otherwise is how a green job comes to mean nothing.
       - name: Confirm the lib actually has tests for Miri to run
         run: |
-          count=$(cargo test -p gusset --lib -- --list 2>/dev/null | grep -c ': test$' || true)
+          count=$(cargo test --locked -p gusset --lib -- --list 2>/dev/null | grep -c ': test$' || true)
           echo "lib unit tests: $count"
           if [ "$count" -eq 0 ]; then
             echo "::error::no lib unit tests; a Miri run over nothing is not a check"
@@ -123,7 +129,7 @@ jobs:
           GUSSET_ALLOCATOR_API: '1'
           GUSSET_EXPECT_ALLOCATOR_API: '1'
         run: |
-          cargo test -p gusset --target x86_64-unknown-linux-gnu \
+          cargo test --locked -p gusset --target x86_64-unknown-linux-gnu \
             --test rust_allocator_api --test rust_allocator_counting --test rust_sigpipe
 
       # R4's deliberate cross-free, which this job named and did not have. Without
@@ -158,6 +164,9 @@ jobs:
     name: Chaos hammer (long)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Empty on a schedule (a fresh seed); a dispatch can replay a recorded one.
+      GUSSET_HAMMER_SEED: ${{ inputs.hammer_seed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -176,7 +185,7 @@ jobs:
 
       - name: Build Rust release
         run: |
-          cargo build --release
+          cargo build --locked --release
           go generate ./internal/ffi
 
       - name: Hammer under the race detector with GOGC=1
@@ -195,6 +204,8 @@ jobs:
     name: Chaos hammer (heap checks)
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      GUSSET_HAMMER_SEED: ${{ inputs.hammer_seed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -225,7 +236,7 @@ jobs:
       # first so the tunables apply to the hammer, not the compiler.
       - name: Hammer with glibc heap checks and a full crash dump
         run: |
-          cargo +stable build --release -p gusset
+          cargo +stable build --locked --release -p gusset
           go generate ./internal/ffi
           go test -c -o hammer.test .
           GLIBC_TUNABLES=glibc.malloc.tcache_count=0:glibc.malloc.perturb=165 \
@@ -244,7 +255,7 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
         run: |
-          RUSTFLAGS=-Zsanitizer=address cargo +${{ env.RUST_NIGHTLY }} build --release -p gusset \
+          RUSTFLAGS=-Zsanitizer=address cargo +${{ env.RUST_NIGHTLY }} build --locked --release -p gusset \
             --target x86_64-unknown-linux-gnu
           mkdir -p target/release
           cp target/x86_64-unknown-linux-gnu/release/libgusset.a target/release/libgusset.a
@@ -278,7 +289,15 @@ jobs:
           toolchain: ${{ env.RUST_NIGHTLY }}
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: |
+          . tools/ci/versions.env
+          cargo install cargo-fuzz --locked --version "$CARGO_FUZZ_VERSION" 
+
+      # cargo-fuzz has no --locked of its own, so the lockfile is checked here:
+      # this fails when fuzz/Cargo.lock is missing or out of date, instead of
+      # the fuzz build quietly resolving newer dependencies than were reviewed.
+      - name: Fuzz lockfile is current
+        run: cargo metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
 
       - name: Fuzz each target
         working-directory: fuzz
@@ -313,7 +332,7 @@ jobs:
 
       - name: Build Rust release
         run: |
-          cargo build --release
+          cargo build --locked --release
           go generate ./internal/ffi
 
       - name: Fuzz every target
