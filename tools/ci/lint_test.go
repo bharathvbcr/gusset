@@ -9,6 +9,16 @@ import (
 	"testing"
 )
 
+// The forbidden patterns, split so this file does not spell them: the audit greps
+// every tracked Go source, this one included, and would fail on its own fixtures.
+const (
+	linkname      = "//go:" + "link" + "name"
+	asmTrampoline = "asmcgo" + "call"
+	cgocheck      = "cgocheck" + "=0"
+	invalidptr    = "invalidptr" + "=0"
+	nolint        = "//" + "nolint"
+)
+
 // lint runs tools/ci/lint.sh against a throwaway repository holding files, so
 // the steps that read tracked sources are exercised on known inputs.
 func lint(t *testing.T, files map[string]string, env []string, steps ...string) (string, error) {
@@ -45,8 +55,8 @@ func lint(t *testing.T, files map[string]string, env []string, steps ...string) 
 // reach it -- which was none, because staticcheck broke first and skipped it.
 func TestForbiddenAuditIgnoresProseAboutTheRule(t *testing.T) {
 	out, err := lint(t, map[string]string{
-		"a.go": "package a\n\n// Not a cgo-free trampoline (like purego or\n// asmcgocall), and not an IPC bus.\nfunc F() {}\n",
-		"b.rs": "// asmcgocall is refused\nfn main() {}\n",
+		"a.go": "package a\n\n// Not a cgo-free trampoline (like purego or\n// " + asmTrampoline + "), and not an IPC bus.\nfunc F() {}\n",
+		"b.rs": "// " + asmTrampoline + " is refused\nfn main() {}\n",
 	}, nil, "forbidden-patterns")
 	if err != nil {
 		t.Fatalf("a comment naming the rule failed the audit: %v\n%s", err, out)
@@ -58,12 +68,12 @@ func TestForbiddenAuditIgnoresProseAboutTheRule(t *testing.T) {
 
 func TestForbiddenAuditCatchesRealUses(t *testing.T) {
 	for name, src := range map[string]string{
-		"asmcgocall call": "package a\nfunc F() { asmcgocall(nil, nil) }\n",
-		"trailing":        "package a\nvar x = 1 // asmcgocall\nfunc G() { asmcgocall() }\n",
-		"linkname":        "package a\n//go:linkname f runtime.f\nfunc f()\n",
-		"cgocheck":        "package a\nconst e = \"GODEBUG=cgocheck=0\"\n",
-		"invalidptr":      "package a\nconst e = \"invalidptr=0\"\n",
-		"nolint":          "package a\nfunc F() {} //nolint:all\n",
+		"trampoline call": "package a\nfunc F() { " + asmTrampoline + "(nil, nil) }\n",
+		"trailing":        "package a\nvar x = 1 // " + asmTrampoline + "\nfunc G() { " + asmTrampoline + "() }\n",
+		"linkname":        "package a\n" + linkname + " f runtime.f\nfunc f()\n",
+		"cgocheck":        "package a\nconst e = \"GODEBUG=" + cgocheck + "\"\n",
+		"invalidptr":      "package a\nconst e = \"" + invalidptr + "\"\n",
+		"nolint":          "package a\nfunc F() {} " + nolint + ":all\n",
 	} {
 		out, err := lint(t, map[string]string{"a.go": src}, nil, "forbidden-patterns")
 		if err == nil {
@@ -97,7 +107,7 @@ func TestMissingToolFailsLoudly(t *testing.T) {
 
 // One broken tool must not skip the others: every requested step reports.
 func TestEveryStepReportsEvenAfterAFailure(t *testing.T) {
-	out, err := lint(t, map[string]string{"a.go": "package a\n//go:linkname f runtime.f\nfunc f()\n"}, []string{"PATH=/usr/bin:/bin"},
+	out, err := lint(t, map[string]string{"a.go": "package a\n" + linkname + " f runtime.f\nfunc f()\n"}, []string{"PATH=/usr/bin:/bin"},
 		"cargo-deny", "forbidden-patterns", "cargo-deny")
 	if err == nil {
 		t.Fatalf("expected failure:\n%s", out)
