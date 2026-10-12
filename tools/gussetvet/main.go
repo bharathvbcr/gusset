@@ -375,8 +375,10 @@ func preambleLines(file *ast.File) []preambleLine {
 }
 
 // walkGo parses every .go file under root, test files included, skipping build
-// output, dependency trees and testdata. Test files count: a cross-free in a
-// test corrupts the heap just as well.
+// output, dependency trees, testdata and nested repositories (any directory
+// below root holding a .git file or directory, such as an agent worktree under
+// .claude/worktrees). Test files count: a cross-free in a test corrupts the heap
+// just as well.
 func walkGo(root string, visit func(rel string, fset *token.FileSet, file *ast.File)) error {
 	fset := token.NewFileSet()
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
@@ -387,6 +389,15 @@ func walkGo(root string, visit func(rel string, fset *token.FileSet, file *ast.F
 			switch d.Name() {
 			case ".git", "target", "vendor", "node_modules", "testdata":
 				return filepath.SkipDir
+			}
+			// A directory with its own .git (a file for a linked worktree, a
+			// directory for a clone) is another repository, not part of this
+			// module: its fixtures are judged by its own run, and the
+			// root-relative exemptions above would not match their paths.
+			if path != root {
+				if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}

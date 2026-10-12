@@ -190,6 +190,57 @@ func A() { C.gusset_a() }
 	}
 }
 
+// A linked worktree or clone nested under the module (an agent checkout under
+// .claude/worktrees) is another repository. Its copy of tests/cgoprobe is not
+// the root's, so the root-relative allowlist cannot match it, and reporting it
+// failed the lint step on every machine that had one. The same violation
+// outside any nested repository, and the root's own allowlisted probe, keep
+// their verdicts.
+func TestWalkSkipsNestedRepositoriesButNotPlainSubdirectories(t *testing.T) {
+	root := t.TempDir()
+	const crossFree = "package p\nimport \"C\"\nimport \"unsafe\"\nfunc g(p unsafe.Pointer) { C.free(p) }\n"
+	mk := func(rel string) string {
+		d := filepath.Join(root, rel)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	write(t, mk(filepath.Join("tests", "cgoprobe")), "probe.go", crossFree)
+	write(t, mk("plain"), "bad.go", crossFree)
+	wt := mk(filepath.Join(".claude", "worktrees", "agent-x"))
+	write(t, wt, ".git", "gitdir: /elsewhere/.git/worktrees/agent-x\n")
+	write(t, mk(filepath.Join(".claude", "worktrees", "agent-x", "tests", "cgoprobe")), "probe.go", crossFree)
+	write(t, mk(filepath.Join(".claude", "worktrees", "agent-x", "pkg")), "bad.go", crossFree)
+	clone := mk("vendored-clone")
+	if err := os.Mkdir(filepath.Join(clone, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, clone, "bad.go", crossFree)
+
+	v, err := checkAllocatorSymmetry(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v) != 1 || !strings.HasPrefix(v[0], filepath.Join("plain", "bad.go")+":") {
+		t.Fatalf("want exactly plain/bad.go reported, got %v", v)
+	}
+}
+
+// A root that is itself a worktree (its .git is a file) is still scanned.
+func TestWalkScansARootThatIsItselfAWorktree(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".git", "gitdir: /elsewhere\n")
+	write(t, root, "bad.go", "package p\nimport \"C\"\nimport \"unsafe\"\nfunc g(p unsafe.Pointer) { C.free(p) }\n")
+	v, err := checkAllocatorSymmetry(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v) != 1 {
+		t.Fatalf("want the root's own violation, got %v", v)
+	}
+}
+
 func TestR5RefusesExportedGoCallbacks(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "cb.go", `package p
