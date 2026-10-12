@@ -229,7 +229,7 @@ gusset/
   tools/benchplot/        # draws docs/img/*.svg from certified bench/results (docs/benchmarks.md)
   bench/                  # Go benchmarks & committed benchstat results
   tests/pitfalls/         # living pitfall & adversarial test suite
-  tests/panic_zoo/        # 5-case uncatchable panic reproduction suite
+  tests/panic_zoo/        # 6-case uncatchable panic reproduction suite
   .cargo/config.toml      # frame pointers, target configuration
   clippy.toml deny.toml   # strict linting and license rules
   DECISIONS.md CHANGELOG.md AGENTS.md docs/PLAN.md
@@ -276,7 +276,7 @@ Three workflows: `matrix.yml` on every PR, `nightly.yml` daily, `tip.yml` weekly
 
 | Job | Workflow | Platform | Command / setting | Must contain | Status |
 | --- | --- | --- | --- | --- | --- |
-| `unit` | matrix | linux, macos | `cargo test --workspace`, `go test ./...` | Panic zoo (5 cases), ABI drift, poison, deadline, cancel, thread migration, completion drain, runtime hardening suite, shutdown drain, adopter engine, header signature diff | live — 27 Rust tests, plus Go pitfall/panic-zoo suite |
+| `unit` | matrix | linux, macos | `cargo test --workspace`, `go test ./...` | Panic zoo (6 cases), ABI drift, poison, deadline, cancel, thread migration, completion drain, runtime hardening suite, shutdown drain, adopter engine, header signature diff | live — 27 Rust tests, plus Go pitfall/panic-zoo suite |
 | `cgocheck2` | matrix | linux | `GOEXPERIMENT=cgocheck2 go test ./...` | Pinner test; a retained-pointer violation that must be caught | live. `TestGate_CgoCheck2IsArmedWhenRequested` stores a Go pointer into C memory in a subprocess and asserts it is caught *with* the experiment and allowed *without* it |
 | `race-gc` | matrix | linux, macos | `go test -race`, then `GOGC=1 go test -count=5` | Completion reader vs `Close`; concurrent `Call` on one handle | live (`-count=5`) |
 | `soak` | matrix | linux, macos | `go test -run Soak -timeout 20m` | 10,000 goroutines on a 4-worker pool; `/sched/threads/total:threads` under 4 + `GOMAXPROCS` + 8; `goroutineleak` profile empty after drain | live. `TestSoak_GoroutineLeakProfileIsEmptyAfterDrain` uses Go 1.27's real `goroutineleak` profile and fails if unavailable |
@@ -293,7 +293,7 @@ Three workflows: `matrix.yml` on every PR, `nightly.yml` daily, `tip.yml` weekly
 | `fuzz` | matrix | linux | `make fuzz` (Go native fuzzing) | Call boundary, diagnostic engine, buffer lifecycle | live. 4.56M execs on refusal path, 178K against diagnostic engine, 0 crashers |
 | `tip` | tip | linux | Go `1.27.x` bootstrap, then `./make.bash` with `GOROOT_BOOTSTRAP`; Rust stable | Full `unit` + `soak` on the built devel toolchain; failure opens an issue tagged `toolchain` | Bootstrap must be >= Go 1.26.0 (`notgo126.go`). `TestTipWorkflowBootstrapsFromGo1_26OrNewer` refuses a workflow that runs `./make.bash` on the runner's Go. Run 35594759554 died on Go 1.24.13 before tests |
 
-Panic zoo cases (all return `FFI_PANIC`, process alive, message and location populated): `&str` payload; `String` payload; non-string payload (`panic_any(42)`); NUL byte in message; panic inside error's `Display` impl.
+Panic zoo cases (all return `FFI_PANIC`, process alive, message and location populated): `&str` payload; `String` payload; non-string payload (`panic_any(42)`); NUL byte in message; panic inside error's `Display` impl; payload whose destructor panics again.
 
 Property the whole suite proves: no test in this repo ever needs `GODEBUG=cgocheck=0` or `invalidptr=0`; CI greps for both and fails.
 

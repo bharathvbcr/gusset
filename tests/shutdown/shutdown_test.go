@@ -171,4 +171,19 @@ func TestShutdown_ReportsWorkItCouldNotDrain(t *testing.T) {
 	if elapsed = time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("Shutdown(-1h) took %v; a negative budget must clamp to zero", elapsed)
 	}
+
+	// A budget past MaxDrain is capped to it, and the cap is a drain, not a
+	// failure. Nothing is in flight, so the call returns at once; what it must
+	// not do is error, panic or wedge on the out-of-range value. (The clamp
+	// itself, which a wrapped value would pass here, is pinned by
+	// TestDrainMillis_ClampsInsteadOfWrapping.)
+	for _, d := range []time.Duration{gusset.MaxDrain, gusset.MaxDrain + time.Second, time.Duration(1<<63 - 1)} {
+		start = time.Now()
+		if err := gusset.Shutdown(d); err != nil {
+			t.Fatalf("Shutdown(%v) with nothing in flight: %v", d, err)
+		}
+		if elapsed = time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("Shutdown(%v) took %v with nothing in flight", d, elapsed)
+		}
+	}
 }
