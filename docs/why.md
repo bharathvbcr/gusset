@@ -57,7 +57,7 @@ flowchart TD
 **How Gusset Solves It:**
 - Rule R3 forbids `CString::new`, `unwrap`, and `expect` in the boundary crate.
 - `ffi_guard_code` null-checks pointers, transfers messages as raw `(ptr, len)` without NUL-termination, and wraps error `Display` formatting in its own nested `catch_unwind`.
-- Verified by Gusset's 5-case Panic Zoo suite (`tests/panic_zoo/`), which tests `&str`, `String`, non-string payloads (`panic_any(42)`), panic inside `Display`, and embedded NUL bytes.
+- Verified by Gusset's 6-case Panic Zoo suite (`tests/panic_zoo/`), which tests `&str`, `String`, non-string payloads (`panic_any(42)`), embedded NUL bytes, panic inside `Display`, and a payload whose destructor panics again.
 
 ---
 
@@ -182,7 +182,7 @@ sequenceDiagram
 
 | Failure Mode | Naive cgo / bindgen | uniffi-bindgen-go | rust2go | Gusset Runtime Contract |
 | :--- | :--- | :--- | :--- | :--- |
-| **Rust Panic Recovery** | `SIGABRT` / Crash | `catch_unwind` (vulnerable to NUL-byte abort) | `catch_unwind` | **Guaranteed**: 5-case Panic Zoo verified; `FfiStatus` ptr+len |
+| **Rust Panic Recovery** | `SIGABRT` / Crash | `catch_unwind` (vulnerable to NUL-byte abort) | `catch_unwind` | **Guaranteed**: 6-case Panic Zoo verified; `FfiStatus` ptr+len |
 | **Thread Scaling** | Unbounded OS thread spawning | Unbounded OS thread spawning | Async, but disables `cgocheck` | **Bounded**: Go semaphore queue (`<= pool_size <= 1024`) |
 | **musl / Docker Stack** | Crash on 128 KiB default | Crash on 128 KiB default | Dependent on host stack | **Guaranteed**: Explicit 8 MiB worker stack + `sigaltstack` |
 | **Deadline Cancellation** | Hangs until native return | Hangs until native return | Async callback | **Cooperative**: Relative `timeout_ns` + `AtomicBool` flag |
