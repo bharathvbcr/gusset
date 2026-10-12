@@ -66,7 +66,7 @@ func (h *Handle) NewBuffer(n int) (*Buffer, error) {
 }
 
 func (s *handleState) newBuffer(n int) (*Buffer, error) {
-	return s.allocBuffer(n, true)
+	return s.allocBuffer(n, true, nil)
 }
 
 // reserveBudget claims n bytes of the handle's buffer budget, if one is set.
@@ -94,7 +94,12 @@ func (s *handleState) releaseBudget(n int64) {
 // allocBuffer allocates a Rust buffer. budgeted buffers count against
 // WithBufferBudget; a finished result re-wrapped for WaitBuffer does not, since
 // refusing it would lose work that already completed.
-func (s *handleState) allocBuffer(n int, budgeted bool) (*Buffer, error) {
+//
+// fill, when non-nil, is copied into the new buffer before cgoMu is released.
+// Close frees every Rust buffer of the handle under cgoMu held exclusively, so
+// a fill done after this returns (through Bytes, which drops the lock on
+// return) could land after Close and write freed allocator memory.
+func (s *handleState) allocBuffer(n int, budgeted bool, fill []byte) (*Buffer, error) {
 	if n <= 0 {
 		return nil, errors.New("gusset: buffer size must be greater than zero")
 	}
@@ -125,6 +130,12 @@ func (s *handleState) allocBuffer(n int, budgeted bool) (*Buffer, error) {
 		return nil, errHandlePoisoned
 	}
 	id, slice, err := ffi.BufAlloc(s.ptr, n)
+	if err == nil && fill != nil {
+		if testHookBeforeResultFill != nil {
+			testHookBeforeResultFill(s)
+		}
+		copy(slice, fill)
+	}
 	s.cgoMu.RUnlock()
 
 	if err != nil {
