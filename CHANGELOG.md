@@ -1,5 +1,32 @@
 # Changelog
 
+## [Unreleased] - 2026-10-12 · WaitBuffer no longer writes freed memory; the boundary refuses what it used to trust
+
+From the GitPulse board (`gs-boundary-defence-in-depth`, `ft-3d60ee16`, `ft-1f4a1228`, `ft-415ddf1f`, `ft-0f6a723d`, `ft-86b4ae63`, `gs-isolate-corrupt-frame-hang`, `gs-flaky-isolate-sigabrt-cgocheck2`, `ft-c689767b`) and what verifying them turned up. No export signature or ABI change. One Go behaviour change (`WaitBuffer` under a racing `Close`, below).
+
+### Fixed
+- **`WaitBuffer` wrote an inline result into freed memory when `Close` raced it (I1).** It allocated a Rust buffer, took the view with `Bytes` (which drops `cgoMu` on return) and copied with no lock held; a `Close` in that gap freed every buffer of the handle, so up to 4 KiB landed in a freed C-heap chunk. `allocBuffer` now fills the buffer before releasing `cgoMu`. A `Close` that wins now yields a buffer whose `Bytes` is nil, as the large-result path already did, instead of `ErrClosed`. `TestWaitBuffer_CloseCannotFreeTheResultBeingFilled` holds the window open with a test hook and fails every run with the copy outside the lock; under libgmalloc the old code faults at the copy. Plausibly the unidentified writer behind the 2026-09-30 hammer SIGSEGV (a 973-byte `gusset_take` finding a non-canonical tcache pointer in the 992-byte class) — inferred, not reproduced. A read-only sweep of the other 34 sites that view, free or keep alive Rust memory found no second instance.
+- **Concurrent respawns could leave a pool with no workers that still accepted work (I4).** Found in review of the sigaltstack change below before it landed; `respawn_lock` makes the slow path of `ensure_workers` single-flight, and `close` never takes it. `concurrent_respawn_does_not_lose_a_failed_worker` fails without it.
+- **`gusset_handle_open` refuses a completion descriptor that is not the write end of a pipe (I1).** It checked only that the fd was open, then set `O_NONBLOCK` on it and later closed it. Read ends, regular files and sockets are refused; the caller keeps the fd, flags unchanged.
+- **A worker that cannot install its `sigaltstack` fails `open` (or the respawning submit) instead of running unprotected (I5).** Workers report ready over a channel and are awaited against one shared deadline, outside the `workers` lock: `open` at pool size 1024 measured 12.6-18.8 ms against 13.1 ms before (a serial handshake had been 157 ms).
+- **A panic after the engine returned no longer kills the worker silently (I2).** `deliver` guards storing and publishing the result: a panic while storing completes the ticket as a panic and poisons the handle; a panic while publishing poisons and logs, and does not publish twice. The outer guard now logs, poisons and releases the cancel flag. DECISIONS 2026-10-12 records what is still accepted.
+- **A torn completion write gives up after 2 s without progress, not 10,000 spins.** Under load a live, slow reader was classified as stalled. Unreachable on a pipe with records far below `PIPE_BUF`, which `open` now guarantees.
+- **Go: an error code with an OK or nil status is an error (`statusToError`)**, not a zero value with a nil error.
+- **`make install` (and `install.sh`) parse under macOS's make 3.81.** A literal `#` inside `$(shell …)` stopped it with "unterminated call to function 'shell'".
+- **gussetvet scans what Go builds.** It skips a subdirectory only when it has its own `go.mod` (as `./...` does), not because it holds a `.git` — an empty `.git` file would otherwise have hidden an R4 violation that still compiled — and `target`/`vendor` only at the module root.
+
+### CI and supply chain
+- staticcheck pinned at v0.8.2 (reads Go 1.27.2 export data); the Go patch pin is gone and the lint log prints both versions.
+- Every cargo invocation in workflows, the Makefile, `tools/ci/lint.sh` and `bench/r14/run.sh` is `--locked`; cargo-fuzz installs at a pinned version and nightly proves `fuzz/Cargo.lock` current. `tests/ci` enforces locked cargo, pinned installs, read-only default permissions, and untrusted expressions reaching a shell only through `env:` — each rule with a planted violation that it catches.
+- The bench job fails when there was no base to compare against, unless the `allow_no_base` dispatch input says that is intended.
+- Soak runs every Soak test on Linux and macOS; memlimit also runs `TestMemLimit` under `GOMEMLIMIT`; nightly takes a `hammer_seed` input and fuzzes the new `ffi_exports` target, which drives 15 of the 17 raw C exports with adversarial arguments.
+- The lint gofmt step checks the files git would commit, not everything on disk.
+
+### Tests
+- Invariant gaps closed with mutation proofs: the init ABI check is asserted behaviourally (`mustCheckABI` returns the verified report), R6 has `TestR6_SubmitCopiesTheInputBeforeItReturns`, Go's poison latch is asserted at the public surface, isolate frames (oversize, truncated, stalled, duplicate, unknown, out of order) are exercised against a live worker.
+- Load-robust timing: tests that failed on a correct build at load 100-400 now separate "correct" from "broken" by a wide margin (`Discard` instead of a racing deadline, relative-to-baseline scheduling checks, best-of-N, a 1 s engine against a 500 ms detach bound) rather than by a host-speed guess.
+- The adopter walkthrough gives each pkg-config build its own `GOCACHE` (Go caches pkg-config link flags without keying on `PKG_CONFIG_PATH`; `docs/adoption.md` says so) and tests gussetvet's "no export list" refusal for real.
+
 ## [Unreleased] - 2026-10-10 · The hammer's seed replays, and a nightly leg watches the heap
 
 From `ft-94a2f74b` (the 2026-09-30 nightly SIGSEGV in `gusset_take`, run 36702124084, seed 1790763872967289580). No library, ABI or Go API change. Tests and CI only. **The crash is not fixed and its cause is not known.**
