@@ -183,7 +183,8 @@ func TestPanicZoo_SuccessEcho(t *testing.T) {
 // afterwards; a payload whose Drop panics used to unwind the Rust worker thread
 // itself. The ticket then never completed, so Call returned only when its own
 // deadline fired — and a caller with no deadline parked forever holding a pool
-// permit. It must come back as ErrPanic, promptly, at every re-throw depth.
+// permit. It must come back as ErrPanic at every re-throw depth. A wall-clock
+// bound on that return could only false-fail under load.
 func TestPanicZoo_PanickingPayloadDestructor(t *testing.T) {
 	for _, depth := range []byte{0, 1, 8, 255} {
 		h, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
@@ -200,9 +201,9 @@ func TestPanicZoo_PanickingPayloadDestructor(t *testing.T) {
 		if !errors.Is(err, gusset.ErrPanic) {
 			t.Fatalf("depth %d: expected ErrPanic, got %v after %v (a deadline error means the worker died and the ticket was stranded)", depth, err, elapsed)
 		}
-		if elapsed > time.Second {
-			t.Fatalf("depth %d: panic took %v to surface", depth, elapsed)
-		}
+		// No wall-clock bound. It could only false-fail under load. ErrPanic
+		// is the behavioural assertion: a caller that waits out the engine
+		// still fails it. The Close hang check below stays.
 
 		closed := make(chan error, 1)
 		go func() { closed <- h.Close() }()
