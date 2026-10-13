@@ -49,11 +49,69 @@ step_gofmt() {
 	# The files git would commit (tracked plus untracked, minus ignored), not
 	# whatever is on disk: `gofmt -l .` also walked target/, where local
 	# scratch copies of the tree failed a check about the repository.
-	unformatted=$(git ls-files -z --cached --others --exclude-standard -- '*.go' |
-		xargs -0 gofmt -l | grep -v '^bench/seed/')
-	if [ -n "$unformatted" ]; then
+	#
+	# One path per invocation, NUL from git ls-files through xargs -0. A pipe
+	# into `grep -v` made grep's status the step's, so a parse error (stderr
+	# only, empty stdout) exited 0. BSD xargs also returns 0 when the utility
+	# exits 1, so the result is the log file, not xargs' status. bench/seed
+	# stays excluded, matching the old `grep -v '^bench/seed/'`.
+	list=$(mktemp) || {
+		echo "gofmt: cannot create a temp file; the step did not run" >&2
+		return 1
+	}
+	log=$(mktemp) || {
+		rm -f "$list"
+		echo "gofmt: cannot create a temp file; the step did not run" >&2
+		return 1
+	}
+	if ! git ls-files -z --cached --others --exclude-standard -- '*.go' >"$list"; then
+		rm -f "$list" "$log"
+		echo "git ls-files failed; gofmt did not run" >&2
+		return 1
+	fi
+	if [ ! -s "$list" ]; then
+		rm -f "$list" "$log"
+		return 0
+	fi
+	# xargs appends each path after the fixed arguments, so $1 is the log
+	# and $2 is the file. (The other way round writes gofmt's status into
+	# the source and leaves the log empty, which then looks like "did not run".)
+	xargs -0 -n 1 sh -c '
+		log=$1
+		path=$2
+		case "$path" in
+		bench/seed/*) exit 0 ;;
+		esac
+		err=$(mktemp) || {
+			echo "gofmt: cannot create a temp file; the step did not run" >>"$log"
+			exit 1
+		}
+		# "--" so a tracked file named -ok.go is a path, not a flag.
+		out=$(gofmt -l -- "$path" 2>"$err")
+		status=$?
+		if [ -s "$err" ] || [ "$status" -ne 0 ]; then
+			echo "gofmt: $path" >>"$log"
+			cat "$err" >>"$log"
+			rm -f "$err"
+			exit 1
+		fi
+		rm -f "$err"
+		if [ -n "$out" ]; then
+			printf "%s\n" "$path" >>"$log"
+			exit 1
+		fi
+	' _ "$log" <"$list"
+	xstatus=$?
+	rm -f "$list"
+	if [ -s "$log" ]; then
 		echo "gofmt needed for:"
-		echo "$unformatted"
+		cat "$log"
+		rm -f "$log"
+		return 1
+	fi
+	rm -f "$log"
+	if [ "$xstatus" -ne 0 ]; then
+		echo "gofmt did not run (xargs exit $xstatus)" >&2
 		return 1
 	fi
 }

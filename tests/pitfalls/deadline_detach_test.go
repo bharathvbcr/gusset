@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/internal/hostprobe"
 )
 
 // nonCoop builds a mode 9 payload that sleeps for d without ever checking for
@@ -187,7 +188,7 @@ func TestDeadline_AbandonedJobKeepsHoldingItsPoolPermit(t *testing.T) {
 					"while the abandoned job was still running on the only worker: in-flight "+
 					"work exceeded the pool size (I4)", admitted, engineRuns)
 		}
-		t.Skipf("the probe ran %v after the submit, past the job's end: it proves nothing on this host", admitted)
+		hostprobe.Skip(t, "the probe ran %v after the submit, past the job's end: it proves nothing on this host", admitted)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected the probe Submit to block on the held permit and time out, got %v", err)
@@ -474,7 +475,7 @@ func TestDeadline_CloseReclaimsAbandonedTickets(t *testing.T) {
 	}
 	wg.Wait()
 	if abandoned.Load() == 0 {
-		t.Skip("no call was abandoned; the engine outran the deadline on this machine")
+		hostprobe.Skip(t, "no call was abandoned; the engine outran the deadline on this machine")
 	}
 
 	done := make(chan error, 1)

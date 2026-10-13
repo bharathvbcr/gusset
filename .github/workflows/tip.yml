@@ -85,11 +85,14 @@ jobs:
       # default run, and I4 is the property most likely to move under a scheduler
       # or cgo change.
       - name: Run Tests on Go Tip
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: go test -v -timeout 30m ./...
 
       - name: Soak on Go Tip
         env:
           GUSSET_REQUIRE_LEAK_PROFILE: '1'
+          GUSSET_REQUIRE_PROBES: '1'
         run: |
           go test -v -timeout 20m \
             -run 'TestPitfall_ThreadCapBoundedSoak|TestSoak_GoroutineLeakProfileIsEmptyAfterDrain' \

@@ -85,7 +85,7 @@ GussetCallNoop-18,5e-05,5%,4e-05,5%,-20.00%,p=0.001 n=10
 geomean,2e-06,,3e-06,,+50.00%,
 `
 	var out bytes.Buffer
-	if err := checkRegress(strings.NewReader(in), 10, &out); err != nil {
+	if err := checkRegress(strings.NewReader(in), 10, nil, &out); err != nil {
 		t.Fatalf("overlapping intervals failed the gate: %v", err)
 	}
 	if !strings.Contains(out.String(), "noise GussetBufferLarge-18") {
@@ -96,7 +96,7 @@ geomean,2e-06,,3e-06,,+50.00%,
 func TestRegressFailsOnARealRegression(t *testing.T) {
 	in := csvHeader + `GussetBufferLarge-18,1.0,2%,1.3,3%,+30.00%,p=0.000 n=10
 `
-	err := checkRegress(strings.NewReader(in), 10, &bytes.Buffer{})
+	err := checkRegress(strings.NewReader(in), 10, nil, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "GussetBufferLarge-18") {
 		t.Fatalf("a +30%% row with tight intervals passed: %v", err)
 	}
@@ -106,21 +106,21 @@ func TestRegressHonoursThresholdAndNotSignificant(t *testing.T) {
 	in := csvHeader + `A-18,1.0,1%,1.05,1%,+5.00%,p=0.000 n=10
 B-18,1.0,50%,3.0,1%,~,p=0.300 n=10
 `
-	if err := checkRegress(strings.NewReader(in), 10, &bytes.Buffer{}); err != nil {
+	if err := checkRegress(strings.NewReader(in), 10, nil, &bytes.Buffer{}); err != nil {
 		t.Fatalf("below-threshold and not-significant rows failed: %v", err)
 	}
 }
 
 func TestRegressFailsClosedWhenItCannotRead(t *testing.T) {
-	if err := checkRegress(strings.NewReader(""), 10, &bytes.Buffer{}); err == nil {
+	if err := checkRegress(strings.NewReader(""), 10, nil, &bytes.Buffer{}); err == nil {
 		t.Error("empty benchstat output passed; nothing was compared")
 	}
 	allocsOnly := ",old.txt,,new.txt,,,\n,allocs/op,CI,allocs/op,CI,vs base,P\nA-18,1,0%,1,0%,~,p=1.000 n=10\n"
-	if err := checkRegress(strings.NewReader(allocsOnly), 10, &bytes.Buffer{}); err == nil {
+	if err := checkRegress(strings.NewReader(allocsOnly), 10, nil, &bytes.Buffer{}); err == nil {
 		t.Error("a file with no sec/op rows passed")
 	}
 	noCI := csvHeader + "A-18,1.0,,2.0,,+100.00%,p=0.000 n=3\n"
-	if err := checkRegress(strings.NewReader(noCI), 10, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "interval is unreadable") {
+	if err := checkRegress(strings.NewReader(noCI), 10, nil, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "interval is unreadable") {
 		t.Errorf("a regression with no interval was waved through: %v", err)
 	}
 }
@@ -162,7 +162,68 @@ geomean,1e-06,,1e-06,,+0.00%,
 ,B/op,CI,B/op,CI,vs base,P
 A-18,1.000,1600%,9.000,0%,+800.00%,p=0.000 n=10
 `
-	if err := checkRegress(strings.NewReader(in), 10, &bytes.Buffer{}); err != nil {
+	if err := checkRegress(strings.NewReader(in), 10, nil, &bytes.Buffer{}); err != nil {
 		t.Fatalf("a B/op row was gated as a timing: %v", err)
+	}
+}
+
+// A renamed benchmark is a short row in the middle of the sec/op table
+// (benchstat emits 3 fields for base-only, 5 for new-only, 7 for a comparison).
+// It must fail closed, and it must not end the table: the +30% row after it
+// is still gated. An allow-listed name does not fail by itself and still does
+// not hide that later row.
+func TestRegressOneSidedRowDoesNotUngateTheNext(t *testing.T) {
+	const renamed = "RenamedAway-18,1.0,2%\n" // 3 fields: base only
+	in := csvHeader + `Steady-18,1.0,2%,1.01,2%,~,p=0.5 n=10
+` + renamed + `LaterRegress-18,1.0,2%,1.3,3%,+30.00%,p=0.000 n=10
+`
+	err := checkRegress(strings.NewReader(in), 10, nil, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "LaterRegress-18") {
+		t.Fatalf("the +30%% row was ungated or the gate passed: %v", err)
+	}
+	if !strings.Contains(err.Error(), "RenamedAway-18") {
+		t.Fatalf("the one-sided row was not reported: %v", err)
+	}
+
+	allow := map[string]struct{}{"RenamedAway-18": {}}
+	err = checkRegress(strings.NewReader(in), 10, allow, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "LaterRegress-18") {
+		t.Fatalf("allow-listing the renamed row hid the regression: %v", err)
+	}
+	if strings.Contains(err.Error(), "RenamedAway-18") {
+		t.Fatalf("allow-listed row still failed the gate: %v", err)
+	}
+
+	quiet := csvHeader + `Steady-18,1.0,2%,1.01,2%,~,p=0.5 n=10
+` + renamed
+	if err := checkRegress(strings.NewReader(quiet), 10, allow, &bytes.Buffer{}); err != nil {
+		t.Fatalf("an allow-listed one-sided row failed the gate by itself: %v", err)
+	}
+
+	// Five fields is benchstat's new-only shape. Same rule, same non-clearing.
+	five := csvHeader + `Steady-18,1.0,2%,1.01,2%,~,p=0.5 n=10
+NewOnly-18,,,1.0,2%
+LaterRegress-18,1.0,2%,1.3,3%,+30.00%,p=0.000 n=10
+`
+	err = checkRegress(strings.NewReader(five), 10, nil, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "LaterRegress-18") || !strings.Contains(err.Error(), "NewOnly-18") {
+		t.Fatalf("a 5-field row ungated the table or was ignored: %v", err)
+	}
+}
+
+func TestRegressAllowOneSidedFlag(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "delta.csv")
+	body := csvHeader + "Steady-18,1.0,2%,1.01,2%,~,p=0.5 n=10\nRenamedAway-18,1.0,2%\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	if code := run([]string{"regress", "-threshold", "10", path}, &bytes.Buffer{}, &stderr); code != 1 || !strings.Contains(stderr.String(), "RenamedAway-18") {
+		t.Fatalf("default allow-list exit want 1 naming the row, got %d\n%s", code, stderr.String())
+	}
+	stderr.Reset()
+	if code := run([]string{"regress", "-threshold", "10", "-allow-one-sided", "RenamedAway-18", path}, &bytes.Buffer{}, &stderr); code != 0 {
+		t.Fatalf("allow-listed exit %d, want 0\n%s", code, stderr.String())
 	}
 }

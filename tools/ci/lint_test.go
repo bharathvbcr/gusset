@@ -118,3 +118,89 @@ func TestEveryStepReportsEvenAfterAFailure(t *testing.T) {
 		}
 	}
 }
+
+// A parse error is gofmt writing to stderr and an empty stdout. The old
+// pipeline's status was grep's, so that exited 0.
+func TestGofmtParseErrorFailsTheStep(t *testing.T) {
+	out, err := lint(t, map[string]string{
+		"bad.go": "package p\nfunc (\n",
+	}, nil, "gofmt")
+	if err == nil || !strings.Contains(out, "gofmt FAIL") || !strings.Contains(out, "bad.go") {
+		t.Fatalf("a parse error passed: %v\n%s", err, out)
+	}
+}
+
+// The path stays one argv. If the NUL split were lost, gofmt would be asked
+// for the two halves and this formatted file would fail.
+func TestGofmtKeepsANewlineInTheFilenameWhole(t *testing.T) {
+	const name = "dir/has\nnewline.go"
+	out, err := lint(t, map[string]string{
+		name: "package dir\n\nfunc F() {}\n",
+	}, nil, "gofmt")
+	if err != nil {
+		t.Fatalf("a formatted file whose name contains a newline failed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "no such file") || strings.Contains(out, "gofmt FAIL") {
+		t.Fatalf("the newline was treated as a separator:\n%s", out)
+	}
+
+	out, err = lint(t, map[string]string{
+		name: "package dir\nfunc bad( ) {}\n",
+	}, nil, "gofmt")
+	if err == nil || !strings.Contains(out, "gofmt FAIL") || !strings.Contains(out, "dir/has\nnewline.go") {
+		t.Fatalf("unformatted newline path was split or passed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "no such file") {
+		t.Fatalf("gofmt was handed a fragment of the path:\n%s", out)
+	}
+
+	// A newline in a directory name is the same constraint: one argv, not two.
+	const dirName = "dir\nname/file.go"
+	out, err = lint(t, map[string]string{
+		dirName: "package p\n\nfunc F() {}\n",
+	}, nil, "gofmt")
+	if err != nil || strings.Contains(out, "no such file") || strings.Contains(out, "gofmt FAIL") {
+		t.Fatalf("a formatted file under a directory whose name contains a newline failed: %v\n%s", err, out)
+	}
+}
+
+// gofmt's flag parser takes a leading dash as an option. A clean -ok.go must
+// pass; an unformatted one must fail naming that path, not "no such file".
+func TestGofmtPathThatLooksLikeAFlag(t *testing.T) {
+	out, err := lint(t, map[string]string{
+		"-ok.go": "package ok\n\nfunc F() {}\n",
+	}, nil, "gofmt")
+	if err != nil || strings.Contains(out, "flag provided but not defined") || strings.Contains(out, "gofmt FAIL") {
+		t.Fatalf("a formatted -ok.go was parsed as a flag or otherwise failed: %v\n%s", err, out)
+	}
+
+	out, err = lint(t, map[string]string{
+		"-ok.go": "package ok\nfunc bad( ) {}\n",
+	}, nil, "gofmt")
+	if err == nil || !strings.Contains(out, "gofmt FAIL") || !strings.Contains(out, "-ok.go") {
+		t.Fatalf("unformatted -ok.go passed or was not named: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "no such file") || strings.Contains(out, "flag provided but not defined") {
+		t.Fatalf("gofmt did not take -ok.go as a path:\n%s", out)
+	}
+}
+
+// bench/seed is excluded the way `grep -v '^bench/seed/'` excluded it, including
+// a file gofmt cannot parse. A sibling outside that tree is still gated.
+func TestGofmtStillExcludesBenchSeed(t *testing.T) {
+	out, err := lint(t, map[string]string{
+		"bench/seed/bad.go":  "package seed\nfunc (\n",
+		"bench/seed/ugly.go": "package seed\nfunc bad( ) {}\n",
+		"ok.go":              "package ok\n\nfunc F() {}\n",
+	}, nil, "gofmt")
+	if err != nil {
+		t.Fatalf("bench/seed was not excluded: %v\n%s", err, out)
+	}
+	out, err = lint(t, map[string]string{
+		"bench/seed/ugly.go": "package seed\nfunc bad( ) {}\n",
+		"ugly.go":            "package ok\nfunc bad( ) {}\n",
+	}, nil, "gofmt")
+	if err == nil || !strings.Contains(out, "ugly.go") || strings.Contains(out, "bench/seed/") {
+		t.Fatalf("exclusion or the real file is wrong: %v\n%s", err, out)
+	}
+}
