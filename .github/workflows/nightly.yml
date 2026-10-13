@@ -345,6 +345,8 @@ jobs:
           go generate ./internal/ffi
 
       - name: Fuzz every target
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: make fuzz FUZZTIME=240s
 
       - name: Keep crashers

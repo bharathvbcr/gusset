@@ -794,6 +794,8 @@ jobs:
       # existed. These use Go's native fuzzing: no dependency to add, and it points
       # straight at the boundary where untrusted bytes actually enter.
       - name: Fuzz
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: make fuzz FUZZTIME=45s
 
       # A crasher is written to testdata/, which would otherwise be lost with the
