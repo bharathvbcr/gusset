@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/internal/hostprobe"
 )
 
 // workerEnv makes the test binary the worker: TestMain runs Serve on its own
@@ -40,11 +42,40 @@ const (
 // honest one.
 const modeEnv = "GUSSET_ISOLATE_WORKER_MODE"
 
+// execProbeEnv is a re-exec of this test binary that only checks whether the
+// worker's protocol descriptor survived exec. It is not a worker.
+const execProbeEnv = "GUSSET_ISOLATE_EXEC_PROBE"
+
 func TestMain(m *testing.M) {
+	if os.Getenv(execProbeEnv) == "1" {
+		os.Exit(execProbe())
+	}
 	if os.Getenv(workerEnv) == "1" {
 		os.Exit(workerMain())
 	}
 	os.Exit(m.Run())
+}
+
+// execProbe exits 0 when the protocol fd is not open in this process (EBADF)
+// and 2 when it is. Dup does not read the descriptor, so a failed CLOEXEC
+// cannot consume a protocol byte.
+func execProbe() int {
+	fd, err := strconv.Atoi(os.Getenv(EnvProtocolFD))
+	if err != nil || fd < 3 {
+		fmt.Fprintln(os.Stderr, "probe: protocol fd", os.Getenv(EnvProtocolFD), err)
+		return 3
+	}
+	dup, err := syscall.Dup(fd)
+	if err != nil {
+		if errors.Is(err, syscall.EBADF) {
+			return 0
+		}
+		fmt.Fprintln(os.Stderr, "probe:", err)
+		return 3
+	}
+	_ = syscall.Close(dup)
+	fmt.Fprintf(os.Stderr, "probe: fd %d still open after exec\n", fd)
+	return 2
 }
 
 func workerMain() int {
@@ -111,8 +142,59 @@ func misbehave(mode string, out *os.File) int {
 		if err := gc.Start(); err != nil {
 			return 1
 		}
+	case "answer-hold":
+		return answerThenHold(out)
+	case "cloexec":
+		return execProtocolChild()
 	}
 	time.Sleep(time.Minute)
+	return 0
+}
+
+// answerThenHold writes one result for the first submit, then keeps the
+// protocol write end open from a grandchild and exits. The frame is already
+// in the pipe when the worker dies; Wait must return that payload, not only
+// the poison from the missing EOF.
+func answerThenHold(out *os.File) int {
+	br := bufio.NewReader(os.Stdin)
+	var req request
+	if err := readFrame(br, maxRequestFrame, &req); err != nil {
+		fmt.Fprintln(os.Stderr, "answer-hold:", err)
+		return 1
+	}
+	if err := writeFrame(out, &response{ID: req.ID, Out: append([]byte(nil), req.In...)}, maxResponseFrame); err != nil {
+		fmt.Fprintln(os.Stderr, "answer-hold:", err)
+		return 1
+	}
+	gc := exec.Command("sleep", "4")
+	gc.Stdout, gc.Stderr = out, os.Stderr
+	if err := gc.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "answer-hold:", err)
+		return 1
+	}
+	os.Exit(0)
+	return 0
+}
+
+// execProtocolChild replaces this worker with a probe. The protocol fd must
+// not be open there: ProtocolOut marks it close-on-exec.
+func execProtocolChild() int {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, e := range os.Environ() {
+		k, _, _ := strings.Cut(e, "=")
+		if k == workerEnv || k == modeEnv || k == execProbeEnv {
+			continue
+		}
+		env = append(env, e)
+	}
+	env = append(env, execProbeEnv+"=1")
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = env
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "cloexec probe:", err)
+		return 1
+	}
 	return 0
 }
 
@@ -278,7 +360,7 @@ func TestParity_SecondWaiterIsBusy(t *testing.T) {
 			if since := time.Since(submitted); since < jobRuns {
 				t.Fatalf("first Wait to return (after %v, before the job could end) = %v; want ErrTicketBusy", since, refused)
 			}
-			t.Skip("the first waiter returned past the job's end: nothing left to probe on this host")
+			hostprobe.Skip(t, "the first waiter returned past the job's end: nothing left to probe on this host")
 		}
 		if err := <-results; err != nil {
 			t.Fatalf("owner Wait = %v; want the result", err)
@@ -735,7 +817,7 @@ func TestClose_BoundedWhileAWriterIsBlockedOnAFullStdin(t *testing.T) {
 	go func() {
 		in := make([]byte, maxInlineInput)
 		for id := uint64(1); ; id++ {
-			if err := p.send(&request{Op: opSubmit, ID: id, In: in}); err != nil {
+			if err := p.send(context.Background(), &request{Op: opSubmit, ID: id, In: in}); err != nil {
 				writer <- err
 				return
 			}
@@ -766,5 +848,834 @@ func TestSubmit_ReturnsCtxErrWhileTheWorkerHasNotYetBeenLatchedDead(t *testing.T
 	within(t, 3*time.Second, "Submit", func() { _, err = p.Submit(ctx, []byte{0}) })
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Submit = %v; want ctx.Err()", err)
+	}
+}
+
+// blockOnFullStdin fills the worker's stdin and parks one goroutine inside
+// send. The caller must not return that goroutine; Close does.
+func blockOnFullStdin(t *testing.T, p *Proc) <-chan struct{} {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		in := make([]byte, maxInlineInput)
+		for id := uint64(1); ; id++ {
+			if err := p.send(context.Background(), &request{Op: opSubmit, ID: id, In: in}); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-done:
+		t.Fatal("writer ended before the pipe filled")
+	case <-time.After(300 * time.Millisecond):
+	}
+	return done
+}
+
+// A deaf worker never reads stdin. Once the pipe is full, a Submit whose
+// context ends in 100ms must return DeadlineExceeded instead of waiting out
+// the writer that holds the pipe, and the permit comes back unless the
+// partial write poisoned the Proc.
+func TestProc_FullStdinSubmitHonorsDeadline(t *testing.T) {
+	p := startWorkerMode(t, "deaf")
+	blocked := blockOnFullStdin(t, p)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	got := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, err := p.Submit(ctx, []byte{0})
+		got <- err
+	}()
+	var err error
+	select {
+	case err = <-got:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Submit did not return within 500ms; a full stdin pipe held it past the deadline")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("Submit returned after %v", elapsed)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Submit = %v; want DeadlineExceeded", err)
+	}
+	p.mu.Lock()
+	poisoned := p.poisoned
+	p.mu.Unlock()
+	if !poisoned && len(p.sem) != 0 {
+		t.Fatalf("permit leaked: sem len %d and the Proc is not poisoned", len(p.sem))
+	}
+	select {
+	case <-blocked:
+		if !poisoned {
+			t.Fatal("the blocked send finished without the Proc being poisoned")
+		}
+	default:
+	}
+}
+
+// Wait's best-effort cancel must not run on the caller's goroutine. A send
+// already blocked on a full stdin pipe holds the write lock; Wait used to
+// take that lock before returning ctx.Err().
+func TestProc_WaitReturnsWhileSendBlocked(t *testing.T) {
+	p := startWorkerMode(t, "deaf")
+	ticket, err := p.Submit(context.Background(), []byte{0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := blockOnFullStdin(t, p)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	got := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, err := p.Wait(ctx, ticket)
+		got <- err
+	}()
+	select {
+	case err = <-got:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Wait did not return within 500ms while another send held the pipe")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("Wait returned after %v", elapsed)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Wait = %v; want DeadlineExceeded", err)
+	}
+	select {
+	case <-blocked:
+		t.Fatal("Wait returned only after the blocked send finished")
+	default:
+	}
+}
+
+// The Submit above times out waiting for the write lock. This one is the
+// writer: the pipe is already full and no other goroutine holds the lock, so
+// the deadline has to interrupt the write itself. That write may be partial,
+// so the Proc is poisoned and the permit is still restored.
+// fillStdin packs the worker's stdin until a write hits its deadline. The
+// pipe stays full and writeMu stays free: nothing is left blocked in send.
+func fillStdin(t *testing.T, p *Proc) {
+	t.Helper()
+	buf := bytes.Repeat([]byte{'x'}, 256<<10)
+	if err := p.stdin.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	filled := false
+	for range 8 {
+		if _, err := p.stdin.Write(buf); err != nil {
+			filled = true
+			break
+		}
+	}
+	if err := p.stdin.SetWriteDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if !filled {
+		t.Fatal("stdin accepted 2 MiB; the pipe never filled")
+	}
+}
+
+func TestProc_SubmitWriteOnFullPipeHonorsDeadline(t *testing.T) {
+	p := startWorkerMode(t, "deaf")
+	fillStdin(t, p)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	got := make(chan error, 1)
+	go func() {
+		_, err := p.Submit(ctx, []byte{0})
+		got <- err
+	}()
+	var err error
+	select {
+	case err = <-got:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Submit did not return within 500ms of a full-pipe write")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Submit = %v; want DeadlineExceeded", err)
+	}
+	p.mu.Lock()
+	poisoned := p.poisoned
+	p.mu.Unlock()
+	if !poisoned {
+		t.Fatal("a deadline during the write did not poison the Proc")
+	}
+	if len(p.sem) != 0 {
+		t.Fatalf("permit leaked: sem len %d", len(p.sem))
+	}
+}
+
+// SIGKILL while a grandchild holds the protocol write end used to leave read
+// blocked until that fd closed, so cmd.Wait never ran and a Submit with no
+// deadline never returned. The reaper must poison the Proc without Close.
+func TestProc_ExternalKillWithGrandchildPoisonsQuickly(t *testing.T) {
+	p := startWorkerMode(t, "grandchild")
+	ticket, err := p.Submit(context.Background(), []byte{0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan error, 1)
+	go func() {
+		_, err := p.Wait(context.Background(), ticket)
+		waited <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if err := syscall.Kill(p.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	killed := time.Now()
+	select {
+	case err := <-waited:
+		if !errors.Is(err, gusset.ErrPoisoned) {
+			t.Fatalf("parked Wait = %v; want ErrPoisoned", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("parked waiter not released within 2s of SIGKILL; read is still waiting for EOF")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := p.Submit(ctx, []byte{1}); !errors.Is(err, gusset.ErrPoisoned) {
+		t.Fatalf("Submit after SIGKILL = %v; want ErrPoisoned", err)
+	}
+	if elapsed := time.Since(killed); elapsed > 2*time.Second {
+		t.Fatalf("Submit still not poisoned %v after SIGKILL", elapsed)
+	}
+	start := time.Now()
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close = %v; the reader should already have finished", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Close took %v; want well under the close budget", elapsed)
+	}
+}
+
+func TestProc_ProtocolFDIsCloseOnExec(t *testing.T) {
+	p := startWorkerMode(t, "cloexec")
+	deadline := time.Now().Add(3 * time.Second)
+	var last error
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		_, last = p.Submit(ctx, []byte{0})
+		cancel()
+		if errors.Is(last, gusset.ErrPoisoned) {
+			p.mu.Lock()
+			waitErr := p.waitErr
+			p.mu.Unlock()
+			if waitErr != nil {
+				t.Fatalf("worker exit %v; the protocol fd was still open in the child, or the probe failed", waitErr)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("worker did not exit after the exec probe; last Submit: %v", last)
+}
+
+func TestProc_TypedNilTraceCarrierReturnsError(t *testing.T) {
+	p := startWorker(t)
+	var c *nilReceiverCarrier
+	ctx := context.WithValue(context.Background(), gusset.SpanContextKey, c)
+	_, err := p.Call(ctx, []byte{0})
+	if err == nil {
+		t.Fatal("Call with a typed-nil trace carrier returned a nil error")
+	}
+	out, err := p.Call(bg(t), []byte{0, 1})
+	if err != nil || !bytes.Equal(out, []byte{0, 1}) {
+		t.Fatalf("Call after the typed-nil carrier = %v, %v", out, err)
+	}
+}
+
+// nilReceiverCarrier panics on a nil pointer, which is what a typed nil
+// stored in a TraceCarrier interface does. A value with nil-safe methods
+// must still be callable; this one is not.
+type nilReceiverCarrier struct{ id byte }
+
+func (c *nilReceiverCarrier) TraceID() [16]byte { return [16]byte{c.id} }
+func (c *nilReceiverCarrier) SpanID() [8]byte   { return [8]byte{c.id} }
+
+// Close marks the ticket abandoned and closed under one lock, then waits out
+// its budget. A Wait that enters the lookup in that window must match
+// ErrClosed. The already-registered waiter is a different path: it is sent
+// errProcClosed before it looks the ticket up again.
+func TestWait_DuringCloseIsErrClosed(t *testing.T) {
+	p := startWorkerMode(t, "deaf")
+	ticket, err := p.Submit(context.Background(), []byte{0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- p.close(2 * time.Second) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		p.mu.Lock()
+		closed := p.closed
+		abandoned := false
+		if tkt := p.tickets[ticket]; tkt != nil {
+			abandoned = tkt.abandoned
+		}
+		p.mu.Unlock()
+		if closed && abandoned {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Close did not mark the in-flight ticket abandoned")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_, err = p.Wait(context.Background(), ticket)
+	if !errors.Is(err, gusset.ErrClosed) || errors.Is(err, gusset.ErrUnknownTicket) {
+		t.Fatalf("Wait during Close = %v; want ErrClosed, not ErrUnknownTicket", err)
+	}
+	select {
+	case cerr := <-errCh:
+		if cerr == nil || !strings.Contains(cerr.Error(), "killed") {
+			t.Fatalf("close = %v; want the budget kill", cerr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return")
+	}
+}
+
+// Wait's cancel used to call send(context.Background()). On a full pipe that
+// goroutine acquired writeMu and blocked in the write forever, and every
+// later Wait queued another goroutine behind it. The cancel's own deadline
+// has to poison the Proc or give the lock back.
+func TestProc_CancelSendDoesNotPinTheWriteLock(t *testing.T) {
+	p := startWorkerMode(t, "deaf")
+	ticket, err := p.Submit(context.Background(), []byte{0x11})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fillStdin(t, p)
+
+	p.mu.Lock()
+	ids := make([]uint64, 0, 20)
+	ids = append(ids, ticket)
+	for n := 0; len(ids) < 20; n++ {
+		id := uint64(10_000 + n)
+		p.tickets[id] = &ticketState{}
+		ids = append(ids, id)
+	}
+	p.mu.Unlock()
+
+	before := runtime.NumGoroutine()
+	for _, id := range ids {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		start := time.Now()
+		_, werr := p.Wait(ctx, id)
+		cancel()
+		if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+			t.Fatalf("Wait %d took %v", id, elapsed)
+		}
+		if !errors.Is(werr, context.DeadlineExceeded) {
+			t.Fatalf("Wait %d = %v; want DeadlineExceeded", id, werr)
+		}
+	}
+
+	// cancelSendBudget is 1s and the waits above already overlapped it. A
+	// following Submit must return inside 2s, not for the life of the Proc.
+	subCtx, subCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	subDone := make(chan error, 1)
+	go func() {
+		_, err := p.Submit(subCtx, []byte{0})
+		subDone <- err
+	}()
+	var subErr error
+	select {
+	case subErr = <-subDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Submit blocked; a cancel send is holding writeMu with no deadline")
+	}
+	subCancel()
+	p.mu.Lock()
+	poisoned := p.poisoned
+	p.mu.Unlock()
+	if !poisoned {
+		select {
+		case p.writeMu <- struct{}{}:
+			<-p.writeMu
+		default:
+			t.Fatalf("Submit = %v; writeMu still held and the Proc is not poisoned", subErr)
+		}
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for runtime.NumGoroutine() > before+8 {
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutines %d -> %d; cancel sends still parked", before, runtime.NumGoroutine())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := p.Close(); err != nil && !strings.Contains(err.Error(), "killed") {
+		t.Fatalf("Close = %v", err)
+	}
+}
+
+func TestProc_QueuedResultSurvivesGrandchild(t *testing.T) {
+	p := startWorkerMode(t, "answer-hold")
+	in := []byte{0xAB, 0xCD}
+	ticket, err := p.Submit(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := p.Wait(ctx, ticket)
+	if err != nil {
+		t.Fatalf("Wait = %v; want the queued payload %v", err, in)
+	}
+	if !bytes.Equal(out, in) {
+		t.Fatalf("Wait = %v; want %v", out, in)
+	}
+}
+
+// A past read deadline sticks in bufio and the next readFrame never calls the
+// file. Bytes already in the pipe must still be delivered. pw stays open so
+// the pipe has no EOF, the same shape as a grandchild holding the write end.
+func TestRead_StickyDeadlineKeepsAQueuedFrame(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	})
+	payload := []byte{0xAB, 0xCD}
+	if err := writeFrame(pw, &response{ID: 4, Out: payload}, maxResponseFrame); err != nil {
+		t.Fatal(err)
+	}
+	if err := pr.SetReadDeadline(time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(pr)
+	var resp response
+	err = readFrame(br, maxResponseFrame, &resp)
+	if err == nil {
+		if resp.ID != 4 || !bytes.Equal(resp.Out, payload) {
+			t.Fatalf("frame = %+v", resp)
+		}
+		return
+	}
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("first read = %v; want a deadline with the frame still queued", err)
+	}
+	src := &streamSrc{r: pr}
+	br = detachBufio(br, src)
+	if err := pr.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := readFrame(br, maxResponseFrame, &resp); err != nil {
+		t.Fatalf("read after the sticky deadline = %v; the queued frame was dropped", err)
+	}
+	if resp.ID != 4 || !bytes.Equal(resp.Out, payload) {
+		t.Fatalf("frame = id %d out %v", resp.ID, resp.Out)
+	}
+}
+
+// A deadline already in the past makes poll return before the syscall, so
+// ReadFull copies nothing and the error is a plain deadline, not a frameError.
+// The frame sitting in the pipe still has to be delivered by the probe.
+func TestRead_PastDeadlineWithNothingConsumedStillProbes(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	})
+	payload := []byte{0xAB, 0xCD}
+	if err := writeFrame(pw, &response{ID: 7, Out: payload}, maxResponseFrame); err != nil {
+		t.Fatal(err)
+	}
+	if err := pr.SetReadDeadline(time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	p := &Proc{
+		rd:         pr,
+		sem:        make(chan struct{}, 1),
+		tickets:    make(map[uint64]*ticketState, 1),
+		readerDone: make(chan struct{}),
+		procExited: make(chan struct{}),
+	}
+	close(p.procExited)
+	waiter := make(chan result, 1)
+	p.tickets[7] = &ticketState{waiter: waiter}
+	p.sem <- struct{}{}
+	go p.read(bufio.NewReader(pr))
+
+	select {
+	case <-p.readerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("read did not finish")
+	}
+	select {
+	case got := <-waiter:
+		if got.err != nil || !bytes.Equal(got.out, payload) {
+			t.Fatalf("waiter = out %x err %v; want %x", got.out, got.err, payload)
+		}
+	default:
+		t.Fatal("waiter received nothing")
+	}
+}
+
+// Two complete frames are queued. The first two header bytes have already
+// been pulled into bufio — the shape of a reader blocked mid-header — and a
+// past deadline is set before read runs, the same wake waitProc uses. The
+// second frame must still be delivered. probed is set by that first deadline,
+// so a one-shot probe that resumes after the consumed prefix drops it.
+//
+// Cleanup deletes every ticket before it closes readerDone, and deliver
+// deletes a ticket it hands to a waiter. The map is empty either way; the
+// waiter is the observation that survives.
+func TestRead_TwoQueuedFramesSurviveAMidHeaderDeadline(t *testing.T) {
+	payloads := [][]byte{{0x11}, {0x22, 0x33}}
+	pr, br := queueFramesPastDeadline(t, payloads, 2)
+	dead, got := readQueuedFrames(t, pr, br, payloads)
+	assertQueuedPayloads(t, payloads, dead, got)
+}
+
+// The whole 4-byte header of frame 1 is already in bufio. The rest of that
+// frame and all of frame 2 sit in the pipe behind a past deadline, and the
+// write end stays open. A ReadFull that returns the deadline after taking
+// the header must not drop the body that follows.
+func TestRead_TwoQueuedFramesSurviveAMidBodyDeadline(t *testing.T) {
+	payloads := [][]byte{{0x11}, {0x22, 0x33}}
+	pr, br := queueFramesPastDeadline(t, payloads, 4)
+	dead, got := readQueuedFrames(t, pr, br, payloads)
+	assertQueuedPayloads(t, payloads, dead, got)
+}
+
+// queueFramesPastDeadline writes two frames, leaves the first prefix bytes
+// buffered in a bufio.Reader (via Peek), writes the remainder, and sets a
+// deadline in the past. The write end stays open.
+func queueFramesPastDeadline(t *testing.T, payloads [][]byte, prefix int) (*os.File, *bufio.Reader) {
+	t.Helper()
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	})
+	var framed bytes.Buffer
+	for i, payload := range payloads {
+		if err := writeFrame(&framed, &response{ID: uint64(i + 1), Out: payload}, maxResponseFrame); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw := framed.Bytes()
+	if prefix <= 0 || prefix >= len(raw) {
+		t.Fatalf("prefix %d out of range for %d framed bytes", prefix, len(raw))
+	}
+	if _, err := pw.Write(raw[:prefix]); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(pr)
+	if _, err := br.Peek(prefix); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pw.Write(raw[prefix:]); err != nil {
+		t.Fatal(err)
+	}
+	if err := pr.SetReadDeadline(time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	return pr, br
+}
+
+// readQueuedFrames runs Proc.read with one buffered waiter per ticket.
+// deliver sends the payload and drops the ticket; cleanup sends p.dead only
+// while the ticket is still in the map. One slot cannot take both.
+func readQueuedFrames(t *testing.T, pr *os.File, br *bufio.Reader, payloads [][]byte) (error, []result) {
+	t.Helper()
+	p := &Proc{
+		rd:         pr,
+		sem:        make(chan struct{}, len(payloads)),
+		tickets:    make(map[uint64]*ticketState, len(payloads)),
+		readerDone: make(chan struct{}),
+		procExited: make(chan struct{}),
+	}
+	close(p.procExited)
+	waiters := make([]chan result, len(payloads))
+	for i := range payloads {
+		ch := make(chan result, 1)
+		waiters[i] = ch
+		p.tickets[uint64(i+1)] = &ticketState{waiter: ch}
+		p.sem <- struct{}{}
+	}
+	go p.read(br)
+
+	select {
+	case <-p.readerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("read did not finish")
+	}
+	p.mu.Lock()
+	dead := p.dead
+	p.mu.Unlock()
+	got := make([]result, len(payloads))
+	for i, ch := range waiters {
+		select {
+		case got[i] = <-ch:
+		default:
+			t.Fatalf("ticket %d waiter received nothing; reader dead=%v", i+1, dead)
+		}
+	}
+	return dead, got
+}
+
+func assertQueuedPayloads(t *testing.T, payloads [][]byte, dead error, got []result) {
+	t.Helper()
+	var mismatch []string
+	t.Logf("reader dead=%v", dead)
+	for i, payload := range payloads {
+		t.Logf("ticket %d out=%x err=%v", i+1, got[i].out, got[i].err)
+		if got[i].err != nil || !bytes.Equal(got[i].out, payload) {
+			mismatch = append(mismatch, fmt.Sprintf("ticket %d out=%x err=%v; want %x", i+1, got[i].out, got[i].err, payload))
+		}
+	}
+	if len(mismatch) > 0 {
+		t.Fatalf("reader dead=%v\n%s", dead, strings.Join(mismatch, "\n"))
+	}
+}
+
+// Header splits at the first and third byte. The existing mid-header case
+// peeks two bytes; a one-byte or three-byte prefix is a different consumed
+// slice for the probe to put back. Both frames are already queued behind it.
+func TestRead_HeaderSplitAtByte1DeliversBothFrames(t *testing.T) {
+	payloads := [][]byte{{0x11}, {0x22, 0x33}}
+	pr, br := queueFramesPastDeadline(t, payloads, 1)
+	dead, got := readQueuedFrames(t, pr, br, payloads)
+	assertQueuedPayloads(t, payloads, dead, got)
+}
+
+func TestRead_HeaderSplitAtByte3DeliversBothFrames(t *testing.T) {
+	payloads := [][]byte{{0x11}, {0x22, 0x33}}
+	pr, br := queueFramesPastDeadline(t, payloads, 3)
+	dead, got := readQueuedFrames(t, pr, br, payloads)
+	assertQueuedPayloads(t, payloads, dead, got)
+}
+
+// Four header bytes plus the first body byte sit in bufio. The rest of that
+// body and the second frame are still in the pipe, and the write end stays
+// open. The probe has to put the partial body back, not just the header.
+func TestRead_BodySplitAfterFirstByteDeliversBothFrames(t *testing.T) {
+	payloads := [][]byte{{0x11}, {0x22, 0x33}}
+	var one bytes.Buffer
+	if err := writeFrame(&one, &response{ID: 1, Out: payloads[0]}, maxResponseFrame); err != nil {
+		t.Fatal(err)
+	}
+	bodyLen := int(binary.BigEndian.Uint32(one.Bytes()[:4]))
+	if bodyLen < 2 {
+		t.Fatalf("first body is %d bytes; the split has to fall inside it", bodyLen)
+	}
+	pr, br := queueFramesPastDeadline(t, payloads, 4+1)
+	dead, got := readQueuedFrames(t, pr, br, payloads)
+	assertQueuedPayloads(t, payloads, dead, got)
+}
+
+// Three complete frames are already in the pipe. Nothing has been peeked, and
+// the deadline is already past, so the first read is a zero-byte deadline.
+// The one probe has to deliver every queued frame, not stop after the first.
+func TestRead_ThreeQueuedFramesPastDeadlineNothingPeeked(t *testing.T) {
+	payloads := [][]byte{{0x01}, {0x02}, {0x03}}
+	var raw bytes.Buffer
+	for i, payload := range payloads {
+		if err := writeFrame(&raw, &response{ID: uint64(i + 1), Out: payload}, maxResponseFrame); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pr, br := queueRawPastDeadline(t, raw.Bytes(), 0)
+	dead, got := readQueuedFrames(t, pr, br, payloads)
+	assertQueuedPayloads(t, payloads, dead, got)
+}
+
+// A declared length over the limit is a plain error. The probe must not retry
+// it, and the valid frame queued behind that header must not be delivered.
+func TestRead_OverLimitLengthDoesNotDeliverFollowingFrame(t *testing.T) {
+	payload := []byte{0xAB}
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], 0xFFFFFFFF)
+	if uint64(0xFFFFFFFF) <= uint64(maxResponseFrame) {
+		t.Fatal("declared length is inside the limit")
+	}
+	var raw bytes.Buffer
+	raw.Write(hdr[:])
+	if err := writeFrame(&raw, &response{ID: 1, Out: payload}, maxResponseFrame); err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []int{0, 1} {
+		t.Run(fmt.Sprintf("prefix%d", prefix), func(t *testing.T) {
+			pr, br := queueRawPastDeadline(t, raw.Bytes(), prefix)
+			dead, got := readQueuedFrames(t, pr, br, [][]byte{payload})
+			assertFollowingFrameRefused(t, payload, dead, got[0], "exceeds")
+		})
+	}
+}
+
+// A complete frame of invalid JSON latches the reader dead. The valid frame
+// behind it is not a resync point.
+func TestRead_InvalidJSONLatchesDeadBeforeTheNextFrame(t *testing.T) {
+	payload := []byte{0x5A}
+	bad := []byte("[]")
+	var raw bytes.Buffer
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(bad)))
+	raw.Write(hdr[:])
+	raw.Write(bad)
+	if err := writeFrame(&raw, &response{ID: 1, Out: payload}, maxResponseFrame); err != nil {
+		t.Fatal(err)
+	}
+	pr, br := queueRawPastDeadline(t, raw.Bytes(), 0)
+	dead, got := readQueuedFrames(t, pr, br, [][]byte{payload})
+	assertFollowingFrameRefused(t, payload, dead, got[0], "json")
+}
+
+// `{}` is a valid response (id 0, empty out). It must be delivered, including
+// when the whole frame is already buffered, not dropped as a short prefix.
+// The second frame distinguishes "dropped the prefix" from "parsed it".
+func TestRead_EmptyObjectIsDeliveredNotDropped(t *testing.T) {
+	second := []byte{0x7E}
+	var raw bytes.Buffer
+	if err := writeFrame(&raw, &response{}, maxResponseFrame); err != nil {
+		t.Fatal(err)
+	}
+	first := 4 + int(binary.BigEndian.Uint32(raw.Bytes()[:4]))
+	if string(raw.Bytes()[4:first]) != "{}" {
+		t.Fatalf("empty response frame is %q", raw.Bytes()[4:first])
+	}
+	if err := writeFrame(&raw, &response{ID: 1, Out: second}, maxResponseFrame); err != nil {
+		t.Fatal(err)
+	}
+	for name, prefix := range map[string]int{"unpeeked": 0, "firstFramePeeked": first} {
+		t.Run(name, func(t *testing.T) {
+			pr, br := queueRawPastDeadline(t, raw.Bytes(), prefix)
+			dead, got := readQueuedIDs(t, pr, br, []uint64{0, 1})
+			t.Logf("reader dead=%v", dead)
+			if got[0].err != nil || len(got[0].out) != 0 {
+				t.Fatalf("empty object out=%x err=%v; want an empty delivery", got[0].out, got[0].err)
+			}
+			if got[1].err != nil || !bytes.Equal(got[1].out, second) {
+				t.Fatalf("following frame out=%x err=%v; want %x", got[1].out, got[1].err, second)
+			}
+		})
+	}
+}
+
+// A declared length of zero is not a JSON value and not a dropped prefix.
+// The reader latches that error and does not deliver the frame behind it.
+func TestRead_ZeroLengthBodyIsFatal(t *testing.T) {
+	payload := []byte{0x7E}
+	var raw bytes.Buffer
+	var hdr [4]byte
+	raw.Write(hdr[:])
+	if err := writeFrame(&raw, &response{ID: 1, Out: payload}, maxResponseFrame); err != nil {
+		t.Fatal(err)
+	}
+	pr, br := queueRawPastDeadline(t, raw.Bytes(), 0)
+	dead, got := readQueuedFrames(t, pr, br, [][]byte{payload})
+	assertFollowingFrameRefused(t, payload, dead, got[0], "unexpected end of JSON")
+}
+
+// queueRawPastDeadline writes raw, optionally leaving the first prefix bytes
+// buffered via Peek, then sets a deadline in the past. The write end stays
+// open. prefix 0 buffers nothing.
+func queueRawPastDeadline(t *testing.T, raw []byte, prefix int) (*os.File, *bufio.Reader) {
+	t.Helper()
+	if prefix < 0 || prefix >= len(raw) {
+		t.Fatalf("prefix %d out of range for %d bytes", prefix, len(raw))
+	}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	})
+	if prefix == 0 {
+		if _, err := pw.Write(raw); err != nil {
+			t.Fatal(err)
+		}
+		if err := pr.SetReadDeadline(time.Unix(1, 0)); err != nil {
+			t.Fatal(err)
+		}
+		return pr, bufio.NewReader(pr)
+	}
+	if _, err := pw.Write(raw[:prefix]); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(pr)
+	if _, err := br.Peek(prefix); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pw.Write(raw[prefix:]); err != nil {
+		t.Fatal(err)
+	}
+	if err := pr.SetReadDeadline(time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	return pr, br
+}
+
+// readQueuedIDs is readQueuedFrames for tickets that are not 1..n.
+// deliver removes a ticket before readerDone is closed, so the waiter is
+// the only record of a payload.
+func readQueuedIDs(t *testing.T, pr *os.File, br *bufio.Reader, ids []uint64) (error, []result) {
+	t.Helper()
+	p := &Proc{
+		rd:         pr,
+		sem:        make(chan struct{}, len(ids)),
+		tickets:    make(map[uint64]*ticketState, len(ids)),
+		readerDone: make(chan struct{}),
+		procExited: make(chan struct{}),
+	}
+	close(p.procExited)
+	waiters := make([]chan result, len(ids))
+	for i, id := range ids {
+		ch := make(chan result, 1)
+		waiters[i] = ch
+		p.tickets[id] = &ticketState{waiter: ch}
+		p.sem <- struct{}{}
+	}
+	go p.read(br)
+
+	select {
+	case <-p.readerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("read did not finish")
+	}
+	p.mu.Lock()
+	dead := p.dead
+	p.mu.Unlock()
+	got := make([]result, len(ids))
+	for i, ch := range waiters {
+		select {
+		case got[i] = <-ch:
+		default:
+			t.Fatalf("ticket %d waiter received nothing; reader dead=%v", ids[i], dead)
+		}
+	}
+	return dead, got
+}
+
+func assertFollowingFrameRefused(t *testing.T, payload []byte, dead error, got result, want string) {
+	t.Helper()
+	t.Logf("reader dead=%v waiter out=%x err=%v", dead, got.out, got.err)
+	if got.err == nil || bytes.Equal(got.out, payload) {
+		t.Fatalf("following frame delivered out=%x err=%v dead=%v", got.out, got.err, dead)
+	}
+	if dead == nil || !strings.Contains(dead.Error(), want) {
+		t.Fatalf("dead = %v; want it to mention %q", dead, want)
 	}
 }
