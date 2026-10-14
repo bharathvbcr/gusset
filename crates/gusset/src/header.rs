@@ -220,6 +220,28 @@ mod tests {
         assert_eq!(h.span_id, [0u8; 8]);
     }
 
+    /// A C host reads `gusset.h`, not the Rust docs. Both sentences are the
+    /// contract: `reserved` is the opcode (the name stays; it is ABI), and a
+    /// flag bit this library does not know is refused rather than ignored.
+    #[test]
+    fn callheader_comment_names_the_opcode_and_refuses_unknown_flags() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../internal/ffi/gusset.h");
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => panic!("cannot read {}: {e}", path.display()),
+        };
+        for sentence in [
+            "The field is named `reserved` but it is the engine dispatch opcode (0 = global handler).",
+            "Unknown flag bits are refused.",
+        ] {
+            assert!(
+                src.contains(sentence),
+                "gusset.h lost the CallHeader sentence {sentence:?}"
+            );
+        }
+    }
+
     #[test]
     fn known_flags_are_exactly_the_documented_bits() {
         assert_eq!(GUSSET_FLAG_DIAGNOSTIC_ENGINE, 1);

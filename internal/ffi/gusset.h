@@ -57,6 +57,8 @@ extern "C" {
  * Clear the bit before using the id. Ids are always below this bit. */
 #define GUSSET_TAKE_OWNED_FLAG (1ull << 63)
 
+/* CallHeader. The field is named `reserved` but it is the engine dispatch opcode (0 = global handler).
+ * Unknown flag bits are refused. */
 typedef struct {
     uint8_t trace_id[16];
     uint8_t span_id[8];

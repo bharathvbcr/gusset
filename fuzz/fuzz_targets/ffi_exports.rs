@@ -207,7 +207,7 @@ impl Rig {
                             u64::from(c.u32() % 5_000_000)
                         },
                         flags,
-                        reserved: if c.u8().is_multiple_of(4) { c.u32() } else { 0 },
+                        reserved: c.u32(),
                     };
                     let mut input = [0u8; 64];
                     // The diagnostic engine picks its behaviour from input[0]:
