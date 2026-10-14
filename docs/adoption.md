@@ -404,7 +404,7 @@ Things worth knowing before you hit them:
   engine still references. For a tighter bound, call `gusset.Shutdown(budget)`
   first and then `Close`: the cancel has already landed, so the join is short.
   `Shutdown` is process-wide and one-way.
-- **Registering an engine can fail.** `gusset::register_engine` returns an
+- **Registering an engine can fail.** `gusset_core::register_engine` returns an
   error when the opcode is already registered (the first handler stays) and
   refuses opcode 0, which dispatch never looks up. Check the result at startup.
   Handlers are process-global: a panic poisons the handle but leaves the hook,
@@ -430,7 +430,7 @@ Things worth knowing before you hit them:
 
 ## 5. Zero-copy output with the stable `Allocator` trait (Rust 1.100+)
 
-When your umbrella crate builds with Rust 1.100 or newer, `gusset::BufferAlloc`
+When your umbrella crate builds with Rust 1.100 or newer, `gusset_core::BufferAlloc`
 implements `std::alloc::Allocator`. Build a large output directly in buffer memory
 and return it. Gusset hands that allocation to Go as the result buffer. There is
 no copy on the worker and none on the cgo thread, and the memory is 64-byte
@@ -462,7 +462,7 @@ gusset_core::register_engine(7, |ctx, input| {
   the oversized allocation freed.
 - **Older compilers are unaffected.** A build-time probe
   (`crates/gusset/allocator_probe.rs`) enables all of this per compiler, and
-  `gusset::ALLOCATOR_API` reports the result. `GUSSET_ALLOCATOR_API=0` forces
+  `gusset_core::ALLOCATOR_API` reports the result. `GUSSET_ALLOCATOR_API=0` forces
   the fallback, and `=1` turns a failed probe into a build error that prints
   the compiler's output.
 - **Gate your own code on gusset's answer, not your own probe.** `gusset`
@@ -479,7 +479,9 @@ gusset_core::register_engine(7, |ctx, input| {
   ```
 
   A probe of your own could disagree with the one gusset compiled with.
-  `crates/gusset-example` uses exactly this, and its test asserts the two agree.
+  `crates/gusset-example` is an rlib example engine in this workspace, not a
+  second staticlib to link beside `libgusset.a`. It gates on this `build.rs`,
+  and its test asserts the two answers agree.
 - **`JobOutput` is `#[non_exhaustive]`.** Its variants depend on the compiler,
   so an exhaustive `match` would compile on one toolchain and fail on the next.
   Add a `_ =>` arm.

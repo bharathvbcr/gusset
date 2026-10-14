@@ -279,6 +279,48 @@ jobs:
           GUSSET_STRESS=5m GOGC=1 \
             ./hammer-asan.test -test.run Hammer -test.count=1 -test.timeout 30m -test.v
 
+  # Stable does not have std::alloc::Allocator, so the adopter walkthrough
+  # warns and does not compile the step-5 snippet. This nightly does: the same
+  # walkthrough, with the probe forced on, must compile that snippet. The fuzz
+  # jobs below are unchanged.
+  step5-snippet:
+    name: Step 5 snippet (nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GUSSET_ALLOCATOR_API: '1'
+      GUSSET_REQUIRE_STEP5: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Rust Nightly
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          cache: false
+
+      - name: Install pkg-config
+        run: |
+          if command -v pkg-config >/dev/null 2>&1; then
+            exit 0
+          fi
+          sudo apt-get update && sudo apt-get install -y pkg-config
+
+      - name: Compile the step 5 snippet
+        env:
+          WORKDIR: ${{ runner.temp }}/adopter
+        run: |
+          mkdir -p "$WORKDIR"
+          tests/adopter/walkthrough.sh
+
   # libFuzzer targets over the Rust side of the boundary (fuzz/, its own
   # workspace): the log ring and drain, panic-payload truncation, ring slot
   # records, arbitrary 40-byte call headers through a real job, and the raw C
@@ -364,7 +406,7 @@ jobs:
   # main: a dispatch on a branch is someone already watching the run.
   report:
     name: Open an issue on failure
-    needs: [miri, sanitizer, hammer, hammer-heap, cargo-fuzz, go-fuzz]
+    needs: [miri, sanitizer, hammer, hammer-heap, step5-snippet, cargo-fuzz, go-fuzz]
     if: failure() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
