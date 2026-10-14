@@ -210,7 +210,7 @@ mod tests {
     fn header_layout_is_the_documented_40_bytes() {
         assert_eq!(core::mem::size_of::<CallHeader>(), 40);
         assert_eq!(core::mem::align_of::<CallHeader>(), 8);
-        // Reserved exists to pad to 40; a default header must be all zeros so an
+        // `reserved` is the opcode, and a default header is still all zeros so an
         // unset field never reads as a set flag on the other side.
         let h = CallHeader::default();
         assert_eq!(h.flags, 0);
