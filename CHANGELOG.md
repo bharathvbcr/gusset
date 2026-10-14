@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased] - 2026-10-13 · Caller fd flags survive a refused Darwin open, and the recorder's lock cannot fail open
+
+From `gs-boundary-defence-in-depth`, `ft-0f6a723d` and `ft-568a30e2`. No export signature, ABI or public Go API change. GitHub Actions has not run this tree. No quiet-host benchmark baseline was recorded.
+
+### Boundary
+- **A failed `F_SETNOSIGPIPE` restores the caller's status flags (I1).** `set_nonblocking` saved `F_GETFL`, set `O_NONBLOCK`, then on Apple set `F_SETNOSIGPIPE`. If that second call failed, `O_NONBLOCK` stayed on a descriptor `open` had not taken. The flags captured before the call are written back with `F_SETFL`. If the restore itself fails, the error names both failures and `O_NONBLOCK` may remain. Success still sets `O_NONBLOCK` and, on Apple, `NOSIGPIPE`. A pre-set `O_APPEND` is kept.
+- **`gusset.h` says what `CallHeader.reserved` is.** The field name stays (it is ABI). The comment states it is the engine dispatch opcode, with 0 meaning the global handler, and that unknown flag bits are refused. A unit test fails if either sentence disappears. The `ffi_exports` fuzz target sets `reserved` from its input on every submit.
+- **`ffi_exports` stays at 15 of 17 exports.** DECISIONS 2026-10-13: `gusset_init` and `gusset_shutdown` stay out of that target. They are process-global. No lifecycle harness was added.
+
+### Adopter
+- **The step-5 snippet is compiled where the compiler has the Allocator API (I4).** On a compiler whose probe is off, the walkthrough emits a GitHub `::warning::` and continues. `GUSSET_REQUIRE_STEP5=1` turns that skip into a failure. Nightly job `step5-snippet` runs the walkthrough with the probe forced on. A copy of the snippet whose output type does not exist fails `cargo check`, and the compiler output must name that type. Nothing broken is left in the tree.
+- **Adopter prose uses the step-1 crate name.** `register_engine`, `BufferAlloc` and `ALLOCATOR_API` say `gusset_core::`. The quoted runtime error still says `gusset::set_engine_handler()`, which is what the library prints.
+- **gussetvet matches the files cgo would compile.** `#cgo noescape` and `#cgo nocallback` are one set for the package, required only for an export a file references as `C.<name>`. A second file whose only `#cgo` line is `LDFLAGS` is not a violation. Directives in a file the default build skips (`//go:build ignore`, another GOOS) do not satisfy a reference in a file the build compiles. Each physical line of a `/* */` preamble is reported at its own line.
+- **`gusset-example` is an rlib.** `crate-type` no longer includes `staticlib`. `libc` is a dev-dependency. No new `extern "C"` export. `docs/adoption.md` describes it that way.
+
+### Bench
+- **The recorder no longer signals its own process group (I4).** Interrupt and terminate kill the child process group that run started, wait for it, and exit 130. The EXIT trap then removes that run's lock and temporary directory. The lock directory is renamed into place only after `owner` and `pgid` exist. A lock with no pgid is held for 2 seconds instead of being stolen. Variant rounds alternate: odd rounds in listed order, even rounds reversed, and the provenance header records that order.
+- **Dispatch benches use the existing API.** A Rust bench binary compares the diagnostic engine with `set_engine_handler` (opcode 0, which `register_engine` refuses) and with `register_engine(7)`. Go benches cover an already-expired `Call`, `Discard`, and `Stats`. No new C export and no second staticlib. A quiet-host baseline was not recorded.
+
 ## [Unreleased] - 2026-10-13 · A required probe fails when it does not run, and a split isolate frame is kept
 
 From `ft-1f4a1228` (CI gates) and `gs-isolate-corrupt-frame-hang` (isolate spike), plus the LiveBytes hygiene fix on the same branch (`ft-8a7cd8ef`). No export signature, ABI or public Go API change. `internal/hostprobe` is internal. The isolate work stays in `internal/isolate`. GitHub Actions has not run this tree.

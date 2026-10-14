@@ -2,9 +2,11 @@
 
 [Documentation Hub](README.md) · [Why Gusset is Needed](why.md) · [Adoption Guide](adoption.md)
 
-Gusset is **unix-only**. `crates/gusset/src/lib.rs` fails the build with a named
-error on any non-unix target rather than letting it fail deep inside `pool::sys`
-with a pile of missing `libc` symbols.
+Gusset supports **linux-gnu, linux-musl and macOS**. `crates/gusset/src/lib.rs`
+fails the build with a named error on any other target, including Windows and
+other unix systems, rather than letting it fail deep inside `pool::sys` with a
+pile of missing `libc` symbols. cgo is required: a Go build with `CGO_ENABLED=0`
+or `GOOS=windows` fails with `gusset requires cgo on a unix target`.
 
 This page exists because the CI matrix used to list a `cross` job covering
 `windows/amd64-gnu`, and no such job existed. A documented Windows leg that never
@@ -20,7 +22,8 @@ completion path works there.
 | `x86_64-unknown-linux-gnu` | supported | `unit`, `race-gc`, `soak`, `cgocheck2`, `memlimit`, `lint`, `bench`, `fuzz`, `r14`, `adopter`, the two floor jobs; nightly `sanitizer` (ASan), `miri`, `hammer`, `hammer-heap` (runtime) |
 | `aarch64-unknown-linux-gnu` | supported | `unit` and `r14` on a native arm64 runner (runtime); `cross` (compile) |
 | `x86_64-unknown-linux-musl` | supported | `musl`, `r14-musl` (runtime), `cross` (compile) |
-| `*-pc-windows-*` | **not supported** | build fails with a named error |
+| `*-pc-windows-*` | **not supported** | Rust and Go builds fail with a named error |
+| other unix (FreeBSD, OpenBSD, illumos, …) | **not supported** | Rust build fails with the same named error |
 
 A job runs only where this table says. In particular macOS does not run
 `race-gc`, `cgocheck2`, `memlimit`, `lint` or `bench` (the committed darwin
