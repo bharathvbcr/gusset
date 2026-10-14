@@ -1339,7 +1339,7 @@ func TestRead_PastDeadlineWithNothingConsumedStillProbes(t *testing.T) {
 func TestRead_TwoQueuedFramesSurviveAMidHeaderDeadline(t *testing.T) {
 	payloads := [][]byte{{0x11}, {0x22, 0x33}}
 	pr, br := queueFramesPastDeadline(t, payloads, 2)
-	dead, got := readQueuedFrames(t, pr, br, payloads)
+	got, dead := readQueuedFrames(t, pr, br, payloads)
 	assertQueuedPayloads(t, payloads, dead, got)
 }
 
@@ -1350,7 +1350,7 @@ func TestRead_TwoQueuedFramesSurviveAMidHeaderDeadline(t *testing.T) {
 func TestRead_TwoQueuedFramesSurviveAMidBodyDeadline(t *testing.T) {
 	payloads := [][]byte{{0x11}, {0x22, 0x33}}
 	pr, br := queueFramesPastDeadline(t, payloads, 4)
-	dead, got := readQueuedFrames(t, pr, br, payloads)
+	got, dead := readQueuedFrames(t, pr, br, payloads)
 	assertQueuedPayloads(t, payloads, dead, got)
 }
 
@@ -1396,7 +1396,7 @@ func queueFramesPastDeadline(t *testing.T, payloads [][]byte, prefix int) (*os.F
 // readQueuedFrames runs Proc.read with one buffered waiter per ticket.
 // deliver sends the payload and drops the ticket; cleanup sends p.dead only
 // while the ticket is still in the map. One slot cannot take both.
-func readQueuedFrames(t *testing.T, pr *os.File, br *bufio.Reader, payloads [][]byte) (error, []result) {
+func readQueuedFrames(t *testing.T, pr *os.File, br *bufio.Reader, payloads [][]byte) ([]result, error) {
 	t.Helper()
 	p := &Proc{
 		rd:         pr,
@@ -1431,7 +1431,7 @@ func readQueuedFrames(t *testing.T, pr *os.File, br *bufio.Reader, payloads [][]
 			t.Fatalf("ticket %d waiter received nothing; reader dead=%v", i+1, dead)
 		}
 	}
-	return dead, got
+	return got, dead
 }
 
 func assertQueuedPayloads(t *testing.T, payloads [][]byte, dead error, got []result) {
@@ -1455,14 +1455,14 @@ func assertQueuedPayloads(t *testing.T, payloads [][]byte, dead error, got []res
 func TestRead_HeaderSplitAtByte1DeliversBothFrames(t *testing.T) {
 	payloads := [][]byte{{0x11}, {0x22, 0x33}}
 	pr, br := queueFramesPastDeadline(t, payloads, 1)
-	dead, got := readQueuedFrames(t, pr, br, payloads)
+	got, dead := readQueuedFrames(t, pr, br, payloads)
 	assertQueuedPayloads(t, payloads, dead, got)
 }
 
 func TestRead_HeaderSplitAtByte3DeliversBothFrames(t *testing.T) {
 	payloads := [][]byte{{0x11}, {0x22, 0x33}}
 	pr, br := queueFramesPastDeadline(t, payloads, 3)
-	dead, got := readQueuedFrames(t, pr, br, payloads)
+	got, dead := readQueuedFrames(t, pr, br, payloads)
 	assertQueuedPayloads(t, payloads, dead, got)
 }
 
@@ -1480,7 +1480,7 @@ func TestRead_BodySplitAfterFirstByteDeliversBothFrames(t *testing.T) {
 		t.Fatalf("first body is %d bytes; the split has to fall inside it", bodyLen)
 	}
 	pr, br := queueFramesPastDeadline(t, payloads, 4+1)
-	dead, got := readQueuedFrames(t, pr, br, payloads)
+	got, dead := readQueuedFrames(t, pr, br, payloads)
 	assertQueuedPayloads(t, payloads, dead, got)
 }
 
@@ -1496,7 +1496,7 @@ func TestRead_ThreeQueuedFramesPastDeadlineNothingPeeked(t *testing.T) {
 		}
 	}
 	pr, br := queueRawPastDeadline(t, raw.Bytes(), 0)
-	dead, got := readQueuedFrames(t, pr, br, payloads)
+	got, dead := readQueuedFrames(t, pr, br, payloads)
 	assertQueuedPayloads(t, payloads, dead, got)
 }
 
@@ -1517,7 +1517,7 @@ func TestRead_OverLimitLengthDoesNotDeliverFollowingFrame(t *testing.T) {
 	for _, prefix := range []int{0, 1} {
 		t.Run(fmt.Sprintf("prefix%d", prefix), func(t *testing.T) {
 			pr, br := queueRawPastDeadline(t, raw.Bytes(), prefix)
-			dead, got := readQueuedFrames(t, pr, br, [][]byte{payload})
+			got, dead := readQueuedFrames(t, pr, br, [][]byte{payload})
 			assertFollowingFrameRefused(t, payload, dead, got[0], "exceeds")
 		})
 	}
@@ -1537,7 +1537,7 @@ func TestRead_InvalidJSONLatchesDeadBeforeTheNextFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	pr, br := queueRawPastDeadline(t, raw.Bytes(), 0)
-	dead, got := readQueuedFrames(t, pr, br, [][]byte{payload})
+	got, dead := readQueuedFrames(t, pr, br, [][]byte{payload})
 	assertFollowingFrameRefused(t, payload, dead, got[0], "json")
 }
 
@@ -1560,7 +1560,7 @@ func TestRead_EmptyObjectIsDeliveredNotDropped(t *testing.T) {
 	for name, prefix := range map[string]int{"unpeeked": 0, "firstFramePeeked": first} {
 		t.Run(name, func(t *testing.T) {
 			pr, br := queueRawPastDeadline(t, raw.Bytes(), prefix)
-			dead, got := readQueuedIDs(t, pr, br, []uint64{0, 1})
+			got, dead := readQueuedIDs(t, pr, br, []uint64{0, 1})
 			t.Logf("reader dead=%v", dead)
 			if got[0].err != nil || len(got[0].out) != 0 {
 				t.Fatalf("empty object out=%x err=%v; want an empty delivery", got[0].out, got[0].err)
@@ -1583,7 +1583,7 @@ func TestRead_ZeroLengthBodyIsFatal(t *testing.T) {
 		t.Fatal(err)
 	}
 	pr, br := queueRawPastDeadline(t, raw.Bytes(), 0)
-	dead, got := readQueuedFrames(t, pr, br, [][]byte{payload})
+	got, dead := readQueuedFrames(t, pr, br, [][]byte{payload})
 	assertFollowingFrameRefused(t, payload, dead, got[0], "unexpected end of JSON")
 }
 
@@ -1631,7 +1631,7 @@ func queueRawPastDeadline(t *testing.T, raw []byte, prefix int) (*os.File, *bufi
 // readQueuedIDs is readQueuedFrames for tickets that are not 1..n.
 // deliver removes a ticket before readerDone is closed, so the waiter is
 // the only record of a payload.
-func readQueuedIDs(t *testing.T, pr *os.File, br *bufio.Reader, ids []uint64) (error, []result) {
+func readQueuedIDs(t *testing.T, pr *os.File, br *bufio.Reader, ids []uint64) ([]result, error) {
 	t.Helper()
 	p := &Proc{
 		rd:         pr,
@@ -1666,7 +1666,7 @@ func readQueuedIDs(t *testing.T, pr *os.File, br *bufio.Reader, ids []uint64) (e
 			t.Fatalf("ticket %d waiter received nothing; reader dead=%v", ids[i], dead)
 		}
 	}
-	return dead, got
+	return got, dead
 }
 
 func assertFollowingFrameRefused(t *testing.T, payload []byte, dead error, got result, want string) {
