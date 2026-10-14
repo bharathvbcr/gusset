@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -61,6 +62,45 @@ var s = "C.free( in a string is not a call either // really"
 	}
 	if n := strings.Count(got, "preamble.go"); n != 1 {
 		t.Errorf("gusset_buf_free( must not match free(; got %d preamble hits:\n%s", n, got)
+	}
+}
+
+// free() is not on line 4, and the second line of the block is longer than the
+// first, so a position step that uses the wrong line's length lands elsewhere.
+// A // preamble is a separate comment per line; its free() is that line, not
+// the import "C" line and not the first // line.
+func TestR4PreambleFreeReportsItsOwnLine(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "wide.go", `package p
+/*
+x
+this line is longer than the one before it XXXXXXXXXXXXXXXXXXXX
+free()
+*/
+import "C"
+`)
+	write(t, dir, "slash.go", `package p
+// preamble
+// not free
+// free()
+import "C"
+`)
+	v, err := checkAllocatorSymmetry(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(v, "\n")
+	if !strings.Contains(got, "wide.go:5:") {
+		t.Fatalf("block-comment free() must be wide.go:5, got:\n%s", got)
+	}
+	if strings.Contains(got, "wide.go:2:") || strings.Contains(got, "wide.go:4:") {
+		t.Fatalf("block-comment free() reported on the wrong line:\n%s", got)
+	}
+	if !strings.Contains(got, "slash.go:4:") {
+		t.Fatalf("// preamble free() must be slash.go:4, got:\n%s", got)
+	}
+	if strings.Contains(got, "slash.go:2:") || strings.Contains(got, "slash.go:5:") {
+		t.Fatalf("// preamble free() reported at the first // line or at import \"C\":\n%s", got)
 	}
 }
 
@@ -237,6 +277,74 @@ func A() { C.gusset_a() }
 		!strings.Contains(got, "'#cgo nocallback gusset_a'") ||
 		strings.Contains(got, "gusset_unreferenced") {
 		t.Fatalf("want only gusset_a's two directives, got:\n%s", got)
+	}
+}
+
+// otherGOOS is a GOOS this process will not build. windows is not an alias of
+// darwin, linux, or ios; linux is not an alias of windows.
+func otherGOOS() string {
+	if runtime.GOOS == "windows" {
+		return "linux"
+	}
+	return "windows"
+}
+
+// cmd/cgo merges directives only across files the default build includes.
+// A //go:build ignore file, a file named for another GOOS, and a file whose
+// build tag is another GOOS are not in that set: their directives must not
+// clear a reference in a file that is.
+func TestR5BuildTagsDoNotSupplyDirectives(t *testing.T) {
+	exports := []string{"gusset_a", "gusset_unreferenced"}
+	ref := `package ffi
+/*
+#cgo LDFLAGS: -lgusset
+*/
+import "C"
+func Also() { C.gusset_a() }
+`
+	directives := `package ffi
+/*
+#cgo noescape gusset_a
+#cgo nocallback gusset_a
+*/
+import "C"
+`
+	cases := []struct {
+		name string
+		file string
+		src  string
+	}{
+		{"go:build ignore", "ignored.go", "//go:build ignore\n\n" + directives},
+		{"other GOOS filename", "ffi_" + otherGOOS() + ".go", directives},
+		{"other GOOS build tag", "tagged.go", "//go:build " + otherGOOS() + "\n\n" + directives},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, tc.file, tc.src)
+			write(t, dir, "ldflags.go", ref)
+			v, err := checkDirectives(dir, exports)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Join(v, "\n")
+			if len(v) != 2 || !strings.Contains(got, "ldflags.go") ||
+				!strings.Contains(got, "'#cgo noescape gusset_a'") ||
+				!strings.Contains(got, "'#cgo nocallback gusset_a'") ||
+				strings.Contains(got, "gusset_unreferenced") ||
+				strings.Contains(got, tc.file) {
+				t.Fatalf("want exactly ldflags.go's two missing directives, got:\n%s", got)
+			}
+		})
+	}
+
+	// A file the default context does compile must still be able to supply
+	// the directives. Excluding every GOOS-suffixed name would fail this.
+	dir := t.TempDir()
+	write(t, dir, "ffi_"+runtime.GOOS+".go", directives)
+	write(t, dir, "ldflags.go", ref)
+	if v, err := checkDirectives(dir, exports); err != nil || len(v) != 0 {
+		t.Fatalf("directives in ffi_%s.go must cover the reference: %v %v", runtime.GOOS, v, err)
 	}
 }
 

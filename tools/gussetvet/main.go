@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"io"
@@ -134,11 +135,18 @@ func runWith(targetDir, exportsFile string, stdout, stderr io.Writer) int {
 
 // checkDirectives enforces R5 on the cgo preambles of the package in dir.
 //
-// cmd/cgo merges `#cgo` lines across every file of the package, so noescape and
-// nocallback are one set. A file must carry both only for exports it references
-// as C.<name>. A second file whose only `#cgo` line is LDFLAGS is not a
-// violation when the directives live on the file that references the export,
-// or on any other file in the package.
+// cmd/cgo merges `#cgo` lines across every file of the package it is actually
+// building, so noescape and nocallback are one set. A file must carry both
+// only for exports it references as C.<name>. A second file whose only `#cgo`
+// line is LDFLAGS is not a violation when the directives live on the file that
+// references the export, or on any other file in that build.
+//
+// Which files those are is go/build.Default.MatchFile: //go:build lines and
+// GOOS/GOARCH filename suffixes, not every non-test .go file in the directory.
+// A //go:build ignore file or a windows file on darwin is not part of the
+// build, and its directives must not satisfy a reference in a file that is.
+// _test.go stays out: the library build does not merge it. A MatchFile error
+// is a failed check, not a file skipped — skipping it would hide the reference.
 //
 // Only the comment attached to `import "C"` is a preamble. This used to treat
 // every comment group containing "#cgo" as one, so a doc comment that merely
@@ -189,6 +197,13 @@ func checkDirectives(dir string, exports []string) ([]string, error) {
 			continue
 		}
 		filename := filepath.Join(dir, name)
+		match, err := build.Default.MatchFile(dir, name)
+		if err != nil {
+			return nil, fmt.Errorf("build constraints for %s: %w", filename, err)
+		}
+		if !match {
+			continue
+		}
 		file, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
 		if err != nil {
 			return nil, fmt.Errorf("parse error in %s: %w", filename, err)
