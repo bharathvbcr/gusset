@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased] - 2026-10-13 · Unsupported targets fail with the named error
+
+From `ft-9977d2b2`. No export signature, ABI or public Go API change. GitHub Actions has not run this tree. No benchmark baseline was recorded.
+
+### Platform
+- **A target outside linux and macOS fails in `lib.rs` (I4).** The gate is an allow-list (`target_os` linux or macos), and the rest of the crate is cfg'd out with it, so rustc does not also typecheck `pool::sys`. FreeBSD and illumos stop at the existing `compile_error!` text. They do not fail later with E0425 on `pthread_getattr_np`. OpenBSD's standard library is not published for this host, so that target was not compiled; its `target_os` is outside the allow-list.
+- **A Go build without cgo, and a Windows Go build, fail in `internal/ffi`.** `unsupported.go` is compiled only for `!cgo` or `windows`. The compiler prints `gusset requires cgo on a unix target` and `docs/platforms.md`. A cgo build on darwin still compiles. The cross job asserts both refusals, and a workflow comment that only contains the phrase does not satisfy the test. `docs/platforms.md` states that cgo is required.
+
 ## [Unreleased] - 2026-10-13 · Caller fd flags survive a refused Darwin open, and the recorder's lock cannot fail open
 
 From `gs-boundary-defence-in-depth`, `ft-0f6a723d` and `ft-568a30e2`. No export signature, ABI or public Go API change. GitHub Actions has not run this tree. No quiet-host benchmark baseline was recorded.
