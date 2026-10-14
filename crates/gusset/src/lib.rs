@@ -22,26 +22,35 @@
 // Supported platform set, enforced rather than described.
 //
 // The completion path is a POSIX pipe, I5's signal protection is `sigaltstack`,
-// and the worker stack read-back is pthread. None of the three has a Windows
-// counterpart in this crate, so a Windows build would fail deep inside `pool::sys`
-// with errors about `libc::sigaltstack` and leave an adopter guessing whether the
-// port was intended. Failing here says what is actually true: Gusset is unix-only
-// today, and `docs/platforms.md` records what a Windows port would have to add.
-#[cfg(not(unix))]
+// and the worker stack read-back is pthread. Windows has none of the three.
+// FreeBSD, OpenBSD and illumos are `unix` and do not provide `pthread_getattr_np`,
+// so `cfg(not(unix))` never fired and `pool::sys` failed with E0425 instead.
+// The gate is an allow-list (linux covers gnu and musl). The modules are cfg'd
+// out with it: rustc still typechecks a crate that only also has `compile_error!`.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!(
     "gusset supports unix targets only (linux-gnu, linux-musl, macos). The completion \
      pipe, sigaltstack and pthread stack accounting have no Windows implementation; \
      see docs/platforms.md."
 );
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod alloc;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod ffi;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod header;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod pool;
 
 // Convenient re-exports
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use alloc::{get_alloc_stats, AllocStats, BufferAlloc, Counting, ALLOCATOR_API, BUFFER_ALIGN};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use ffi::status::{FfiStatus, FFI_BAD_ARG, FFI_ERR, FFI_OK, FFI_PANIC, FFI_POISONED};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use ffi::{gusset_abi_layout, AbiLayout, GUSSET_ABI_VERSION};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use header::{CallHeader, CancelReason, JobContext};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use pool::{clear_engine_handlers, register_engine, set_engine_handler, Handle, JobOutput};

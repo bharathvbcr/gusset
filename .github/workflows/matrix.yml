@@ -645,6 +645,75 @@ jobs:
           fi
           echo "Windows correctly refused with the declared error"
 
+      # FreeBSD, OpenBSD and illumos are unix, so cfg(not(unix)) did not fire
+      # and pool::sys failed with E0425 on pthread_getattr_np. A green step
+      # that did not see the named refusal is that hole again.
+      - name: FreeBSD must fail with a named error, not a symbol cascade
+        run: |
+          rustup target add x86_64-unknown-freebsd
+          if cargo check --locked -p gusset --target x86_64-unknown-freebsd 2>err.txt; then
+            echo "::error::a FreeBSD build succeeded; docs/platforms.md says it cannot"
+            exit 1
+          fi
+          if ! grep -q "gusset supports unix targets only" err.txt; then
+            echo "::error::FreeBSD build failed, but not with the declared platform error"
+            cat err.txt
+            exit 1
+          fi
+          if grep -q "pthread_getattr_np" err.txt || grep -q "E0425" err.txt; then
+            echo "::error::FreeBSD build failed inside pool::sys instead of the named error"
+            cat err.txt
+            exit 1
+          fi
+          echo "FreeBSD correctly refused with the declared error"
+
+      - name: illumos must fail with a named error, not a symbol cascade
+        run: |
+          rustup target add x86_64-unknown-illumos
+          if cargo check --locked -p gusset --target x86_64-unknown-illumos 2>err.txt; then
+            echo "::error::an illumos build succeeded; docs/platforms.md says it cannot"
+            exit 1
+          fi
+          if ! grep -q "gusset supports unix targets only" err.txt; then
+            echo "::error::illumos build failed, but not with the declared platform error"
+            cat err.txt
+            exit 1
+          fi
+          if grep -q "pthread_getattr_np" err.txt || grep -q "E0425" err.txt; then
+            echo "::error::illumos build failed inside pool::sys instead of the named error"
+            cat err.txt
+            exit 1
+          fi
+          echo "illumos correctly refused with the declared error"
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          cache: false
+
+      - name: Non-cgo and Windows Go builds must fail with a named error
+        run: |
+          if CGO_ENABLED=0 go build ./... >err.txt 2>&1; then
+            echo "::error::a CGO_ENABLED=0 build succeeded; docs/platforms.md says it cannot"
+            exit 1
+          fi
+          if ! grep -q "gusset requires cgo on a unix target" err.txt || ! grep -q "docs/platforms.md" err.txt; then
+            echo "::error::CGO_ENABLED=0 build failed, but not with the declared cgo error"
+            cat err.txt
+            exit 1
+          fi
+          if GOOS=windows go build ./... >err.txt 2>&1; then
+            echo "::error::a Windows Go build succeeded; docs/platforms.md says it cannot"
+            exit 1
+          fi
+          if ! grep -q "gusset requires cgo on a unix target" err.txt || ! grep -q "docs/platforms.md" err.txt; then
+            echo "::error::Windows Go build failed, but not with the declared cgo error"
+            cat err.txt
+            exit 1
+          fi
+          echo "Go correctly refused non-cgo and Windows builds"
+
   bench:
     name: Benchmarks (R15)
     runs-on: ubuntu-latest
