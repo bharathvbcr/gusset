@@ -23,9 +23,11 @@
 #
 # The guards, in the order they run:
 #
-#   1. A lock, so a second recording refuses instead of interleaving. The lock
-#      records its process group, so an abandoned run is reported with the exact
-#      pgid to kill rather than silently blocking forever.
+#   1. A lock, so a second recording refuses instead of interleaving. Owner and
+#      process group are written in a private directory and renamed into place,
+#      so the lock is not visible until both exist. A lock with no pgid is held
+#      for a grace period rather than stolen. An abandoned run is reported with
+#      the exact pgid to kill.
 #   2. A preflight and a between-arms check for any other Go benchmark process
 #      on the machine — ours or somebody else's.
 #   3. CPU idle sampled before and after. Load average is useless here: macOS
@@ -40,7 +42,11 @@
 # The signal trap is defence in depth rather than a response to a diagnosed
 # fault: whether an interrupted run here ever orphaned its arm loop was never
 # established, but a recording that leaves a benchmark running behind it is a
-# recording that poisons the next one, and the trap costs nothing.
+# recording that poisons the next one. INT and TERM kill only the child
+# process group this script started (never this script's own group), wait for
+# it, then the EXIT trap removes the lock and the temporary directory and the
+# script exits 130. Signalling group 0 killed the script before that cleanup
+# and left the lock held, status 143.
 #
 # A run that fails any guard writes no output at all. The previous file is left
 # untouched, because a stale honest measurement beats a fresh contaminated one.
@@ -60,12 +66,14 @@
 #   RECORD_VARIANTS  space-separated NAME=DIR pairs: builds of the same
 #                    benchmarks to compare, one checkout each, with DIR in place
 #                    of RECORD_DIR. COUNT becomes a number of rounds, and each
-#                    round runs every arm once (-count=1) in every variant, so
-#                    a drift in the machine's clock or load lands on all of
-#                    them alike rather than on whichever ran last. The output
-#                    is still grouped by arm, then by variant, with each block
-#                    behind a `variant: NAME` configuration line, which is what
-#                    `benchstat -col variant` splits on.
+#                    round runs every arm once (-count=1) in every variant.
+#                    Variant order alternates by round (round 1 A then B,
+#                    round 2 B then A), so a drift in the machine's clock or
+#                    load cannot land only on the variant that always runs
+#                    last. The provenance header records the order each round
+#                    used. The output is still grouped by arm, then by variant,
+#                    with each block behind a `variant: NAME` configuration
+#                    line, which is what `benchstat -col variant` splits on.
 
 set -eu
 
@@ -117,6 +125,17 @@ fi
 LOCK=bench/results/.record.lock
 TMP=
 
+# A published lock has both owner and pgid. A directory with no pgid (a crash
+# before the rename, or the old mkdir-then-write window) is not treated as
+# abandoned until this many seconds have passed.
+LOCK_GRACE_SECONDS=2
+
+# Children of this script run in their own process group. The signal trap
+# kills that group by the pgid recorded here, never this script's group.
+ACTIVE_CHILD_PID=
+ACTIVE_CHILD_PGID=
+SELF_PGID=
+
 # MIN_IDLE is the CPU idle percentage below which a recording is refused.
 #
 # Not a round number for its own sake: the clean reference runs measured 74.8%,
@@ -145,20 +164,111 @@ cleanup_exit() {
 	exit $status
 }
 
+# stop_active_child kills the child process group this script started, then
+# waits for it. It never signals this script's own group.
+stop_active_child() {
+	pid=$ACTIVE_CHILD_PID
+	pgid=$ACTIVE_CHILD_PGID
+	if [ -z "$pid" ]; then
+		return 0
+	fi
+	if [ -n "$pgid" ] && [ "$pgid" != "$SELF_PGID" ]; then
+		kill -TERM "-$pgid" 2>/dev/null || true
+	else
+		kill -TERM "$pid" 2>/dev/null || true
+	fi
+	i=0
+	while [ "$i" -lt 50 ]; do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			break
+		fi
+		sleep 0.1
+		i=$((i + 1))
+	done
+	if kill -0 "$pid" 2>/dev/null; then
+		if [ -n "$pgid" ] && [ "$pgid" != "$SELF_PGID" ]; then
+			kill -KILL "-$pgid" 2>/dev/null || true
+		else
+			kill -KILL "$pid" 2>/dev/null || true
+		fi
+	fi
+	wait "$pid" 2>/dev/null || true
+	ACTIVE_CHILD_PID=
+	ACTIVE_CHILD_PGID=
+	return 0
+}
+
 cleanup_signal() {
-	echo "" >&2
-	echo "record: interrupted — killing this recording's process group so no arm" >&2
-	echo "        is left running to contaminate the next run" >&2
+	# Disarm before stopping children so a second signal cannot re-enter, and
+	# so the child's death cannot be mistaken for a new interrupt.
 	trap - INT TERM
-	# The whole process group: this script, the make that invoked it, and any
-	# live `go test`. An orphaned arm loop is exactly the failure this file
-	# exists to prevent, and it cannot be prevented by killing only the child.
-	kill -TERM 0 2>/dev/null || true
+	echo "" >&2
+	echo "record: interrupted — stopping this recording's child processes so no arm" >&2
+	echo "        is left running to contaminate the next run" >&2
+	stop_active_child
+	# EXIT runs cleanup_exit, which removes $TMP and this run's lock.
 	exit 130
 }
 
 trap cleanup_exit EXIT
 trap cleanup_signal INT TERM
+
+# start_isolated runs "$@" in a new process group and records its pid.
+# setsid(1) is not on macOS; perl and python3 are the fallbacks. The child
+# must not stay in this script's group: killing that group is what used to
+# take the script down before the EXIT trap.
+start_isolated() {
+	if command -v setsid >/dev/null 2>&1; then
+		setsid "$@" &
+	elif command -v perl >/dev/null 2>&1; then
+		perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!\n"; exec @ARGV or die "exec: $!\n"' -- "$@" &
+	elif command -v python3 >/dev/null 2>&1; then
+		python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@" &
+	else
+		echo "record: cannot isolate child processes (need setsid, perl, or python3)" >&2
+		exit 1
+	fi
+	ACTIVE_CHILD_PID=$!
+	ACTIVE_CHILD_PGID=
+}
+
+# confirm_pgid records the child's pgid once it is no longer ours. A child
+# that has already exited, or that never left this group, leaves the pgid
+# empty so the trap kills that pid only.
+confirm_pgid() {
+	ACTIVE_CHILD_PGID=
+	i=0
+	while [ "$i" -lt 50 ]; do
+		if [ -z "$ACTIVE_CHILD_PID" ] || ! kill -0 "$ACTIVE_CHILD_PID" 2>/dev/null; then
+			return 0
+		fi
+		g=$(ps -o pgid= -p "$ACTIVE_CHILD_PID" 2>/dev/null | tr -d ' ' || true)
+		if [ -n "$g" ] && [ "$g" != "$SELF_PGID" ]; then
+			ACTIVE_CHILD_PGID=$g
+			return 0
+		fi
+		i=$((i + 1))
+		if [ "$i" -eq 10 ] || [ "$i" -eq 30 ]; then
+			sleep 0.05
+		fi
+	done
+	return 0
+}
+
+# spawn_group runs one child in its own process group and waits for it.
+spawn_group() {
+	start_isolated "$@"
+	confirm_pgid
+	rc=0
+	wait "$ACTIVE_CHILD_PID" || rc=$?
+	ACTIVE_CHILD_PID=
+	ACTIVE_CHILD_PGID=
+	return "$rc"
+}
+
+record_sleep() {
+	spawn_group sleep "$1" || true
+}
 
 # cpu_idle prints the CPU idle percentage, or nothing at all if it cannot
 # measure it. Printing nothing is deliberate: an unmeasured machine must not be
@@ -173,7 +283,7 @@ cpu_idle() {
 	Linux)
 		awk '/^cpu /{i1=$5; t1=0; for(j=2;j<=NF;j++) t1+=$j}
 		     END{print i1"\t"t1}' /proc/stat > "$TMP/stat1"
-		sleep 1
+		record_sleep 1
 		awk '/^cpu /{i2=$5; t2=0; for(j=2;j<=NF;j++) t2+=$j}
 		     END{print i2"\t"t2}' /proc/stat > "$TMP/stat2"
 		awk 'NR==1{i1=$1;t1=$2} NR==2{i2=$1;t2=$2}
@@ -231,7 +341,7 @@ settle_idle() {
 		if [ "$tries" = "0" ]; then
 			echo "record: ${value}% idle — waiting for the machine to settle" >&2
 		fi
-		sleep 5
+		record_sleep 5
 		tries=$((tries + 1))
 		value=$(cpu_idle)
 	done
@@ -255,24 +365,95 @@ require_idle() {
 
 # ---------------------------------------------------------------------------
 # 1. Lock.
+#
+# publish_lock renames a directory that already contains owner and pgid onto
+# $LOCK. The rename is the publication: a racer either sees no lock or sees
+# both files. `mv` onto an existing directory would nest the stage inside it,
+# so a publish only counts when the top-level owner is this process.
 
-mkdir -p bench/results
-if ! mkdir "$LOCK" 2>/dev/null; then
-	held_pgid=""
-	[ -f "$LOCK/pgid" ] && held_pgid=$(cat "$LOCK/pgid")
-	if [ -n "$held_pgid" ] && kill -0 "-$held_pgid" 2>/dev/null; then
-		echo "record: another recording is in progress (process group $held_pgid)." >&2
-		echo "record: wait for it, or stop it with:  kill -TERM -$held_pgid" >&2
+SELF_PGID=$(ps -o pgid= -p $$ | tr -d ' ' || true)
+if [ -z "$SELF_PGID" ]; then
+	echo "record: could not read this process's process group" >&2
+	exit 1
+fi
+
+publish_lock() {
+	stage=$(mktemp -d "${LOCK}.stage.XXXXXX")
+	echo "$$" > "$stage/owner"
+	printf '%s\n' "$SELF_PGID" > "$stage/pgid"
+	if [ ! -s "$stage/owner" ] || [ ! -s "$stage/pgid" ]; then
+		rm -rf "$stage"
+		echo "record: could not write lock owner and process group" >&2
 		exit 1
 	fi
-	echo "record: clearing a lock left by an abandoned run (process group ${held_pgid:-unknown})" >&2
-	rm -rf "$LOCK"
-	mkdir "$LOCK"
-fi
-echo "$$" > "$LOCK/owner"
-# ps is the portable way to ask for our own process group; $$ is the pid, and
-# the two differ exactly when it matters (make invoked us).
-ps -o pgid= -p $$ | tr -d ' ' > "$LOCK/pgid"
+	if [ -e "$LOCK" ]; then
+		rm -rf "$stage"
+		return 1
+	fi
+	if ! mv "$stage" "$LOCK" 2>/dev/null; then
+		rm -rf "$stage"
+		return 1
+	fi
+	owner_now=
+	if [ -f "$LOCK/owner" ]; then
+		owner_now=$(cat "$LOCK/owner" 2>/dev/null || true)
+	fi
+	if [ "$owner_now" = "$$" ] && [ -s "$LOCK/pgid" ]; then
+		return 0
+	fi
+	base=${stage##*/}
+	if [ -n "$base" ] && [ -d "$LOCK/$base" ]; then
+		rm -rf "$LOCK/$base"
+	fi
+	rm -rf "$stage" 2>/dev/null || true
+	return 1
+}
+
+lock_pgid() {
+	held_pgid=
+	if [ -s "$LOCK/pgid" ]; then
+		held_pgid=$(cat "$LOCK/pgid" 2>/dev/null || true)
+	fi
+	printf '%s\n' "$held_pgid"
+}
+
+refuse_live_lock() {
+	echo "record: another recording is in progress (process group $1)." >&2
+	echo "record: wait for it, or stop it with:  kill -TERM -$1" >&2
+	exit 1
+}
+
+acquire_lock() {
+	mkdir -p "$(dirname "$LOCK")"
+	while true; do
+		if publish_lock; then
+			return 0
+		fi
+		held_pgid=$(lock_pgid)
+		if [ -n "$held_pgid" ] && kill -0 "-$held_pgid" 2>/dev/null; then
+			refuse_live_lock "$held_pgid"
+		fi
+		if [ -z "$held_pgid" ]; then
+			echo "record: lock has no pgid — not stealing it for ${LOCK_GRACE_SECONDS}s" >&2
+			waited=0
+			while [ "$waited" -lt "$LOCK_GRACE_SECONDS" ]; do
+				record_sleep 1
+				waited=$((waited + 1))
+				held_pgid=$(lock_pgid)
+				if [ -n "$held_pgid" ]; then
+					break
+				fi
+			done
+			if [ -n "$held_pgid" ] && kill -0 "-$held_pgid" 2>/dev/null; then
+				refuse_live_lock "$held_pgid"
+			fi
+		fi
+		echo "record: clearing a lock left by an abandoned run (process group ${held_pgid:-unknown})" >&2
+		rm -rf "$LOCK"
+	done
+}
+
+acquire_lock
 
 TMP=$(mktemp -d)
 
@@ -314,7 +495,7 @@ if [ -n "$RECORD_CPU" ]; then
 fi
 
 echo "record: warm-up (discarded) — $1"
-go test -C "$WARM_DIR" -run '^$' -bench "$1" ${CPU_FLAG:+"$CPU_FLAG"} \
+spawn_group go test -C "$WARM_DIR" -run '^$' -bench "$1" ${CPU_FLAG:+"$CPU_FLAG"} \
 	-benchtime=1s -count=1 "$RECORD_PKG" > "$TMP/warmup" 2>&1 || true
 
 # ---------------------------------------------------------------------------
@@ -324,7 +505,7 @@ go test -C "$WARM_DIR" -run '^$' -bench "$1" ${CPU_FLAG:+"$CPU_FLAG"} \
 
 # run_arm DIR ARM COUNT: one benchmark process into $TMP/run, or no results.
 run_arm() {
-	if ! go test -C "$1" -run '^$' -bench "$2" ${CPU_FLAG:+"$CPU_FLAG"} \
+	if ! spawn_group go test -C "$1" -run '^$' -bench "$2" ${CPU_FLAG:+"$CPU_FLAG"} \
 		-benchtime="$BENCHTIME" -count="$3" "$RECORD_PKG" > "$TMP/run" 2>&1; then
 		echo "record: arm $2 failed in $1; no results written" >&2
 		cut -c1-200 < "$TMP/run" >&2
@@ -350,15 +531,38 @@ else
 	n=$#
 	runs=0
 	round=0
+	idx=0
+	for v in $RECORD_VARIANTS; do
+		idx=$((idx + 1))
+		printf '%s\n' "$idx" > "$TMP/vindex.${v%%=*}"
+	done
+	: > "$TMP/arms"
+	for arm in "$@"; do
+		printf '%s\n' "$arm" >> "$TMP/arms"
+	done
+	: > "$TMP/roundorder"
 	while [ "$round" -lt "$COUNT" ]; do
 		round=$((round + 1))
-		a=0
-		for arm in "$@"; do
-			a=$((a + 1))
-			j=0
+		# Odd rounds walk variants as listed; even rounds reverse them (ABBA).
+		if [ $((round % 2)) -eq 0 ]; then
+			order=
 			for v in $RECORD_VARIANTS; do
-				j=$((j + 1))
+				order="$v${order:+ $order}"
+			done
+		else
+			order=$RECORD_VARIANTS
+		fi
+		names=
+		for v in $order; do
+			names="${names:+$names }${v%%=*}"
+		done
+		echo "# gusset-bench-round-$round: $names" >> "$TMP/roundorder"
+		a=0
+		while read -r arm; do
+			a=$((a + 1))
+			for v in $order; do
 				name=${v%%=*}
+				j=$(cat "$TMP/vindex.$name")
 				runs=$((runs + 1))
 				if [ "$runs" -gt 1 ]; then
 					require_exclusive "between runs, before round $round of $arm in $name"
@@ -374,7 +578,7 @@ else
 					cat "$TMP/run"
 				} >> "$part"
 			done
-		done
+		done < "$TMP/arms"
 	done
 fi
 
@@ -410,7 +614,8 @@ require_idle "after the last arm" "$IDLE_AFTER"
 	echo "# gusset-bench-count: $COUNT"
 	echo "# gusset-bench-cpu: ${RECORD_CPU:-default}"
 	if [ -n "$RECORD_VARIANTS" ]; then
-		echo "# gusset-bench-order: $COUNT rounds; each round ran every arm once (-count=1) in every variant, in the order listed"
+		echo "# gusset-bench-order: $COUNT rounds; each round ran every arm once (-count=1); variant order alternates (odd rounds listed, even rounds reversed)"
+		cat "$TMP/roundorder"
 		for v in $RECORD_VARIANTS; do
 			dir=${v#*=}
 			rev=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo unknown)

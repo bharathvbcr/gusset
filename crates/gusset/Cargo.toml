@@ -90,3 +90,10 @@ path = "../../tests/rust_sigpipe.rs"
 [[test]]
 name = "rust_counting_flip"
 path = "../../tests/rust_counting_flip.rs"
+
+# In-process dispatch comparisons. A bench binary, not a second staticlib:
+# the package still builds one libgusset and this target does not export a C ABI.
+[[bench]]
+name = "dispatch"
+path = "benches/dispatch.rs"
+harness = false
