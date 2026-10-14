@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/internal/hostprobe"
 )
 
 func osThreadCount(t *testing.T) int {
@@ -196,7 +197,7 @@ func TestBug_SemaphoreInFlightBreachOnTimeout(t *testing.T) {
 		if admitted < jobHold*time.Millisecond {
 			t.Fatalf("a second job was admitted %v after a %d ms job was submitted, while it was still running in the engine (I4 breach)", admitted, jobHold)
 		}
-		t.Skipf("the probe ran %v after the submit, past the job's end: it proves nothing on this host", admitted)
+		hostprobe.Skip(t, "the probe ran %v after the submit, past the job's end: it proves nothing on this host", admitted)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("caller 2 should have timed out waiting for a permit, got %v", err)

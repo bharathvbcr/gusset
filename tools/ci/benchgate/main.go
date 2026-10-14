@@ -1,7 +1,7 @@
 // Command benchgate holds the two CI benchmark gates that used to be a grep.
 //
 //	benchgate allocs -max Name=N [-max Name=N ...] results.txt
-//	benchgate regress -threshold PCT benchstat.csv
+//	benchgate regress -threshold PCT [-allow-one-sided Name]... benchstat.csv
 //
 // allocs reads raw `go test -bench` output and fails when any sample of a named
 // benchmark reports more allocs/op than its bound, or when a named benchmark has
@@ -15,7 +15,12 @@
 // cannot distinguish from noise) is honoured first. The interval test is on top
 // of it: a +14.55% row with ±9% and ±7% dispersion was significant by p-value
 // alone and failed a commit that only touched tools/. The geomean summary row is
-// not a benchmark and is never gated.
+// not a benchmark and is never gated. A row present on only one side (benchstat
+// emits 3 fields for base-only and 5 for new-only, against 7 for a comparison)
+// fails unless its name was passed to -allow-one-sided. The default list is
+// empty. Such a row does not end the sec/op table: a later comparison is still
+// gated. A renamed benchmark used to clear the table and a later regression
+// passed.
 package main
 
 import (
@@ -139,21 +144,44 @@ func checkAllocs(r io.Reader, limits bounds, stdout io.Writer) error {
 	return nil
 }
 
+// nameSet is the repeatable -allow-one-sided list. Empty is fail closed:
+// a benchmark on only one side of the comparison is a failure.
+type nameSet map[string]struct{}
+
+func (s nameSet) String() string {
+	names := make([]string, 0, len(s))
+	for n := range s {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
+}
+
+func (s nameSet) Set(v string) error {
+	if v == "" {
+		return errors.New("empty benchmark name")
+	}
+	s[v] = struct{}{}
+	return nil
+}
+
 func runRegress(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("regress", flag.ContinueOnError)
 	threshold := fs.Float64("threshold", 10, "percent slower, beyond which a significant row fails")
+	allow := nameSet{}
+	fs.Var(allow, "allow-one-sided", "benchmark present on only one side; repeatable, default none (a renamed benchmark fails)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: benchgate regress -threshold PCT benchstat.csv")
+		return errors.New("usage: benchgate regress -threshold PCT [-allow-one-sided Name]... benchstat.csv")
 	}
 	f, err := os.Open(fs.Arg(0))
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	return checkRegress(f, *threshold, stdout)
+	return checkRegress(f, *threshold, allow, stdout)
 }
 
 func parsePercent(s string) (float64, bool) {
@@ -162,7 +190,7 @@ func parsePercent(s string) (float64, bool) {
 	return v, err == nil
 }
 
-func checkRegress(r io.Reader, threshold float64, stdout io.Writer) error {
+func checkRegress(r io.Reader, threshold float64, allowOneSided map[string]struct{}, stdout io.Writer) error {
 	cr := csv.NewReader(r)
 	cr.FieldsPerRecord = -1
 	cr.LazyQuotes = true
@@ -174,17 +202,26 @@ func checkRegress(r io.Reader, threshold float64, stdout io.Writer) error {
 	rows := 0
 	var failures []string
 	for _, rec := range records {
-		if len(rec) < 7 {
-			inTable = false
+		if len(rec) == 0 {
 			continue
 		}
 		if rec[0] == "" {
 			// A header row: the first column is blank. Only the sec/op table
-			// is gated; B/op and allocs/op follow it in the same file.
-			inTable = rec[1] == "sec/op"
+			// is gated; B/op and allocs/op follow it in the same file. A short
+			// header is still a header, not a one-sided benchmark.
+			inTable = len(rec) > 1 && rec[1] == "sec/op"
 			continue
 		}
 		if !inTable || rec[0] == "geomean" {
+			continue
+		}
+		// A comparison row has 7 fields. Fewer is a benchmark on only one
+		// side. It must not clear inTable: that used to end the sec/op table
+		// so a later regression was never read, while rows > 0 still passed.
+		if len(rec) < 7 {
+			if _, ok := allowOneSided[rec[0]]; !ok {
+				failures = append(failures, fmt.Sprintf("%s: one-sided sec/op row (%d fields); a renamed or dropped benchmark is not a pass (allow it with -allow-one-sided)", rec[0], len(rec)))
+			}
 			continue
 		}
 		rows++
@@ -214,11 +251,14 @@ func checkRegress(r io.Reader, threshold float64, stdout io.Writer) error {
 		}
 		failures = append(failures, fmt.Sprintf("%s: %s slower with non-overlapping intervals (old %v ± %v%%, new %v ± %v%%), beyond %v%%", rec[0], delta, oldC, oldCI, newC, newCI, threshold))
 	}
-	if rows == 0 {
-		return errors.New("no sec/op rows in the benchstat output; the comparison did not happen")
-	}
+	// One-sided rows first. A file whose only sec/op data is one-sided still
+	// names that benchmark; "no sec/op rows" stays the result when nothing
+	// was classified as a failure and nothing was compared.
 	if len(failures) > 0 {
 		return errors.New(strings.Join(sorted(failures), "\n"))
+	}
+	if rows == 0 {
+		return errors.New("no sec/op rows in the benchstat output; the comparison did not happen")
 	}
 	fmt.Fprintf(stdout, "no regression beyond %v%% across %d benchmarks\n", threshold, rows)
 	return nil

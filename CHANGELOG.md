@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased] - 2026-10-13 · A required probe fails when it does not run, and a split isolate frame is kept
+
+From `ft-1f4a1228` (CI gates) and `gs-isolate-corrupt-frame-hang` (isolate spike), plus the LiveBytes hygiene fix on the same branch (`ft-8a7cd8ef`). No export signature, ABI or public Go API change. `internal/hostprobe` is internal. The isolate work stays in `internal/isolate`. GitHub Actions has not run this tree.
+
+### CI
+- **A host-load skip fails when the workflow requires the probe (I4).** Those skips called `t.Skip`, so a job that set out to measure a live job passed when the probe landed after the job ended. They now go through `internal/hostprobe.Skip`. `GUSSET_REQUIRE_PROBES=1` turns the same message into `t.Fatalf`; any other value still skips. The race step and the `GOGC=1` step set that variable and include `./internal/...`. `tests/shutdown` is not added to those steps. The matrix and nightly fuzz steps set the same variable; `make fuzz` inherits it.
+- **The workflow checker follows the environment the `go test` process sees.** YAML `env` is the initial exported value. `export` sets and exports, and the last assignment on that command wins. A bare `NAME=1` changes the shell value and does not export, so it does not arm the gate. A prefix on `go test` applies only to that process. A step is armed only when every `go test` in it would see exactly `1`. A comment, an `echo` or `printf` of the assignment, and `unset` do not arm it. `gofmt` is `gofmt -l --`, so a tracked file named `-ok.go` is a path. benchgate treats a short sec/op row as a failure and keeps reading the table; `-allow-one-sided` defaults to empty. The shell forms still outside the model (`export -n`, `+=`, short-circuit, `eval`, `env -i`, and the rest named above `TestHostileLaunderDoesNotSetProbe`) are residuals, not covered gates.
+- **LiveBytes hygiene compares a quiesced baseline with `<=` (I1).** A process-wide drop below the snapshot, from an earlier test's `AddCleanup`, made `==` fail a clean run. Two consecutive stable samples are the baseline. A held buffer still fails. The 500 ms and 1 s bounds that could only false-fail are removed; the error and hang assertions stay.
+
+### Isolate
+- **A frame the drain deadline split is delivered (I3).** `io.ReadFull` copies a prefix that `detachBufio` cannot see, so the one-shot probe parsed the remainder at the wrong offset and both waiters failed (a mid-header read as an oversize length, a mid-body read as a timeout). An incomplete read is a `frameError` carrying those bytes, prepended after detach. A deadline that consumed nothing still probes once, for 50 ms. Oversize of a complete header, invalid JSON, and an unknown id stay fatal and are not retried.
+- **A deadline between the length write and the body write poisons the process.** The stream is marked poisoned and stdin is closed, so a writer blocked on the permit unblocks. `Wait`'s cancel runs on its own goroutine with a one-second budget. If the context ends while that goroutine is still waiting for the write lock, it returns without poisoning.
+- **One goroutine owns `cmd.Wait` after a successful `Start`.** The handshake-failure path still waits itself, before a `Proc` exists. After the process exits, `waitProc` gives the reader the 200 ms protocol drain, then sets a read deadline so a grandchild holding the write end cannot stall frames that are already readable. `read` does not call `cmd.Wait`.
+
 ## [Unreleased] - 2026-10-12 · WaitBuffer no longer writes freed memory; the boundary refuses what it used to trust
 
 From the GitPulse board (`gs-boundary-defence-in-depth`, `ft-3d60ee16`, `ft-1f4a1228`, `ft-415ddf1f`, `ft-0f6a723d`, `ft-86b4ae63`, `gs-isolate-corrupt-frame-hang`, `gs-flaky-isolate-sigabrt-cgocheck2`, `ft-c689767b`) and what verifying them turned up. No export signature or ABI change. One Go behaviour change (`WaitBuffer` under a racing `Close`, below).

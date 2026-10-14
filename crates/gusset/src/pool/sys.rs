@@ -512,40 +512,74 @@ pub fn check_pipe_write_end(fd: i32) -> Result<()> {
     Ok(())
 }
 
-/// Sets the given file descriptor to non-blocking mode (O_NONBLOCK).
+/// XNU `F_SETNOSIGPIPE` (`sys/fcntl.h`). libc exports only `SO_NOSIGPIPE`.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "watchos",
+    target_os = "tvos"
+))]
+const F_SETNOSIGPIPE: libc::c_int = 73;
+
+/// Sets the given file descriptor to non-blocking mode (`O_NONBLOCK`).
+///
+/// On Apple it then sets `F_SETNOSIGPIPE`. That second `fcntl` is compiled out
+/// elsewhere. A failure of it restores the status flags captured before this
+/// call, so a refused `open` leaves the caller's descriptor as it was handed in.
 pub fn set_nonblocking(fd: i32) -> Result<()> {
+    set_nonblocking_with(fd, libc_fcntl)
+}
+
+fn libc_fcntl(fd: i32, cmd: libc::c_int, arg: libc::c_int) -> libc::c_int {
+    // SAFETY: the caller owns `fd` for this call. `F_GETFL` only reads;
+    // `F_SETFL` and `F_SETNOSIGPIPE` only change that descriptor's flags.
+    unsafe { libc::fcntl(fd, cmd, arg) }
+}
+
+/// [`set_nonblocking`] with the `fcntl` supplied, so a test can fail the call
+/// after `O_NONBLOCK` is set without closing the descriptor. A negative return
+/// is an error, as from `libc::fcntl`, and this reads `errno`.
+pub(crate) fn set_nonblocking_with(
+    fd: i32,
+    mut fcntl: impl FnMut(i32, libc::c_int, libc::c_int) -> libc::c_int,
+) -> Result<()> {
     if fd < 0 {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             "invalid file descriptor",
         ));
     }
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags < 0 {
-            return Err(Error::last_os_error());
-        }
-        if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-            return Err(Error::last_os_error());
-        }
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "watchos",
-            target_os = "tvos"
-        ))]
-        {
-            // Blocking SIGPIPE in each worker's mask is not enough on Darwin:
-            // the macOS "Unit & Pitfalls" job died of SIGPIPE in rust_sigpipe
-            // at b6f5200 and passed once this landed (in merge 24cd387,
-            // untested on Linux, where it compiles out). Asking the kernel
-            // not to raise it for this descriptor turns a write to a closed
-            // pipe into EPIPE whatever the thread's mask. 73 is XNU's
-            // F_SETNOSIGPIPE (sys/fcntl.h); libc exports only SO_NOSIGPIPE.
-            const F_SETNOSIGPIPE: libc::c_int = 73;
-            if libc::fcntl(fd, F_SETNOSIGPIPE, 1) < 0 {
-                return Err(Error::last_os_error());
+    let flags = fcntl(fd, libc::F_GETFL, 0);
+    if flags < 0 {
+        return Err(Error::last_os_error());
+    }
+    if fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+        return Err(Error::last_os_error());
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "watchos",
+        target_os = "tvos"
+    ))]
+    {
+        // Blocking SIGPIPE in each worker's mask is not enough on Darwin:
+        // the macOS "Unit & Pitfalls" job died of SIGPIPE in rust_sigpipe
+        // at b6f5200 and passed once this landed (in merge 24cd387,
+        // untested on Linux, where it compiles out). Asking the kernel
+        // not to raise it for this descriptor turns a write to a closed
+        // pipe into EPIPE whatever the thread's mask.
+        if fcntl(fd, F_SETNOSIGPIPE, 1) < 0 {
+            let err = Error::last_os_error();
+            // O_NONBLOCK is already on. A refusal must not leave it there:
+            // open has not taken the descriptor yet.
+            if fcntl(fd, libc::F_SETFL, flags) < 0 {
+                return Err(Error::other(format!(
+                    "F_SETNOSIGPIPE failed ({err}) and restoring status flags failed: {}",
+                    Error::last_os_error()
+                )));
             }
+            return Err(err);
         }
     }
     Ok(())
@@ -580,6 +614,15 @@ pub(crate) fn close_fd_with(fd: i32, close: impl FnOnce(i32) -> i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// XNU `F_GETNOSIGPIPE` (`sys/fcntl.h`). libc exports only `SO_NOSIGPIPE`.
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "watchos",
+        target_os = "tvos"
+    ))]
+    const F_GETNOSIGPIPE: libc::c_int = 74;
 
     #[test]
     fn check_buffer_len_refuses_zero_and_the_ceiling_without_allocating() {
@@ -660,6 +703,494 @@ mod tests {
             Ok(_) => panic!("allocate must refuse before posix_memalign"),
             Err(e) => assert!(e.contains("maximum"), "got: {}", e),
         }
+    }
+
+    fn pipe_ends() -> (i32, i32) {
+        let mut fds = [0i32; 2];
+        // SAFETY: fds is a valid two-element out array.
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(rc, 0, "pipe: {}", Error::last_os_error());
+        (fds[0], fds[1])
+    }
+
+    fn status_flags(fd: i32) -> i32 {
+        // SAFETY: F_GETFL on a descriptor this test owns reads its status flags.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert!(flags >= 0, "F_GETFL: {}", Error::last_os_error());
+        flags
+    }
+
+    fn close_pair(r: i32, w: i32) {
+        // SAFETY: both ends belong to this test.
+        unsafe {
+            libc::close(r);
+            libc::close(w);
+        }
+    }
+
+    /// The fcntl that follows a successful `F_GETFL`. On Apple that is
+    /// `F_SETNOSIGPIPE`, after `O_NONBLOCK` is already set. Elsewhere the
+    /// Apple call is compiled out, so the flag-changing fcntl is `F_SETFL`.
+    fn is_failing_second_call(cmd: libc::c_int) -> bool {
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        ))]
+        {
+            cmd == F_SETNOSIGPIPE
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        )))]
+        {
+            cmd == libc::F_SETFL
+        }
+    }
+
+    /// Success still sets `O_NONBLOCK`, and on Apple `NOSIGPIPE`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn set_nonblocking_sets_nonblock_and_on_apple_nosigpipe() {
+        let (r, w) = pipe_ends();
+        let before = status_flags(w);
+        assert_eq!(before & libc::O_NONBLOCK, 0, "a fresh pipe is blocking");
+        match set_nonblocking(w) {
+            Ok(()) => {}
+            Err(e) => panic!("set_nonblocking: {e}"),
+        }
+        let after = status_flags(w);
+        assert_eq!(
+            after & libc::O_NONBLOCK,
+            libc::O_NONBLOCK,
+            "O_NONBLOCK must be set: before {before:#x}, after {after:#x}"
+        );
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        ))]
+        {
+            // SAFETY: F_GETNOSIGPIPE reads one flag on a descriptor this test owns.
+            let nosig = unsafe { libc::fcntl(w, F_GETNOSIGPIPE) };
+            assert_eq!(nosig, 1, "NOSIGPIPE must be set");
+        }
+        close_pair(r, w);
+    }
+
+    /// Failing the call after `O_NONBLOCK` was requested leaves `F_GETFL` equal
+    /// to the pre-call value. On Apple that call is `F_SETNOSIGPIPE`, so the
+    /// status flags have to be rolled back; the assertion fails if they are not.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn set_nonblocking_leaves_flags_unchanged_when_the_second_call_fails() {
+        let (r, w) = pipe_ends();
+        let before = status_flags(w);
+        assert_eq!(before & libc::O_NONBLOCK, 0, "a fresh pipe is blocking");
+        let mut failed_second = false;
+        let mut applied_nonblock = false;
+        let result = set_nonblocking_with(w, |fd, cmd, arg| {
+            if is_failing_second_call(cmd) {
+                failed_second = true;
+                return -1;
+            }
+            if cmd == libc::F_SETFL && (arg & libc::O_NONBLOCK) != 0 {
+                applied_nonblock = true;
+            }
+            // SAFETY: fd is the write end this test owns; the command is one
+            // set_nonblocking_with itself issues (F_GETFL or F_SETFL).
+            unsafe { libc::fcntl(fd, cmd, arg) }
+        });
+        assert!(
+            failed_second,
+            "the seam never issued the second call, so this test checked nothing"
+        );
+        if let Ok(()) = result {
+            panic!("a failed second fcntl was reported as success");
+        }
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        ))]
+        {
+            assert!(
+                applied_nonblock,
+                "O_NONBLOCK was never applied before the failing call, so equal \
+                 flags would not prove a rollback"
+            );
+            // SAFETY: F_GETNOSIGPIPE reads one flag on a descriptor this test owns.
+            let nosig = unsafe { libc::fcntl(w, F_GETNOSIGPIPE) };
+            assert_eq!(nosig, 0, "a failed F_SETNOSIGPIPE left NOSIGPIPE set");
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        )))]
+        {
+            assert!(
+                !applied_nonblock,
+                "on this target the failing call is F_SETFL, so O_NONBLOCK must not be applied"
+            );
+        }
+        assert_eq!(
+            status_flags(w),
+            before,
+            "second-call failure must leave status flags as they were"
+        );
+        close_pair(r, w);
+    }
+
+    fn write_errno(value: i32) {
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        ))]
+        unsafe {
+            // SAFETY: `__error` is this thread's errno address.
+            *libc::__error() = value;
+        }
+        #[cfg(target_os = "linux")]
+        unsafe {
+            // SAFETY: `__errno_location` is this thread's errno address.
+            *libc::__errno_location() = value;
+        }
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        )))]
+        {
+            let _ = value;
+        }
+    }
+
+    fn set_status(fd: i32, flags: i32) {
+        // SAFETY: F_SETFL on a descriptor this test owns replaces its status flags.
+        let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+        assert_eq!(rc, 0, "F_SETFL: {}", Error::last_os_error());
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "watchos",
+        target_os = "tvos"
+    ))]
+    fn nosigpipe(fd: i32) -> i32 {
+        // SAFETY: F_GETNOSIGPIPE reads one flag on a descriptor this test owns.
+        unsafe { libc::fcntl(fd, F_GETNOSIGPIPE) }
+    }
+
+    /// A pipe that already has `O_NONBLOCK` and `O_APPEND` must get those exact
+    /// flags back when `F_SETNOSIGPIPE` fails. The failing call must not apply
+    /// NOSIGPIPE, and the function must not report success.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "watchos",
+        target_os = "tvos"
+    ))]
+    fn set_nonblocking_restores_preexisting_nonblock_and_append() {
+        let (r, w) = pipe_ends();
+        let base = status_flags(w);
+        set_status(w, base | libc::O_NONBLOCK | libc::O_APPEND);
+        let before = status_flags(w);
+        assert_ne!(before & libc::O_NONBLOCK, 0, "O_NONBLOCK did not stick");
+        assert_ne!(before & libc::O_APPEND, 0, "O_APPEND did not stick");
+        assert_eq!(nosigpipe(w), 0, "a fresh pipe must not have NOSIGPIPE");
+        let mut nosig_calls = 0;
+        let result = set_nonblocking_with(w, |fd, cmd, arg| {
+            if cmd == F_SETNOSIGPIPE {
+                nosig_calls += 1;
+                write_errno(libc::EPERM);
+                return -1;
+            }
+            // SAFETY: fd is the write end this test owns; the command is F_GETFL
+            // or F_SETFL, which set_nonblocking_with itself issues.
+            unsafe { libc::fcntl(fd, cmd, arg) }
+        });
+        assert_eq!(
+            nosig_calls, 1,
+            "F_SETNOSIGPIPE was not the call that failed"
+        );
+        match result {
+            Err(_) => {}
+            Ok(()) => panic!("a failed F_SETNOSIGPIPE was reported as success"),
+        }
+        assert_eq!(
+            status_flags(w),
+            before,
+            "rollback must keep pre-existing O_NONBLOCK and O_APPEND"
+        );
+        assert_eq!(nosigpipe(w), 0, "a failed F_SETNOSIGPIPE applied NOSIGPIPE");
+        close_pair(r, w);
+    }
+
+    /// `F_GETFL` failing is the whole call: nothing after it runs, the
+    /// descriptor is untouched, and a stale errno of 0 is still an error.
+    /// The test double does not set errno; production `libc::fcntl` does.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn set_nonblocking_stops_when_getfl_fails_without_touching_errno() {
+        let (r, w) = pipe_ends();
+        let before = status_flags(w);
+        let mut calls = Vec::new();
+        write_errno(0);
+        let result = set_nonblocking_with(w, |_, cmd, arg| {
+            calls.push((cmd, arg));
+            -1
+        });
+        assert_eq!(
+            calls,
+            vec![(libc::F_GETFL, 0)],
+            "a failed F_GETFL must be the only fcntl"
+        );
+        match result {
+            Err(_) => {}
+            Ok(()) => panic!("F_GETFL returning -1 was reported as success"),
+        }
+        assert_eq!(status_flags(w), before, "a failed F_GETFL changed flags");
+        close_pair(r, w);
+    }
+
+    /// A real `fcntl` on a descriptor that is not open reports `EBADF`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn set_nonblocking_on_an_unopened_fd_reports_ebadf() {
+        match set_nonblocking(i32::MAX) {
+            Err(e) => assert_eq!(
+                e.raw_os_error(),
+                Some(libc::EBADF),
+                "real F_GETFL failure must surface errno, got {e}"
+            ),
+            Ok(()) => panic!("set_nonblocking(i32::MAX) succeeded"),
+        }
+    }
+
+    /// The `F_SETFL` that applies `O_NONBLOCK` failing stops the call.
+    /// `F_SETNOSIGPIPE` must not run, and the flags stay as they were.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn set_nonblocking_does_not_continue_when_setting_nonblock_fails() {
+        let (r, w) = pipe_ends();
+        let base = status_flags(w);
+        set_status(w, base | libc::O_APPEND);
+        let before = status_flags(w);
+        assert_ne!(before & libc::O_APPEND, 0, "O_APPEND did not stick");
+        assert_eq!(before & libc::O_NONBLOCK, 0, "O_NONBLOCK was already set");
+        let mut calls = Vec::new();
+        let result = set_nonblocking_with(w, |_, cmd, arg| {
+            calls.push(cmd);
+            if cmd == libc::F_SETFL && (arg & libc::O_NONBLOCK) != 0 {
+                write_errno(libc::EIO);
+                return -1;
+            }
+            if cmd == libc::F_GETFL {
+                return before;
+            }
+            panic!("unexpected fcntl cmd {cmd}");
+        });
+        assert_eq!(
+            calls,
+            vec![libc::F_GETFL, libc::F_SETFL],
+            "F_SETNOSIGPIPE ran after F_SETFL failed: {calls:?}"
+        );
+        match result {
+            Err(e) => assert_eq!(e.raw_os_error(), Some(libc::EIO), "{e}"),
+            Ok(()) => panic!("a failed F_SETFL was reported as success"),
+        }
+        assert_eq!(status_flags(w), before, "a failed F_SETFL changed flags");
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        ))]
+        assert_eq!(nosigpipe(w), 0, "NOSIGPIPE was set without F_SETNOSIGPIPE");
+        close_pair(r, w);
+    }
+
+    /// Both the NOSIGPIPE call and the restore fail. The error names both,
+    /// and `O_NONBLOCK` is allowed to remain because the restore did not land.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "watchos",
+        target_os = "tvos"
+    ))]
+    fn set_nonblocking_reports_both_failures_when_restore_fails() {
+        let (r, w) = pipe_ends();
+        let before = status_flags(w);
+        assert_eq!(before & libc::O_NONBLOCK, 0, "a fresh pipe is blocking");
+        let mut setfl = 0;
+        let result = set_nonblocking_with(w, |fd, cmd, arg| {
+            if cmd == F_SETNOSIGPIPE {
+                write_errno(libc::EPERM);
+                return -1;
+            }
+            if cmd == libc::F_SETFL {
+                setfl += 1;
+                if setfl == 1 {
+                    // SAFETY: apply O_NONBLOCK for real so a skipped restore is visible.
+                    return unsafe { libc::fcntl(fd, cmd, arg) };
+                }
+                write_errno(libc::EIO);
+                return -1;
+            }
+            // SAFETY: F_GETFL on the write end this test owns.
+            unsafe { libc::fcntl(fd, cmd, arg) }
+        });
+        assert_eq!(
+            setfl, 2,
+            "restore F_SETFL did not go through the injected fcntl"
+        );
+        let msg = match result {
+            Err(e) => e.to_string(),
+            Ok(()) => panic!("a failed restore was reported as success"),
+        };
+        assert!(
+            msg.contains("F_SETNOSIGPIPE failed"),
+            "NOSIGPIPE failure dropped: {msg}"
+        );
+        assert!(
+            msg.contains("restoring status flags failed"),
+            "restore failure dropped: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("os error {}", libc::EPERM)),
+            "saved NOSIGPIPE errno missing: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("os error {}", libc::EIO)),
+            "restore errno missing: {msg}"
+        );
+        assert_ne!(
+            status_flags(w) & libc::O_NONBLOCK,
+            0,
+            "a failed restore must not pretend O_NONBLOCK was rolled back"
+        );
+        assert_eq!(nosigpipe(w), 0, "a failed F_SETNOSIGPIPE applied NOSIGPIPE");
+        close_pair(r, w);
+    }
+
+    /// Same double failure, but the test double leaves errno at 0. That is
+    /// still an error: production `libc::fcntl` sets errno, and this must not
+    /// teach the production path to invent one.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "watchos",
+        target_os = "tvos"
+    ))]
+    fn set_nonblocking_still_errs_when_injected_failures_leave_errno_at_zero() {
+        let (r, w) = pipe_ends();
+        write_errno(0);
+        let mut setfl = 0;
+        let result = set_nonblocking_with(w, |fd, cmd, arg| {
+            if cmd == F_SETNOSIGPIPE || (cmd == libc::F_SETFL && setfl == 1) {
+                return -1;
+            }
+            if cmd == libc::F_SETFL {
+                setfl += 1;
+                // SAFETY: apply O_NONBLOCK so the failed restore is the second F_SETFL.
+                return unsafe { libc::fcntl(fd, cmd, arg) };
+            }
+            // SAFETY: F_GETFL on the write end this test owns.
+            unsafe { libc::fcntl(fd, cmd, arg) }
+        });
+        match result {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(msg.contains("F_SETNOSIGPIPE failed"), "{msg}");
+                assert!(msg.contains("restoring status flags failed"), "{msg}");
+            }
+            Ok(()) => panic!("errno 0 turned a failed fcntl into success"),
+        }
+        close_pair(r, w);
+    }
+
+    /// A negative descriptor is the caller's problem. No `fcntl` runs, so the
+    /// number is not closed and not rewritten.
+    #[test]
+    fn set_nonblocking_rejects_a_negative_descriptor_without_fcntl() {
+        for fd in [-1, i32::MIN] {
+            let mut calls = 0;
+            let result = set_nonblocking_with(fd, |_, _, _| {
+                calls += 1;
+                -1
+            });
+            assert_eq!(calls, 0, "fd {fd} issued fcntl");
+            match result {
+                Err(e) => assert_eq!(e.kind(), ErrorKind::InvalidInput, "{e}"),
+                Ok(()) => panic!("negative fd {fd} was accepted"),
+            }
+        }
+        match set_nonblocking(-1) {
+            Err(e) => assert_eq!(e.kind(), ErrorKind::InvalidInput, "{e}"),
+            Ok(()) => panic!("set_nonblocking(-1) was accepted"),
+        }
+    }
+
+    /// Success on the real `fcntl` sets `O_NONBLOCK` (and NOSIGPIPE on Apple)
+    /// without clearing a pre-set `O_APPEND`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn set_nonblocking_keeps_append_while_setting_nonblock() {
+        let (r, w) = pipe_ends();
+        let base = status_flags(w);
+        set_status(w, base | libc::O_APPEND);
+        let before = status_flags(w);
+        assert_ne!(before & libc::O_APPEND, 0, "O_APPEND did not stick");
+        assert_eq!(before & libc::O_NONBLOCK, 0, "O_NONBLOCK was already set");
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        ))]
+        assert_eq!(nosigpipe(w), 0, "NOSIGPIPE was already set");
+        match set_nonblocking(w) {
+            Ok(()) => {}
+            Err(e) => panic!("set_nonblocking: {e}"),
+        }
+        let after = status_flags(w);
+        assert_eq!(
+            after & (libc::O_NONBLOCK | libc::O_APPEND),
+            libc::O_NONBLOCK | libc::O_APPEND,
+            "before {before:#x}, after {after:#x}"
+        );
+        assert_eq!(
+            after & !libc::O_NONBLOCK,
+            before & !libc::O_NONBLOCK,
+            "success cleared a status bit other than adding O_NONBLOCK: before {before:#x}, after {after:#x}"
+        );
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "watchos",
+            target_os = "tvos"
+        ))]
+        assert_eq!(nosigpipe(w), 1, "NOSIGPIPE must be set");
+        close_pair(r, w);
     }
 
     /// One call, one close(2), of that descriptor; a negative one is never

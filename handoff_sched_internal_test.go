@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/bharathvbcr/gusset/internal/hostprobe"
 )
 
 // schedTransitions is how many goroutine runnable-to-running transitions the
@@ -121,7 +123,7 @@ func TestSerialCall_LeavesAPForOtherGoroutines(t *testing.T) {
 	baseline := wakes()
 	base := baseline[len(baseline)/2]
 	if base > 100*time.Microsecond {
-		t.Skipf("this host wakes a 200 us nap %v late at the median with no Calls running: "+
+		hostprobe.Skip(t, "this host wakes a 200 us nap %v late at the median with no Calls running: "+
 			"too noisy to show the cost of a handoff (TestPollResult_Gates and "+
 			"TestQuietProcs_FollowsGOMAXPROCS check the gate itself)", base)
 	}

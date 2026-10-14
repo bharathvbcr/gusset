@@ -210,7 +210,7 @@ mod tests {
     fn header_layout_is_the_documented_40_bytes() {
         assert_eq!(core::mem::size_of::<CallHeader>(), 40);
         assert_eq!(core::mem::align_of::<CallHeader>(), 8);
-        // Reserved exists to pad to 40; a default header must be all zeros so an
+        // `reserved` is the opcode, and a default header is still all zeros so an
         // unset field never reads as a set flag on the other side.
         let h = CallHeader::default();
         assert_eq!(h.flags, 0);
@@ -218,6 +218,28 @@ mod tests {
         assert_eq!(h.timeout_ns, 0);
         assert_eq!(h.trace_id, [0u8; 16]);
         assert_eq!(h.span_id, [0u8; 8]);
+    }
+
+    /// A C host reads `gusset.h`, not the Rust docs. Both sentences are the
+    /// contract: `reserved` is the opcode (the name stays; it is ABI), and a
+    /// flag bit this library does not know is refused rather than ignored.
+    #[test]
+    fn callheader_comment_names_the_opcode_and_refuses_unknown_flags() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../internal/ffi/gusset.h");
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => panic!("cannot read {}: {e}", path.display()),
+        };
+        for sentence in [
+            "The field is named `reserved` but it is the engine dispatch opcode (0 = global handler).",
+            "Unknown flag bits are refused.",
+        ] {
+            assert!(
+                src.contains(sentence),
+                "gusset.h lost the CallHeader sentence {sentence:?}"
+            );
+        }
     }
 
     #[test]

@@ -154,26 +154,41 @@ func writeFrame(w io.Writer, v any, limit int) error {
 	return err
 }
 
+// frameError is an incomplete frame. consumed is every byte already copied
+// out of the reader, in order. Unwrap is the read error.
+type frameError struct {
+	err      error
+	consumed []byte
+}
+
+func (e *frameError) Error() string { return e.err.Error() }
+func (e *frameError) Unwrap() error { return e.err }
+
 // readFrame reads one frame into v, refusing a declared length over limit
 // before allocating it. A clean EOF between frames is io.EOF; EOF inside one
 // is io.ErrUnexpectedEOF.
 func readFrame(r *bufio.Reader, limit int, v any) error {
 	var hdr [4]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return err
-	}
-	n := binary.BigEndian.Uint32(hdr[:])
-	if uint64(n) > uint64(limit) {
-		return fmt.Errorf("isolate: frame of %d bytes exceeds the %d-byte limit", n, limit)
-	}
-	// The declared length is the peer's claim, not evidence: grow with what
-	// arrives, so a huge length and a short body cost the short body.
-	body, err := io.ReadAll(io.LimitReader(r, int64(n)))
+	n, err := io.ReadFull(r, hdr[:])
 	if err != nil {
+		if n > 0 {
+			return &frameError{err: err, consumed: append([]byte(nil), hdr[:n]...)}
+		}
 		return err
 	}
-	if len(body) != int(n) {
-		return io.ErrUnexpectedEOF
+	length := binary.BigEndian.Uint32(hdr[:])
+	if uint64(length) > uint64(limit) {
+		return fmt.Errorf("isolate: frame of %d bytes exceeds the %d-byte limit", length, limit)
 	}
-	return json.Unmarshal(body, v)
+	body, err := io.ReadAll(io.LimitReader(r, int64(length)))
+	if len(body) == int(length) {
+		return json.Unmarshal(body, v)
+	}
+	consumed := make([]byte, 4+len(body))
+	copy(consumed, hdr[:])
+	copy(consumed[4:], body)
+	if err == nil {
+		err = io.ErrUnexpectedEOF
+	}
+	return &frameError{err: err, consumed: consumed}
 }

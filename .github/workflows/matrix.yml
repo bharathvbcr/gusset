@@ -80,6 +80,7 @@ jobs:
       - name: Run Go test suite (Panic Zoo & Pitfalls)
         env:
           GUSSET_REQUIRE_LEAK_PROFILE: '1'
+          GUSSET_REQUIRE_PROBES: '1'
         run: go test -v -timeout 10m ./...
 
       # Adopters may build with Go 1.27's SIMD experiment for their own
@@ -88,6 +89,7 @@ jobs:
       - name: Go suite under GOEXPERIMENT=simd
         env:
           GOEXPERIMENT: simd
+          GUSSET_REQUIRE_PROBES: '1'
         run: |
           go vet ./...
           go test -timeout 10m ./...
@@ -124,6 +126,7 @@ jobs:
       - name: Vet and test on the floor
         env:
           GOTOOLCHAIN: local
+          GUSSET_REQUIRE_PROBES: '1'
         run: |
           go vet ./...
           go test -timeout 10m ./...
@@ -165,6 +168,8 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Rust and Go tests on the floor
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: |
           cargo test --locked --workspace
           go test -timeout 10m ./...
@@ -221,9 +226,13 @@ jobs:
         run: cargo test --locked -p gusset --test rust_allocator_api
 
       - name: Go suite against the allocator-backed library
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: go test -timeout 15m ./...
 
       - name: Go interop stress under the race detector
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: go test -race -run 'TestInterop' -count=3 -timeout 15m ./tests/pitfalls/
 
       # Once stable reaches 1.100 no other job compiles the pre-1.100 path, so
@@ -334,6 +343,8 @@ jobs:
       # shipped with no gate at all: nothing checked that Rust never retains Go
       # memory past a call.
       - name: Go tests under cgocheck2
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: GOEXPERIMENT=cgocheck2 go test -timeout 15m ./...
 
   memlimit:
@@ -353,6 +364,8 @@ jobs:
       - name: Build Rust release
         run: cargo build --locked --release
       - name: Allocator stats and AdviseMemoryLimit under a Go heap cap
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: |
           GOMEMLIMIT=256MiB go test -v -count=1 \
             -run 'TestPitfall_AllocatorStatsAndLimit|TestMemLimit' \
@@ -390,6 +403,7 @@ jobs:
       - name: Run Soak Tests
         env:
           GUSSET_REQUIRE_LEAK_PROFILE: '1'
+          GUSSET_REQUIRE_PROBES: '1'
         run: go test -v -count=1 -run Soak -timeout 20m . ./tests/pitfalls/
 
   race:
@@ -418,12 +432,16 @@ jobs:
       # and drain-exit tests live there, and race plus GOGC=1 is what found the
       # use-after-free and double-Wait park they guard (183b007).
       - name: Go Race Detector
-        run: go test -race -v -timeout 20m . ./tests/pitfalls/... ./tests/panic_zoo/...
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
+        run: go test -race -v -timeout 20m . ./tests/pitfalls/... ./tests/panic_zoo/... ./internal/...
 
       # GOGC=1 marks far more aggressively, which is what shakes out a Buffer or
       # Handle being collected while Rust still holds the memory.
       - name: Aggressive GC Test
-        run: GOGC=1 go test -v -count=5 -timeout 20m . ./tests/panic_zoo/... ./tests/pitfalls/...
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
+        run: GOGC=1 go test -v -count=5 -timeout 20m . ./tests/panic_zoo/... ./tests/pitfalls/... ./internal/...
 
   # R14's enforcer (docs/rfc-r14.md). A toolchain bump that changes what a naive
   # second staticlib does, or makes the COMDAT rename unnecessary, or breaks a
@@ -480,6 +498,8 @@ jobs:
       # not a pass. pipefail because an unset `shell:` is `bash -e` alone, and
       # tee would hide a failure.
       - name: gussetseal tests
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: |
           set -o pipefail
           go test -count=1 -v ./tools/gussetseal | tee seal.txt
@@ -530,6 +550,8 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: gussetseal tests
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: |
           set -o pipefail
           go test -count=1 -v ./tools/gussetseal | tee seal.txt
@@ -571,6 +593,8 @@ jobs:
         run: cargo build --locked --release
 
       - name: Deep recursion and worker stack sizing
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: |
           go test -v -timeout 20m \
             -run 'TestPitfall_DeepRecursionOnWorkerStack|TestPitfall_ThreadCapBoundedSoak' \
@@ -670,6 +694,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           ALLOW_NO_BASE: ${{ inputs.allow_no_base }}
+          GUSSET_REQUIRE_PROBES: '1'
         run: |
           set -euo pipefail
           if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BASE_SHA^{commit}"; then
@@ -722,6 +747,8 @@ jobs:
 
       - name: Benchmark this revision
         if: env.BENCH_BASE == ''
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: |
           set -euo pipefail
           cargo build --locked --release
@@ -767,6 +794,8 @@ jobs:
       # existed. These use Go's native fuzzing: no dependency to add, and it points
       # straight at the boundary where untrusted bytes actually enter.
       - name: Fuzz
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: make fuzz FUZZTIME=45s
 
       # A crasher is written to testdata/, which would otherwise be lost with the

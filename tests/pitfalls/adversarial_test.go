@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/internal/hostprobe"
 )
 
 // mustReturnWithin fails the test if fn has not returned by d.
@@ -175,7 +176,7 @@ func TestPitfall_DoubleWaitDoesNotReleaseSemaphore(t *testing.T) {
 		if busy.at < time.Second {
 			t.Fatalf("the first waiter to return (after %v, before the job could end) got %v, want ErrTicketBusy", busy.at, busy.err)
 		}
-		t.Skipf("the first waiter returned after %v, past the job's end: nothing left to probe on this host", busy.at)
+		hostprobe.Skip(t, "the first waiter returned after %v, past the job's end: nothing left to probe on this host", busy.at)
 	}
 
 	// The refused waiter has returned, the owner has not. The permit must still
@@ -189,7 +190,7 @@ func TestPitfall_DoubleWaitDoesNotReleaseSemaphore(t *testing.T) {
 		if admitted < time.Second {
 			t.Fatalf("second Wait released the semaphore: a Submit was admitted %v in, while the 1 s job was still in flight (I4)", admitted)
 		}
-		t.Skipf("the probe ran %v in, past the job's end: it proves nothing on this host", admitted)
+		hostprobe.Skip(t, "the probe ran %v in, past the job's end: it proves nothing on this host", admitted)
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected the probe Submit to wait on the held permit and time out, got %v", err)

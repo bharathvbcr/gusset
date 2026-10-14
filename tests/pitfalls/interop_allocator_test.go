@@ -14,6 +14,7 @@ import (
 	"unsafe"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/internal/hostprobe"
 )
 
 // modeAllocated is diagnostic mode 16: a generated output built through
@@ -380,7 +381,7 @@ func TestInterop_ForgottenBufferCleanupDoesNotStallDuringClose(t *testing.T) {
 	// of 3 runs); the parked goroutine itself is the evidence.
 	select {
 	case <-closed:
-		t.Skip("Close returned before the check: the host stalled this test past the job it was joining")
+		hostprobe.Skip(t, "Close returned before the check: the host stalled this test past the job it was joining")
 	default:
 	}
 	stacks := make([]byte, 1<<20)

@@ -61,6 +61,48 @@ func TestZeroCopyEgress_WaitBufferReturnsBufferDirectly(t *testing.T) {
 	}
 }
 
+// liveBytesNotLeaked is the leak predicate for the process-wide LiveBytes
+// gauge. A drop under the quiesced baseline is an earlier test's AddCleanup,
+// not a leak. A leak is a reading that stays above that baseline.
+func liveBytesNotLeaked(baseline, live uint64) bool {
+	return live <= baseline
+}
+
+// quiesceLiveBytes GCs until two consecutive LiveBytes readings match, and
+// returns that reading. Snapshotting while an earlier test's cleanup is still
+// running lets the counter fall under the snapshot; an equality wait then
+// spins for 30s and reports a leak.
+func quiesceLiveBytes(t *testing.T) uint64 {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	prev := gusset.Stats().LiveBytes
+	for {
+		runtime.GC()
+		time.Sleep(10 * time.Millisecond)
+		live := gusset.Stats().LiveBytes
+		if live == prev {
+			return live
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("LiveBytes did not quiesce: last=%d prev=%d", live, prev)
+		}
+		prev = live
+	}
+}
+
+// settleLiveBytes polls until liveBytesNotLeaked accepts the reading, with
+// the same 10ms/30s settle as waitLiveBytes. collect forces a GC on each pass
+// so an abandoned *Buffer's AddCleanup can run; the sample waitLiveBytes
+// already took is from before that GC, and the next pass observes it.
+func settleLiveBytes(baseline uint64, collect bool) (uint64, bool) {
+	return waitLiveBytes(func(live uint64) bool {
+		if collect {
+			runtime.GC()
+		}
+		return liveBytesNotLeaked(baseline, live)
+	})
+}
+
 // TestZeroCopyEgress_WaitBufferAddCleanupFreesOnGC verifies that if an adopter
 // abandons a *Buffer returned by WaitBuffer without calling Free(), the
 // runtime.AddCleanup backstop automatically reclaims it in Rust memory (R4).
@@ -74,7 +116,7 @@ func TestZeroCopyEgress_WaitBufferAddCleanupFreesOnGC(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	statsBefore := gusset.Stats()
+	baseline := quiesceLiveBytes(t)
 
 	// Create and abandon 10 buffers in an inner function
 	abandonBuffers := func() {
@@ -95,20 +137,12 @@ func TestZeroCopyEgress_WaitBufferAddCleanupFreesOnGC(t *testing.T) {
 
 	// All abandoned buffers must be reclaimed by AddCleanup. Each GC hands the
 	// cleanup goroutine only the objects it found, and that goroutine is as
-	// slow as the host, so collect until the counter returns instead of napping
-	// a fixed 100 ms and reading it once. A buffer nothing reclaims never
-	// returns it, and fails when the deadline passes.
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		runtime.GC()
-		live := gusset.Stats().LiveBytes
-		if live == statsBefore.LiveBytes {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("unfreed buffers leaked memory: before=%d live=%d", statsBefore.LiveBytes, live)
-		}
-		time.Sleep(20 * time.Millisecond)
+	// slow as the host, so collect until the counter is back at or under the
+	// quiesced baseline. A buffer nothing reclaims stays above it and fails
+	// when the deadline passes. A counter that drops further is an earlier
+	// test's cleanup, not a leak (I4/R16).
+	if live, ok := settleLiveBytes(baseline, true); !ok {
+		t.Fatalf("unfreed buffers leaked memory: baseline=%d live=%d", baseline, live)
 	}
 }
 
@@ -122,7 +156,7 @@ func TestZeroCopyEgress_WaitBufferTimeoutCleansUpBuffer(t *testing.T) {
 	}
 	defer h.Close()
 
-	statsBefore := gusset.Stats()
+	baseline := quiesceLiveBytes(t)
 
 	// Mode 5: delay iterations (each iteration takes 10ms)
 	// Mode 5 with 10 iterations takes ~100ms
@@ -143,19 +177,76 @@ func TestZeroCopyEgress_WaitBufferTimeoutCleansUpBuffer(t *testing.T) {
 
 	// Wait for the slow task to finish and the drainer to reclaim its result.
 	// Each of mode 5's ten 10 ms sleeps costs several times that on a loaded
-	// host, so a fixed nap measured the host. Poll for the counter to return to
-	// where it started; a leaked buffer never does, and fails after the deadline.
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		after := gusset.Stats().LiveBytes
-		if after == statsBefore.LiveBytes {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed-out buffer leaked: before=%d, after=%d", statsBefore.LiveBytes, after)
-		}
-		time.Sleep(10 * time.Millisecond)
+	// host, so a fixed nap measured the host. Poll until LiveBytes is at or
+	// under the quiesced baseline; a leaked buffer stays above it. A drop
+	// under the baseline is an earlier test's cleanup, not a leak (I4/R16).
+	if live, ok := settleLiveBytes(baseline, false); !ok {
+		t.Fatalf("timed-out buffer leaked: baseline=%d, live=%d", baseline, live)
 	}
+}
+
+// TestZeroCopyEgress_LiveBytesLeakIsAboveBaselineOnly pins the predicate the
+// two leak waits use. LiveBytes is process-wide, so the check has to tell a
+// buffer this test still holds from a counter that fell because some earlier
+// test's cleanup ran after the snapshot.
+func TestZeroCopyEgress_LiveBytesLeakIsAboveBaselineOnly(t *testing.T) {
+	t.Run("injected readings", func(t *testing.T) {
+		if !liveBytesNotLeaked(1000, 0) {
+			t.Fatal("a reading under the snapshot is an earlier cleanup, not a leak")
+		}
+		if !liveBytesNotLeaked(1000, 1000) {
+			t.Fatal("the snapshot itself is not a leak")
+		}
+		if liveBytesNotLeaked(1000, 1001) {
+			t.Fatal("a reading above the snapshot is a buffer this test still holds")
+		}
+	})
+
+	t.Run("held buffer stays above, free may drop under", func(t *testing.T) {
+		h, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
+		if err != nil {
+			t.Fatalf("Open failed: %v", err)
+		}
+		defer h.Close()
+
+		baseline := quiesceLiveBytes(t)
+		// Held on purpose: not Free'd and not left for AddCleanup. A 1 MiB
+		// buffer cannot hide in allocator noise.
+		buf, err := h.NewBuffer(1 << 20)
+		if err != nil {
+			t.Fatalf("NewBuffer failed: %v", err)
+		}
+		defer func() {
+			if err := buf.Free(); err != nil {
+				t.Errorf("Free failed: %v", err)
+			}
+		}()
+		held := gusset.Stats().LiveBytes
+		if liveBytesNotLeaked(baseline, held) {
+			t.Fatalf("a buffer this test still holds must fail the leak check: baseline=%d live=%d", baseline, held)
+		}
+
+		if err := buf.Free(); err != nil {
+			t.Fatalf("Free failed: %v", err)
+		}
+		// `held` includes this buffer. Free drops the gauge under that
+		// snapshot; the same predicate must accept the drop, and must not
+		// leave the buffer charged against the quiesced baseline.
+		live, ok := settleLiveBytes(held, false)
+		if !ok {
+			t.Fatalf("Free did not bring LiveBytes back: snapshot=%d live=%d", held, live)
+		}
+		if live >= held {
+			t.Fatalf("Free must drop LiveBytes under the snapshot taken while the buffer was held: snapshot=%d live=%d", held, live)
+		}
+		if !liveBytesNotLeaked(held, live) {
+			t.Fatalf("a drop under the snapshot must pass: snapshot=%d live=%d", held, live)
+		}
+		live, ok = settleLiveBytes(baseline, false)
+		if !ok {
+			t.Fatalf("after Free, LiveBytes stayed above the quiesced baseline: baseline=%d live=%d", baseline, live)
+		}
+	})
 }
 
 // TestMultiEngine_WithOpcodeAndContextWithOpcode tests opcode configuration and routing.

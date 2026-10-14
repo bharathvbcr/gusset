@@ -149,6 +149,7 @@ jobs:
       - name: R4 cross-free must be detected
         env:
           ASAN_OPTIONS: detect_leaks=0
+          GUSSET_REQUIRE_PROBES: '1'
         run: |
           go test -asan -v -count=1 -timeout 10m \
             -run 'TestR4_CrossFreeIsDetectedUnderASan' ./tests/pitfalls/ | tee asan_go.txt
@@ -189,9 +190,13 @@ jobs:
           go generate ./internal/ffi
 
       - name: Hammer under the race detector with GOGC=1
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: GUSSET_STRESS=5m GOGC=1 go test -race -run Hammer -count=1 -timeout 30m -v .
 
       - name: Hammer without the race detector (more operations)
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: GUSSET_STRESS=5m GOGC=1 go test -run Hammer -count=1 -timeout 30m -v .
 
   # The 2026-09-30 SIGSEGV (seed 1790763872967289580) was glibc faulting inside
@@ -235,6 +240,8 @@ jobs:
       # registers, not only the faulting goroutine. The test binary is built
       # first so the tunables apply to the hammer, not the compiler.
       - name: Hammer with glibc heap checks and a full crash dump
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: |
           cargo +stable build --locked --release -p gusset
           go generate ./internal/ffi
@@ -254,6 +261,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+          GUSSET_REQUIRE_PROBES: '1'
         run: |
           RUSTFLAGS=-Zsanitizer=address cargo +${{ env.RUST_NIGHTLY }} build --locked --release -p gusset \
             --target x86_64-unknown-linux-gnu
@@ -337,6 +345,8 @@ jobs:
           go generate ./internal/ffi
 
       - name: Fuzz every target
+        env:
+          GUSSET_REQUIRE_PROBES: '1'
         run: make fuzz FUZZTIME=240s
 
       - name: Keep crashers

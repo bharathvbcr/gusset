@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/bharathvbcr/gusset/internal/hostprobe"
 )
 
 // discardTestWait polls cond under s.mu until it holds or 10s pass.
@@ -164,7 +166,7 @@ func TestDiscard_RunningTicketKeepsItsPermitUntilTheWorkStops(t *testing.T) {
 			t.Fatalf("a second Submit was admitted %v after a %v job was submitted, while its worker was still busy (I4)", since, jobRuns)
 		}
 		_ = h.Discard(probeTicket)
-		t.Skip("the probe ran past the job's end: it proves nothing on this host")
+		hostprobe.Skip(t, "the probe ran past the job's end: it proves nothing on this host")
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("a second Submit on a 1-worker pool whose worker is still busy: got %v, want DeadlineExceeded (I4)", err)
