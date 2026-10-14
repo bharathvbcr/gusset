@@ -25,8 +25,9 @@ func main() {
 const usage = `Usage: gussetvet [-exports file] [dir]
 
 Checks the cgo shim in dir (default internal/ffi) against the Gusset rules:
-R5 (every export carries #cgo noescape and #cgo nocallback; no //export), R4
-(no C.free on Rust memory) and R1 (every export has a Go wrapper). R4 and the
+R5 (every referenced export carries #cgo noescape and #cgo nocallback,
+package-wide; no //export), R4 (no C.free on Rust memory) and R1 (every export
+has a Go wrapper). R4 and the
 //export scan walk the Go module that contains dir.
 
   -exports file   list of exported C symbols, one per line, '#' comments allowed
@@ -131,8 +132,13 @@ func runWith(targetDir, exportsFile string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// checkDirectives enforces R5 on the cgo preamble of each non-test file in dir:
-// every export in exports carries `#cgo noescape` and `#cgo nocallback`.
+// checkDirectives enforces R5 on the cgo preambles of the package in dir.
+//
+// cmd/cgo merges `#cgo` lines across every file of the package, so noescape and
+// nocallback are one set. A file must carry both only for exports it references
+// as C.<name>. A second file whose only `#cgo` line is LDFLAGS is not a
+// violation when the directives live on the file that references the export,
+// or on any other file in the package.
 //
 // Only the comment attached to `import "C"` is a preamble. This used to treat
 // every comment group containing "#cgo" as one, so a doc comment that merely
@@ -161,9 +167,22 @@ func checkDirectives(dir string, exports []string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot read %s: %w", dir, err)
 	}
+	exportSet := make(map[string]bool)
+	for _, fn := range exports {
+		fn = strings.TrimSpace(fn)
+		if fn == "" || strings.HasPrefix(fn, "#") {
+			continue
+		}
+		exportSet[fn] = true
+	}
 	fset := token.NewFileSet()
-	var violations []string
-	checked := 0
+	type cgoFile struct {
+		filename string
+		refs     []string
+	}
+	packageDirectives := make(map[string]bool)
+	var files []cgoFile
+	sawCgo := false
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -174,32 +193,43 @@ func checkDirectives(dir string, exports []string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse error in %s: %w", filename, err)
 		}
-		directives := make(map[string]bool)
 		for _, line := range preambleLines(file) {
 			text := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line.text), "//"))
 			if strings.HasPrefix(text, "#cgo ") {
-				directives[text] = true
+				packageDirectives[text] = true
+				sawCgo = true
 			}
 		}
-		if len(directives) == 0 {
-			continue
-		}
-		checked++
-		for _, fn := range exports {
-			fn = strings.TrimSpace(fn)
-			if fn == "" || strings.HasPrefix(fn, "#") {
-				continue
+		var refs []string
+		seen := make(map[string]bool)
+		ast.Inspect(file, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
 			}
+			pkg, ok := sel.X.(*ast.Ident)
+			if !ok || pkg.Name != "C" || !exportSet[sel.Sel.Name] || seen[sel.Sel.Name] {
+				return true
+			}
+			seen[sel.Sel.Name] = true
+			refs = append(refs, sel.Sel.Name)
+			return true
+		})
+		files = append(files, cgoFile{filename: filename, refs: refs})
+	}
+	if !sawCgo {
+		return nil, fmt.Errorf("no cgo preamble with #cgo lines in %s", dir)
+	}
+	var violations []string
+	for _, f := range files {
+		for _, fn := range f.refs {
 			for _, kind := range []string{"noescape", "nocallback"} {
 				want := fmt.Sprintf("#cgo %s %s", kind, fn)
-				if !directives[want] {
-					violations = append(violations, fmt.Sprintf("%s: missing '%s'", filename, want))
+				if !packageDirectives[want] {
+					violations = append(violations, fmt.Sprintf("%s: missing '%s'", f.filename, want))
 				}
 			}
 		}
-	}
-	if checked == 0 {
-		return nil, fmt.Errorf("no cgo preamble with #cgo lines in %s", dir)
 	}
 	return violations, nil
 }
@@ -366,8 +396,17 @@ func preambleLines(file *ast.File) []preambleLine {
 			continue
 		}
 		for _, c := range doc.List {
-			for _, l := range strings.Split(c.Text, "\n") {
-				out = append(out, preambleLine{text: l, pos: c.Pos()})
+			// c.Pos() is the first byte of the comment. A /* */ comment is one
+			// ast.Comment spanning many physical lines; reporting every line at
+			// that first position made an R4 free() on a later line look like
+			// it was on the line of `/*`.
+			pos := c.Pos()
+			lines := strings.Split(c.Text, "\n")
+			for i, l := range lines {
+				out = append(out, preambleLine{text: l, pos: pos})
+				if i+1 < len(lines) {
+					pos += token.Pos(len(l) + 1)
+				}
 			}
 		}
 	}

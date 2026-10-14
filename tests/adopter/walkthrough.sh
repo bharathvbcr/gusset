@@ -13,7 +13,11 @@
 #   step 3      Option B (CGO_LDFLAGS) and Option A (make install ARCHIVE=... then
 #               -tags gusset_pkgconfig), both against a copy of the module with no
 #               target/ and read-only, the way the module cache is
-#   step 5      the Allocator snippet, compiled when the compiler supports it
+#   step 5      the Allocator snippet, compiled when the compiler supports it.
+#               A skip is a GitHub warning, not a silent echo. A copy of the
+#               snippet with a type that does not exist must fail to compile.
+#               GUSSET_REQUIRE_STEP5=1 fails the run when the snippet was not
+#               compiled (the nightly job).
 #   installers  make install (PREFIX, DESTDIR, odd characters, tracked files) and
 #               install.sh (from a file, piped, bad ref, pinned commit) installing
 #               the same set of files
@@ -156,11 +160,50 @@ EOF
 cp "$UMB/Cargo.toml" "$UMB/Cargo.toml.orig"
 (cd "$UMB" && CARGO_TARGET_DIR="$UMB/target" cargo build --release 2>&1 | tail -5)
 [ -f "$UMB/target/release/libgusset.a" ] || fail "umbrella did not produce libgusset.a ([lib] name = \"gusset\")"
-if (cd "$UMB" && CARGO_TARGET_DIR="$UMB/target" cargo build --release --message-format=json 2>/dev/null | grep -q 'gusset_allocator_api'); then
+# The build script always prints cargo::rustc-check-cfg=cfg(gusset_allocator_api).
+# Only cargo::rustc-cfg=gusset_allocator_api means step5.rs was compiled.
+if grep -R -x -F -q 'cargo::rustc-cfg=gusset_allocator_api' "$UMB/target/release/build"; then
 	echo "step 5 snippet compiled (compiler reports the Allocator API)"
 else
-	echo "step 5 snippet not compiled here: this compiler's allocator probe is off (gusset::ALLOCATOR_API)"
+	echo "::warning::step 5 snippet not compiled here: this compiler's allocator probe is off (gusset_core::ALLOCATOR_API)"
+	if [ "${GUSSET_REQUIRE_STEP5:-}" = 1 ]; then
+		fail "step 5 snippet was not compiled and GUSSET_REQUIRE_STEP5=1"
+	fi
 fi
+
+step "step 5: a snippet with a bad type fails to compile"
+BAD="$W/adopter/umbrella-bad"
+mkdir -p "$BAD/src"
+cp "$UMB/Cargo.toml" "$UMB/build.rs" "$BAD/"
+grep -v '^#\[cfg(gusset_allocator_api)]$' "$UMB/src/lib.rs" >"$BAD/src/lib.rs"
+grep -q '^mod step5;$' "$BAD/src/lib.rs" || fail "could not force the step 5 module into the negative compile"
+{
+	cat <<'EOF'
+fn estimate(input: &[u8]) -> usize {
+    input.len()
+}
+
+fn render_into(
+    out: &mut Vec<u8, gusset_core::BufferAlloc>,
+    input: &[u8],
+    _ctx: &gusset_core::JobContext,
+) -> Result<(), String> {
+    out.extend_from_slice(input);
+    Ok(())
+}
+
+pub fn register() {
+EOF
+	printf '%s\n' "$STEP5_RS" | sed 's/Vec<u8, BufferAlloc>/Vec<u8, Step5NotAType>/' | sed 's/^/    /'
+	printf '}\n'
+} >"$BAD/src/step5.rs"
+grep -q 'Step5NotAType' "$BAD/src/step5.rs" || fail "the broken snippet lost its bad type"
+expect_fail "step 5 snippet with a type that does not exist" \
+	bash -c "cd '$BAD' && CARGO_TARGET_DIR='$BAD/target' cargo check --release"
+grep -F 'Step5NotAType' "$W/expect_fail.out" >/dev/null || {
+	cat "$W/expect_fail.out" >&2
+	fail "the compiler did not report Step5NotAType; the negative compile did not type-check the snippet"
+}
 
 # --- the Go application -----------------------------------------------------
 

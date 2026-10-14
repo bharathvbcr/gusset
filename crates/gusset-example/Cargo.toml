@@ -9,11 +9,12 @@ authors.workspace = true
 publish = false
 
 [lib]
-crate-type = ["staticlib", "rlib"]
+# rlib only. Nothing links libgusset_example.a, and a second unsealed
+# staticlib beside libgusset.a is the R14 failure this crate must not be.
+crate-type = ["rlib"]
 
 [dependencies]
 gusset = { path = "../gusset" }
-libc = "0.2"
 
 [dev-dependencies]
 libc = "0.2"

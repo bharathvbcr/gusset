@@ -48,10 +48,13 @@ var s = "C.free( in a string is not a call either // really"
 		t.Fatal(err)
 	}
 	got := strings.Join(v, "\n")
-	for _, want := range []string{"alias.go:7", "call.go:4", "preamble.go"} {
+	for _, want := range []string{"alias.go:7", "call.go:4", "preamble.go:4"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing violation for %s in:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "preamble.go:2") {
+		t.Errorf("free() reported at the comment's first line, not the call:\n%s", got)
 	}
 	if strings.Contains(got, "clean.go") {
 		t.Errorf("comment or string literal flagged:\n%s", got)
@@ -93,7 +96,7 @@ import "C"
 
 // #cgo noescape gusset_cancel
 // #cgo nocallback gusset_cancel
-func f() {}
+func f() { C.gusset_cancel() }
 `)
 	v, err := checkDirectives(stray, exports)
 	if err != nil {
@@ -187,6 +190,53 @@ func A() { C.gusset_a() }
 	}
 	if !strings.Contains(stderr.String(), "go.mod") {
 		t.Errorf("error does not say what was missing: %s", stderr.String())
+	}
+}
+
+// cmd/cgo merges #cgo directives across the package and only cares about an
+// export a file references. A second file whose only #cgo line is LDFLAGS must
+// not be reported when the directives live with the reference, and a reference
+// in that second file is covered by directives on the first.
+func TestR5DirectivesMergeAcrossThePackage(t *testing.T) {
+	exports := []string{"gusset_a", "gusset_unreferenced"}
+
+	dir := t.TempDir()
+	write(t, dir, "ffi.go", `package ffi
+/*
+#cgo noescape gusset_a
+#cgo nocallback gusset_a
+*/
+import "C"
+func A() { C.gusset_a() }
+`)
+	write(t, dir, "ldflags.go", `package ffi
+/*
+#cgo LDFLAGS: -lgusset
+*/
+import "C"
+func Also() { C.gusset_a() }
+`)
+	if v, err := checkDirectives(dir, exports); err != nil || len(v) != 0 {
+		t.Fatalf("LDFLAGS file or unreferenced export flagged: %v %v", v, err)
+	}
+
+	missing := t.TempDir()
+	write(t, missing, "ffi.go", `package ffi
+/*
+#cgo LDFLAGS: -lgusset
+*/
+import "C"
+func A() { C.gusset_a() }
+`)
+	v, err := checkDirectives(missing, exports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(v, "\n")
+	if len(v) != 2 || !strings.Contains(got, "'#cgo noescape gusset_a'") ||
+		!strings.Contains(got, "'#cgo nocallback gusset_a'") ||
+		strings.Contains(got, "gusset_unreferenced") {
+		t.Fatalf("want only gusset_a's two directives, got:\n%s", got)
 	}
 }
 
