@@ -541,19 +541,46 @@ jobs:
 
   # x86_64-unknown-linux-musl is in the supported set. Same container and
   # toolchain setup as the musl job below.
+  #
+  # The image is pinned by the digest of the multi-arch index that
+  # golang:1.27-alpine resolved to on 2026-10-24 (Go 1.27.3 on Alpine 3.24.3,
+  # built 2026-10-21; its linux/amd64 manifest is sha256:bff16a94...). A tag
+  # can be moved under a required check; a digest cannot. The cost is that this
+  # job no longer floats with the Go 1.27.x patch the other jobs get from
+  # setup-go: it tests Go 1.27.3 until the digest is bumped. Bump both musl jobs
+  # together (tests/ci fails if they differ):
+  #   curl -fsSI -H "Authorization: Bearer $TOKEN" \
+  #     -H 'Accept: application/vnd.oci.image.index.v1+json' \
+  #     https://registry-1.docker.io/v2/library/golang/manifests/1.27-alpine
+  # or `crane digest golang:1.27-alpine`; take docker-content-digest.
+  #
+  # apk packages are not version-pinned. Alpine's index keeps only the newest
+  # build of each package, so `build-base=0.5-r4` stops resolving the day Alpine
+  # rebuilds it and fails a required check for no change of ours; build-base is
+  # also a meta-package whose dependencies (gcc, make, ...) would still float.
+  # What is fixed instead: the repository list and signing keys come from the
+  # pinned image, and apk verifies every package against them. The step prints
+  # the installed set so a run's toolchain is on record.
   r14-musl:
     name: R14 sealed staticlibs (musl)
     runs-on: ubuntu-latest
-    container: golang:1.27-alpine
+    container: golang:1.27-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c # golang:1.27-alpine, Go 1.27.3, Alpine 3.24.3, 2026-10-24
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # rustup-init is the pinned download from tools/ci/versions.env, checked
+      # against its published sha256, not Alpine's `rustup` package.
       - name: Install toolchain
         run: |
-          apk add --no-cache build-base musl-dev rustup binutils
-          rustup-init -y --default-toolchain stable --profile minimal
+          . tools/ci/versions.env
+          apk add --no-cache build-base musl-dev binutils
+          apk info -v | sort
+          wget -q -O /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-musl/rustup-init"
+          echo "$RUSTUP_INIT_SHA256_X86_64_MUSL  /tmp/rustup-init" | sha256sum -c -
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --default-toolchain stable --profile minimal
           "$HOME/.cargo/bin/rustup" toolchain install 1.97 --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
@@ -576,7 +603,7 @@ jobs:
   musl:
     name: musl (I5, R8)
     runs-on: ubuntu-latest
-    container: golang:1.27-alpine
+    container: golang:1.27-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c # golang:1.27-alpine, Go 1.27.3, Alpine 3.24.3, 2026-10-24
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -588,11 +615,17 @@ jobs:
       # runtime. This job is the one place the difference is in play.
       # Alpine's packaged rust is 1.96.1, below rust-version = "1.97", so
       # cargo refused to build (exit 101) on every run. rustup installs the
-      # develop channel instead of lowering the floor.
+      # develop channel instead of lowering the floor. The image digest and the
+      # pinned, checksummed rustup-init are explained at the r14-musl job.
       - name: Install toolchain
         run: |
-          apk add --no-cache build-base musl-dev rustup
-          rustup-init -y --default-toolchain stable --profile minimal
+          . tools/ci/versions.env
+          apk add --no-cache build-base musl-dev
+          apk info -v | sort
+          wget -q -O /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-musl/rustup-init"
+          echo "$RUSTUP_INIT_SHA256_X86_64_MUSL  /tmp/rustup-init" | sha256sum -c -
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --default-toolchain stable --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Build Rust release
