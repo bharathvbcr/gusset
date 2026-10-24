@@ -310,8 +310,11 @@ impl Handle {
     /// failure halfway through creating thousands of threads.
     ///
     /// `pipe_write_fd` stays the caller's until `open` succeeds. A refusal closes
-    /// nothing and leaves its status flags as they were; on success Gusset owns
-    /// it and has made it non-blocking (and NOSIGPIPE on Darwin).
+    /// nothing and leaves its status flags as they were, with one exception on
+    /// Darwin: if `F_SETNOSIGPIPE` fails and the `F_SETFL` that restores the
+    /// saved flags fails too, `O_NONBLOCK` stays set, and the error names both
+    /// failures (`sys::set_nonblocking`). On success Gusset owns it and has made
+    /// it non-blocking (and NOSIGPIPE on Darwin).
     pub fn open(pool_size: u32, pipe_write_fd: i32) -> Result<Arc<Self>, String> {
         install_panic_hook();
 
