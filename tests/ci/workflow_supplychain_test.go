@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -523,6 +524,85 @@ func stepIfGuard(step []string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// independentSteps names, per matrix job, the steps that check something the
+// step before them does not, so a red earlier step must not skip them. On
+// 320c56c (Matrix 39270656716) all five were skipped after an unrelated test
+// failed, and the job read as one failure instead of six unknowns.
+var independentSteps = map[string][]string{
+	"unit":          {"Go suite under GOEXPERIMENT=simd"},
+	"allocator-api": {"Go interop stress under the race detector", "Fallback path on the same compiler (GUSSET_ALLOCATOR_API=0)"},
+	"race":          {"Aggressive GC Test"},
+	"bench":         {"Allocation gate (ChannelHop 0, cgo path bounded)"},
+}
+
+func TestIndependentStepsRunAfterAFailure(t *testing.T) {
+	for _, p := range independentStepMismatches(independentSteps, workflows(t)["matrix.yml"]) {
+		t.Error(p)
+	}
+}
+
+func TestIndependentStepsOnFixtures(t *testing.T) {
+	want := map[string][]string{"unit": {"Second suite"}}
+	const good = `
+jobs:
+  unit:
+    steps:
+      - name: First suite
+        run: go test ./...
+      - name: Second suite
+        if: success() || failure()
+        run: go test -tags x ./...
+`
+	if probs := independentStepMismatches(want, strings.Split(good, "\n")); len(probs) != 0 {
+		t.Fatalf("compliant fixture flagged: %v", probs)
+	}
+	for name, yaml := range map[string]string{
+		"dropped if":   strings.Replace(good, "        if: success() || failure()\n", "", 1),
+		"other guard":  strings.Replace(good, "if: success() || failure()", "if: always()", 1),
+		"step renamed": strings.Replace(good, "Second suite", "Renamed suite", 1),
+		"job missing":  strings.Replace(good, "  unit:", "  other:", 1),
+	} {
+		if probs := independentStepMismatches(want, strings.Split(yaml, "\n")); len(probs) == 0 {
+			t.Errorf("%s: the planted violation was not caught", name)
+		}
+	}
+}
+
+// independentStepMismatches reports each named step that is missing from its
+// job or whose if: is not exactly success() || failure(), the lint steps' guard.
+func independentStepMismatches(want map[string][]string, lines []string) []string {
+	jobs := map[string]string{}
+	for _, j := range splitJobs(lines) {
+		key, _, _ := strings.Cut(strings.TrimSpace(j), ":")
+		jobs[key] = j
+	}
+	var problems []string
+	for job, names := range want {
+		body, ok := jobs[job]
+		if !ok {
+			problems = append(problems, "matrix has no job "+job)
+			continue
+		}
+		steps := map[string][]string{}
+		for _, st := range workflowSteps(strings.Split(body, "\n")) {
+			name := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(st[0]), "- name:"))
+			steps[name] = st
+		}
+		for _, name := range names {
+			st, ok := steps[name]
+			if !ok {
+				problems = append(problems, job+": no step named "+name)
+				continue
+			}
+			if guard, ok := stepIfGuard(st); !ok || guard != "success() || failure()" {
+				problems = append(problems, job+": step "+name+" lacks exactly the success() || failure() guard")
+			}
+		}
+	}
+	sort.Strings(problems)
+	return problems
 }
 
 // The race detector and the GOGC=1 pass both have to see internal/, including

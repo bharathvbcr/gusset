@@ -17,10 +17,16 @@
 // alone and failed a commit that only touched tools/. The geomean summary row is
 // not a benchmark and is never gated. A row present on only one side (benchstat
 // emits 3 fields for base-only and 5 for new-only, against 7 for a comparison)
-// fails unless its name was passed to -allow-one-sided. The default list is
-// empty. Such a row does not end the sec/op table: a later comparison is still
-// gated. A renamed benchmark used to clear the table and a later regression
-// passed.
+// is judged by which side it is on. Base-only means a benchmark was dropped or
+// renamed, so its replacement is not guarded: it fails unless its name was
+// passed to -allow-one-sided (the default list is empty). New-only is a
+// benchmark the change adds, which the base cannot have: it is reported as a
+// ::notice and not compared. Failing it turned every push that added a
+// benchmark red, with no allow path a push could use (Matrix 39270656716). A
+// rename is a base-only row plus a new-only one, so it still fails. Allow-list
+// names match with or without the runner's -N GOMAXPROCS suffix. A one-sided
+// row does not end the sec/op table: a later comparison is still gated. A
+// renamed benchmark used to clear the table and a later regression passed.
 package main
 
 import (
@@ -219,8 +225,12 @@ func checkRegress(r io.Reader, threshold float64, allowOneSided map[string]struc
 		// side. It must not clear inTable: that used to end the sec/op table
 		// so a later regression was never read, while rows > 0 still passed.
 		if len(rec) < 7 {
-			if _, ok := allowOneSided[rec[0]]; !ok {
-				failures = append(failures, fmt.Sprintf("%s: one-sided sec/op row (%d fields); a renamed or dropped benchmark is not a pass (allow it with -allow-one-sided)", rec[0], len(rec)))
+			switch {
+			case allowed(allowOneSided, rec[0]):
+			case newOnly(rec):
+				fmt.Fprintf(stdout, "::notice title=New benchmark::%s has no base sample, so it was not compared\n", rec[0])
+			default:
+				failures = append(failures, fmt.Sprintf("%s: base-only sec/op row (%d fields); a renamed or dropped benchmark is not a pass (allow it with -allow-one-sided)", rec[0], len(rec)))
 			}
 			continue
 		}
@@ -262,6 +272,26 @@ func checkRegress(r io.Reader, threshold float64, allowOneSided map[string]struc
 	}
 	fmt.Fprintf(stdout, "no regression beyond %v%% across %d benchmarks\n", threshold, rows)
 	return nil
+}
+
+// newOnly reports a one-sided row whose base columns are empty: benchstat's
+// shape for a benchmark the new side has and the base does not.
+func newOnly(rec []string) bool {
+	return len(rec) >= 4 && strings.TrimSpace(rec[1]) == "" && strings.TrimSpace(rec[2]) == "" &&
+		strings.TrimSpace(rec[3]) != ""
+}
+
+// procsSuffix is the -N GOMAXPROCS suffix go test appends to a benchmark name.
+var procsSuffix = regexp.MustCompile(`-\d+$`)
+
+// allowed matches name against the allow list with and without its -N suffix,
+// so an allow entry does not depend on the runner's core count.
+func allowed(allow map[string]struct{}, name string) bool {
+	if _, ok := allow[name]; ok {
+		return true
+	}
+	_, ok := allow[procsSuffix.ReplaceAllString(name, "")]
+	return ok
 }
 
 func sorted(s []string) []string {

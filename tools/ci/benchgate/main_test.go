@@ -200,14 +200,70 @@ func TestRegressOneSidedRowDoesNotUngateTheNext(t *testing.T) {
 		t.Fatalf("an allow-listed one-sided row failed the gate by itself: %v", err)
 	}
 
-	// Five fields is benchstat's new-only shape. Same rule, same non-clearing.
+	// Five fields is benchstat's new-only shape: a notice, not a failure, and
+	// it does not end the table either.
 	five := csvHeader + `Steady-18,1.0,2%,1.01,2%,~,p=0.5 n=10
 NewOnly-18,,,1.0,2%
 LaterRegress-18,1.0,2%,1.3,3%,+30.00%,p=0.000 n=10
 `
-	err = checkRegress(strings.NewReader(five), 10, nil, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "LaterRegress-18") || !strings.Contains(err.Error(), "NewOnly-18") {
-		t.Fatalf("a 5-field row ungated the table or was ignored: %v", err)
+	var out bytes.Buffer
+	err = checkRegress(strings.NewReader(five), 10, nil, &out)
+	if err == nil || !strings.Contains(err.Error(), "LaterRegress-18") {
+		t.Fatalf("a new-only row ungated the table: %v", err)
+	}
+	if strings.Contains(err.Error(), "NewOnly-18") {
+		t.Fatalf("a new-only row failed the gate: %v", err)
+	}
+	if !strings.Contains(out.String(), "::notice title=New benchmark::NewOnly-18") {
+		t.Fatalf("a new-only row was not reported as a notice:\n%s", out.String())
+	}
+}
+
+// The rows Matrix 39270656716 failed on: benchmarks a push added, which its
+// base cannot have. They are reported and the gate passes on the compared rows.
+func TestRegressNewOnlyRowsAreNoticesNotFailures(t *testing.T) {
+	in := csvHeader + `Steady-4,1.0,2%,1.01,2%,~,p=0.5 n=10
+DeadlineExpiry-4,,,71.6,1%
+Discard-4,,,40.0,2%
+Stats-4,,,12.0,3%
+`
+	var out bytes.Buffer
+	if err := checkRegress(strings.NewReader(in), 10, nil, &out); err != nil {
+		t.Fatalf("new-only rows failed the gate: %v", err)
+	}
+	for _, name := range []string{"DeadlineExpiry-4", "Discard-4", "Stats-4"} {
+		if !strings.Contains(out.String(), "::notice title=New benchmark::"+name) {
+			t.Errorf("no notice for %s:\n%s", name, out.String())
+		}
+	}
+}
+
+// A rename is a base-only row plus a new-only row. The base-only half still
+// fails, so a renamed benchmark is not a quiet pass.
+func TestRegressRenameStillFails(t *testing.T) {
+	in := csvHeader + `Steady-4,1.0,2%,1.01,2%,~,p=0.5 n=10
+OldName-4,1.0,2%
+NewName-4,,,1.0,2%
+`
+	err := checkRegress(strings.NewReader(in), 10, nil, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "OldName-4") {
+		t.Fatalf("a renamed benchmark passed: %v", err)
+	}
+	if strings.Contains(err.Error(), "NewName-4") {
+		t.Fatalf("the new half of a rename was failed instead of noticed: %v", err)
+	}
+}
+
+// Allow-list entries do not depend on the runner's core count.
+func TestRegressAllowMatchesWithoutProcsSuffix(t *testing.T) {
+	in := csvHeader + "Steady-4,1.0,2%,1.01,2%,~,p=0.5 n=10\nRenamedAway-4,1.0,2%\n"
+	for _, allow := range []string{"RenamedAway", "RenamedAway-4"} {
+		if err := checkRegress(strings.NewReader(in), 10, map[string]struct{}{allow: {}}, &bytes.Buffer{}); err != nil {
+			t.Errorf("allow %q did not match RenamedAway-4: %v", allow, err)
+		}
+	}
+	if err := checkRegress(strings.NewReader(in), 10, map[string]struct{}{"RenamedAway-8": {}}, &bytes.Buffer{}); err == nil {
+		t.Error("an allow entry for a different -N matched")
 	}
 }
 

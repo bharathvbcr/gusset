@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased] - 2026-10-23 · Main green again: the two Linux test bugs, new benchmarks, masked steps
+
+From the 2026-10-23 audit: tracker `ft-97faf4f4`, plus `ft-c689767b`, `gs-isolate-corrupt-frame-hang` and `ft-1f4a1228`. No runtime, export, ABI or public Go API change. Nothing in this set touches a hot path, so no benchmark delta is claimed. 320c56c was pushed directly to main on 2026-10-19 and Matrix 39270656716 was red in 8 jobs; this set fixes all three causes. Linux evidence is from the throwaway branch `probe/w1-linux-evidence` (run 40058658715).
+
+### Tests
+- **The bystander wake test no longer fails on every Linux host (I4).** Its baseline timed naps in an idle process. On Linux an idle 200 µs nap wakes about 860 µs late, because the netpoller rounds a sub-millisecond wait up to `epoll_wait(1)`. The test skipped as "too noisy", and `GUSSET_REQUIRE_PROBES` made that a failure. The baseline now runs with a goroutine cycling the scheduler, which is the regime of a correct Call: 2–5 µs on Linux runners. On Linux the pre-fix gate wakes 6.3–14 ms late and fails 20 of 20 runs; the fixed build wakes 1.5–5 µs late.
+- **The close-on-exec test no longer mistakes Go's cgroup fd for a leak (I1).** On Linux the Go runtime holds the cgroup `cpu.max` at the fd number exec just freed. The exec probe now compares descriptor identity (`dev:ino` of the protocol pipe) instead of asking whether fd 3 is open. Removing `CloseOnExec` from `ProtocolOut` fails it.
+
+### CI
+- **A benchmark the change adds is a `::notice`, not a failure.** Base-only rows (dropped or renamed benchmarks) still fail, and a rename still fails. Allow-list names match with or without the `-N` suffix.
+- **Independent steps run after an unrelated red.** These steps now carry `if: success() || failure()`, and `tests/ci` pins them:
+  - the simd suite;
+  - GOGC=1;
+  - the allocator interop race and fallback steps;
+  - the bench allocation gate.
+
+### Process
+- **`main` is protected.** A PR is required, and the 23 Matrix and adopter checks are required, strict and enforced for admins. See DECISIONS 2026-10-23, which also records keeping `gusset_buf_alloc` uncapped and splitting iceoryx2-go PR #1.
+
 ## [Unreleased] - 2026-10-13 · Unsupported targets fail with the named error
 
 From `ft-9977d2b2`. No export signature, ABI or public Go API change. GitHub Actions has not run this tree. No benchmark baseline was recorded.

@@ -18,14 +18,19 @@ LaterRegress-18,1.0,2%,1.3,3%,+30.00%,p=0.000 n=10
 ,B/op
 BopOnly-18,9.0,1%
 `
-	err := checkRegress(strings.NewReader(in), 10, nil, &bytes.Buffer{})
+	var out bytes.Buffer
+	err := checkRegress(strings.NewReader(in), 10, nil, &out)
 	if err == nil {
 		t.Fatal("short header plus a later regression passed")
 	}
-	for _, want := range []string{"LaterRegress-18", "BaseOnly-18", "Weird, name-18", "+30.00%"} {
+	for _, want := range []string{"LaterRegress-18", "BaseOnly-18", "+30.00%"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not name %q:\n%s", want, err.Error())
 		}
+	}
+	// The quoted name with a comma is new-only: a notice, not a failure.
+	if strings.Contains(err.Error(), "Weird, name-18") || !strings.Contains(out.String(), "Weird, name-18") {
+		t.Errorf("new-only quoted row was failed or not reported:\nerr %v\nout %s", err, out.String())
 	}
 
 	allow := map[string]struct{}{"BaseOnly-18": {}, "Weird, name-18": {}}
