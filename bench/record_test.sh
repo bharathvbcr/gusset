@@ -340,7 +340,9 @@ assert_no_lock() {
 	done
 }
 
-sleep 300 &
+# A process in this shell's own group that outlives the whole run (a fixed sleep
+# did not: a loaded host once took longer than it) and ends with it.
+/bin/sh -c 'while kill -0 "$1" 2>/dev/null; do sleep 1; done' _ "$$" &
 CANARY=$!
 
 if [ "${RECORD_TEST_FAULT:-}" = "1" ]; then
@@ -813,6 +815,17 @@ cargo_case() {
 	rec "$D" RECORD_DIR=. -- "$D/out.txt" 1x 12 cargo:nonsense
 	[ "$REC_RC" = 2 ] || fail "malformed cargo arm: exit $REC_RC, want 2"
 	assert_sentinel "$D/out.txt" "malformed cargo arm"
+
+	# Variant mode runs one round per arm, below the bench's floor of rounds: a
+	# cargo arm there is refused up front, not after the lock and the warm-up.
+	mkdir -p "$D/va" "$D/vb"
+	sentinel "$D/out.txt"
+	: >"$D/cargo.log"
+	rec "$D" "RECORD_VARIANTS=alpha=../va beta=../vb" -- "$D/out.txt" 1x 12 cargo:gusset/dispatch
+	[ "$REC_RC" = 2 ] || fail "cargo arm under RECORD_VARIANTS: exit $REC_RC, want 2"
+	grep -q "cannot be a RECORD_VARIANTS arm" "$D/stderr" || fail "cargo arm under RECORD_VARIANTS: no explanation"
+	assert_sentinel "$D/out.txt" "cargo arm under RECORD_VARIANTS"
+	[ ! -s "$D/cargo.log" ] || fail "cargo arm under RECORD_VARIANTS: cargo ran before the refusal"
 
 	# A cargo arm that prints nothing is a zero-row arm like any other.
 	printf '%s\n' '#!/bin/sh' 'exit 0' >"$D/bin/cargo"

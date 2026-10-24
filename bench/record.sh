@@ -70,7 +70,9 @@
 #              owns its iteration count) and COUNT becomes its --rounds.
 #              RECORD_DIR must then be the Cargo workspace root (make
 #              bench-dispatch does this). Its stdout is the recorded output;
-#              cargo's own stderr is shown only when the arm fails.
+#              cargo's own stderr is shown only when the arm fails. It cannot
+#              be combined with RECORD_VARIANTS: variant mode runs one round per
+#              arm, and the bench's floor on --rounds is higher.
 #
 #   COUNT must be a positive integer, and every arm must produce at least one
 #   Benchmark row: an arm that exits 0 with no rows (a -bench regex that matches
@@ -125,6 +127,14 @@ for a in "$@"; do
 	cargo:*)
 		if ! printf '%s\n' "${a#cargo:}" | grep -Eq '^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$'; then
 			echo "record: arm '$a' is not cargo:PACKAGE/BENCH" >&2
+			exit 2
+		fi
+		# Variant mode runs every arm one round at a time (-count=1), and the
+		# bench's own floor on --rounds is higher: it would fail in round 1,
+		# after the lock and the warm-up. Its rounds already interleave the arms
+		# it compares; comparing two builds of it is two recordings.
+		if [ -n "$RECORD_VARIANTS" ]; then
+			echo "record: arm '$a': a cargo arm cannot be a RECORD_VARIANTS arm (variant mode runs one round per arm, below the bench's floor)" >&2
 			exit 2
 		fi
 		;;

@@ -68,10 +68,11 @@ func BenchmarkDeadlineInFlight(b *testing.B) {
 	}
 	defer h.Close()
 
-	const deadline = 20 * time.Millisecond
-	// 20 iterations of 10 ms: a run to completion would take 200 ms, ten times
+	const deadline = 50 * time.Millisecond
+	// 20 iterations of 10 ms: a run to completion would take 200 ms, four times
 	// the deadline, so an engine that ignored the deadline cannot pass for one
-	// that enforced it.
+	// that enforced it. The deadline is long enough that a loaded runner does not
+	// expire it before the job is admitted, which would fail the run in Submit.
 	payload := []byte{5, 20}
 	var cancelled int
 
