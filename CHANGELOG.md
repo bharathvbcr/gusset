@@ -1,5 +1,42 @@
 # Changelog
 
+## [Unreleased] - 2026-10-23 · Nightly failures report themselves and keep their evidence
+
+From `ft-987c804c`. Test and workflow changes only: no export signature, ABI or public Go API change. GitHub Actions has not run this tree. The criteria that need three consecutive green nightlies are open.
+
+### CI
+- **Miri is bounded at 240 minutes (I4).** It had no `timeout-minutes` and was cancelled at GitHub's 6 h default on 2026-10-15..17 and 2026-10-23, before the ring seed sweep ran. `one_cut_evicts_what_line_by_line_eviction_does` took 3 h 30 m of job 117993651499. It now runs 20 rounds under `cfg(miri)` and 2000 elsewhere, as `pool::ring`'s handshake test does. Under Miri on darwin the 20 rounds took 206 s. On 2026-10-19 the rest of the lib suite and the seed sweep took under 2 minutes in CI. Since then every Miri run was cancelled inside this test, and no run has reached the tests added after 10-19. One of those, `pool::tests::open_refuses_a_descriptor_that_is_not_a_pipe_write_end` (924479b), failed under Miri on darwin with `unsupported operation: fcntl ... F_GETFL`. Like its fd-checking neighbours, it is now `#[cfg_attr(miri, ignore)]`.
+- **`ffi_exports` runs as five 60 s processes instead of one 300 s run.** Under ASan, each handle open/close keeps about 78 KB of RSS that is never returned. RSS stays flat at 26 MB without a sanitizer, so this is not a Gusset leak. A 300 s run crossed the 2048 MB limit with a 26 MB live heap, the second cause of the nightly OOM after the 1 GiB lengths. Each 60 s process stays well under the limit, which still catches a real out-of-memory. Total time and corpus are unchanged.
+- **A cancelled or timed-out nightly job files an issue.** A job that hits its timeout concludes `cancelled`, and `failure()` is false for that (run 38710039955: Miri cancelled, report skipped). The report job runs on `always()` when any needed job failed, was cancelled or was skipped. Its body names jobs by result. If every job succeeded, it files nothing.
+- **cargo-fuzz uploads `fuzz/artifacts/` on failure**, with the upload-artifact SHA go-fuzz pins. The `ffi_exports` OOM input from 39930332461 was lost because nothing uploaded it.
+- **`tests/ci/workflow_failure_evidence_test.go` holds these rules.** Every job that runs `cargo fuzz` or Go fuzzing has an on-failure upload covering the tree that fuzzer writes to. The report job's `needs` list every other nightly job. Its `if:` covers `'failure'` and `'cancelled'`, and its body names cancelled jobs. Miri's bound is 1..240. Each rule fails on the pre-change `nightly.yml` and on planted fixtures. It is a new file, so PR #5's edits to `workflow_supplychain_test.go` do not collide with it.
+
+### Harness
+- **The hammer's abandon oracle no longer reports a correct result as corruption (I4).** `opAbandon` sent `[9, k]` with an empty body 1 time in 6000. Mode 9 echoes the whole input when nothing follows its prefix, so the engine returned `09 0k` and the oracle wanted 0 bytes. That is the `abandon: corrupted result: got 2 bytes, want 0` of nightlies 39575563846 and 39754401724. The body is now 1+ bytes, as the other mode-9 builders' are. `TestHammer_AbandonInputNeverHasAnEmptyBody` pins the echo. It draws from a seed whose fifth draw was empty under the old builder, so it fails there and takes under a second with `-race`. The three recorded seeds replay green for 30 s each on darwin, which has no heap-check leg.
+- **`FuzzDiagnosticEngineNeverAborts` never leaves a closed handle for the next input.** When Close or the reopen failed after a poisoning input, the target Fatalf'd with the closed handle still in place. The minimizer then reported `gusset: handle is closed` for everything (39112666661, GitHub issue #4). The poisoned handle now leaves the slot first and is always closed, and the replacement is opened before any report. A failed Open is retried, and reported as itself, on the next input. A planted Close failure and a planted reopen failure each report their own message; the old ordering reports `handle is closed`.
+- **The 2026-10-18 crash file is committed as recovered, not reconstructed.** `tests/pitfalls/testdata/fuzz/FuzzDiagnosticEngineNeverAborts/582528ddfad69eb5` is the file from artifact 12130769765, byte for byte: `[]byte("0")`. The minimizer produced it against the closed handle, and the artifact did not keep the original 31-byte input, so that first failure's cause is still unknown. The file passes on a fresh handle. On darwin, 4000 poison-and-reopen cycles left descriptors at 5 and OS threads at 11 (from 6), with flat cycle time, and a 240 s local fuzz run never fell below 52 execs/s. Neither supports descriptor or thread exhaustion there. Linux was not measured.
+
+## [Unreleased] - 2026-10-23 · Isolate keeps finished results and drains on progress
+
+From the 2026-10-23 audit of `gs-isolate-corrupt-frame-hang`, items B-2 to B-6 and the criterion 11 amendment. Everything is in `internal/isolate`, which has no importer outside its package. No runtime, export, ABI or public Go API change, and no hot path, so no benchmark delta is claimed. Run on darwin/arm64 only; GitHub Actions has not run this tree. Each new test fails on 2ed9a29's `proc.go`.
+
+### Isolate
+- **A result stored before the worker died is returned by `Wait` (I2, I4).** The reader's exit used to delete every ticket, so `Wait` returned the worker's poison for a job that had already finished. A stored result now stays until `Wait`, `Discard` or `Close` takes it. In-flight tickets and every later `Submit` still get `ErrPoisoned`. `TestProc_StoredResultSurvivesWorkerDeath` fails before the fix.
+- **The drain windows restart on progress (I3).** After the worker exits, the reaper's 200 ms window restarts while frames are still delivered. The reader's 50 ms probe is re-armed after each frame instead of once. Before the fix, frames arriving 50 ms apart after the exit lost 6 of 10, and frames 5 ms apart behind the probe lost 12 or 13 of 20.
+- **`Submit` refuses once the worker has exited (I4).** It used to write to the dead worker's stdin and wait for the reader to latch. That bounds the drain: only tickets in flight at the exit can extend it.
+- **Stale code.** `ProtocolOut` loses a nil check that could not fire. The package comment says responses run on the `ExtraFiles` protocol pipe, not stdout.
+
+### Tests
+- **`TestProc_CancelSendDoesNotPinTheWriteLock` closes with a 100 ms budget (I4).** The deaf worker ignores stdin, so the public `Close` waited out its 30 s budget before the kill. The test took 33.10 s and now takes 3.14 s.
+- **The grandchild fixture starts its grandchild before hello.** A kill right after `Start` could beat the grandchild to the pipe, and the test then never opened the drain window it was about.
+
+### Decisions
+- Four rows dated 2026-10-23 in DECISIONS:
+  - stored results survive worker death;
+  - a write deadline poisons even when 0 bytes were written (kept fail-closed; a counting writer was rejected);
+  - the progress-based drain, with the limits that stay wall-clock;
+  - the typed-nil trace-carrier recover duplicated in `readContext`, so the public surface stays at 13 Go entry points.
+
 ## [Unreleased] - 2026-10-23 · Main green again: the two Linux test bugs, new benchmarks, masked steps
 
 From the 2026-10-23 audit: tracker `ft-97faf4f4`, plus `ft-c689767b`, `gs-isolate-corrupt-frame-hang` and `ft-1f4a1228`. No runtime, export, ABI or public Go API change. Nothing in this set touches a hot path, so no benchmark delta is claimed. 320c56c was pushed directly to main on 2026-10-19 and Matrix 39270656716 was red in 8 jobs; this set fixes all three causes. Linux evidence is from the throwaway branch `probe/w1-linux-evidence` (run 40058658715).

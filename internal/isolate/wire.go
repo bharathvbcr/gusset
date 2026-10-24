@@ -3,8 +3,11 @@
 // cannot catch — SIGKILL from the OOM killer, SIGABRT, a segfault in unsafe
 // engine code, a GPU driver reset — ends the worker and not the Go service.
 //
-// It is internal on purpose. The transport is length-prefixed JSON frames on
-// the worker's stdin and stdout (the house process contract), standing in for
+// It is internal on purpose. The transport is length-prefixed JSON frames
+// (the house process contract): requests on the worker's stdin, responses on
+// a protocol pipe Start appends to cmd.ExtraFiles (fd 3 when the caller passed
+// no others) and names in EnvProtocolFD, so the worker's stdout stays its
+// own. It stands in for
 // the iceoryx2 shared-memory transport docs/ipc.md specifies, whose Go binding
 // does not exist yet. No public entry point is added; DECISIONS.md 2026-10-08
 // records what the spike found and what a public one would still need.

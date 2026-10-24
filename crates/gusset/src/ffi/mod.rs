@@ -1025,7 +1025,11 @@ mod evict_cut_tests {
             state ^= state >> 27;
             (state.wrapping_mul(0x2545_F491_4F6C_DD1D) % bound as u64) as usize
         };
-        for _ in 0..2000 {
+        // Each round builds a ring of up to LOG_RING_CAPACITY bytes and evicts
+        // a copy line by line. Under Miri the 2000 rounds took 3 h 30 m of the
+        // nightly job (117993651499), so Miri runs the first 20.
+        let rounds = if cfg!(miri) { 20 } else { 2000 };
+        for _ in 0..rounds {
             let mut ring = Vec::new();
             // Sometimes start mid-line, as a drain split on a character
             // boundary leaves it.

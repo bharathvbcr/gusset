@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -39,12 +40,17 @@ const waitDelay = 500 * time.Millisecond
 // the write end and the reader sees EOF inside this window. Past it, a
 // grandchild still holding the write end would leave every waiter parked,
 // so the reaper unblocks the read. The reader then takes one more pass so
-// bytes already queued are not discarded for that deadline.
+// bytes already queued are not discarded for that deadline. The window
+// restarts while frames are still being delivered: it ends only after a
+// whole protocolDrain in which none was. That is bounded, because no ticket
+// is registered once the worker has exited (refusalLocked), so at most the
+// tickets in flight at the exit can each buy one more window.
 const protocolDrain = 200 * time.Millisecond
 
-// queuedFrameProbe is the second read after that unblock. Bytes already in
-// the pipe return immediately; the probe only expires once a read would block,
-// which is the grandchild still holding the write end.
+// queuedFrameProbe is the read deadline after that unblock, re-armed after
+// each frame it delivers. Bytes already in the pipe return immediately; the
+// probe only expires once no frame has arrived for this long, which is the
+// grandchild still holding the write end.
 const queuedFrameProbe = 50 * time.Millisecond
 
 // cancelSendBudget bounds Wait's best-effort cancel. context.Background has
@@ -69,10 +75,9 @@ func ProtocolOut() (*os.File, error) {
 	if err != nil || fd < 3 {
 		return nil, fmt.Errorf("isolate: %s=%q is not a protocol descriptor; was this process started by isolate.Start?", EnvProtocolFD, v)
 	}
+	// os.NewFile returns nil only for a negative descriptor, which fd < 3
+	// already refused.
 	f := os.NewFile(uintptr(fd), "gusset-protocol")
-	if f == nil {
-		return nil, fmt.Errorf("isolate: protocol descriptor %d is not open", fd)
-	}
 	// The descriptor is inherited from Start with close-on-exec clear, so an
 	// engine that execs would leave it open in the child and the host would
 	// never see EOF. Closing it in this process is not what we want: Serve
@@ -116,6 +121,10 @@ type Proc struct {
 	poisoned bool
 	dead     error // latched worker exit; nil while it runs
 	waitErr  error // cmd.Wait's result; published before procExited is closed
+
+	// frames counts frames the reader has delivered. waitProc restarts its
+	// drain window while it moves.
+	frames atomic.Uint64
 
 	readerDone chan struct{}
 	procExited chan struct{} // closed after the one cmd.Wait returns
@@ -207,7 +216,8 @@ func Start(ctx context.Context, cmd *exec.Cmd) (*Proc, error) {
 
 // waitProc is the only cmd.Wait after a successful Start. Once the worker
 // has exited, it gives the reader protocolDrain to deliver frames already
-// written, then unblocks a read that cannot reach EOF.
+// written, restarting that window while frames keep arriving, then unblocks
+// a read that cannot reach EOF.
 func (p *Proc) waitProc() {
 	err := p.cmd.Wait()
 	p.mu.Lock()
@@ -215,20 +225,25 @@ func (p *Proc) waitProc() {
 	p.mu.Unlock()
 	close(p.procExited)
 
+	seen := p.frames.Load()
 	timer := time.NewTimer(protocolDrain)
-	select {
-	case <-p.readerDone:
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
+	defer timer.Stop()
+	for {
+		select {
+		case <-p.readerDone:
+			return
+		case <-timer.C:
 		}
-	case <-timer.C:
+		if n := p.frames.Load(); n != seen {
+			seen = n
+			timer.Reset(protocolDrain)
+			continue
+		}
 		if derr := p.rd.SetReadDeadline(time.Now()); derr != nil {
 			// A fd that cannot take a deadline still has to wake the reader.
 			_ = p.rd.Close()
 		}
+		return
 	}
 }
 
@@ -270,6 +285,13 @@ func (p *Proc) read(initial *bufio.Reader) {
 			p.killIfAlive()
 			break
 		}
+		p.frames.Add(1)
+		if probed {
+			// The probe is a gap limit, not a total: a frame just landed, so
+			// the next one gets a whole window. Armed after deliver, so time
+			// spent on the lock is not taken from it.
+			_ = p.rd.SetReadDeadline(time.Now().Add(queuedFrameProbe))
+		}
 	}
 	_ = p.rd.Close()
 	<-p.procExited
@@ -287,22 +309,36 @@ func (p *Proc) read(initial *bufio.Reader) {
 			}
 			t.waiter <- result{err: err}
 		}
+		// A stored result is finished work: Wait still returns it, as a
+		// poisoned in-process handle delivers one (DECISIONS 2026-09-22). Its
+		// permit came back when it was stored. Close drops it.
+		if t.res != nil && !t.abandoned && !p.closed {
+			continue
+		}
 		delete(p.tickets, id)
 	}
 	p.mu.Unlock()
 	close(p.readerDone)
 }
 
+// exited reports whether waitProc has reaped the worker. waitErr is published
+// under mu before procExited is closed, so a caller holding mu that sees true
+// also sees it.
+func (p *Proc) exited() bool {
+	select {
+	case <-p.procExited:
+		return true
+	default:
+		return false
+	}
+}
+
 // killIfAlive ends a worker that is still running after the protocol stream
 // failed. A worker that has already exited is reaped by waitProc; Kill here
 // would only race that Wait.
 func (p *Proc) killIfAlive() {
-	select {
-	case <-p.procExited:
-	default:
-		if p.cmd.Process != nil {
-			_ = p.cmd.Process.Kill()
-		}
+	if !p.exited() && p.cmd.Process != nil {
+		_ = p.cmd.Process.Kill()
 	}
 }
 
@@ -576,13 +612,18 @@ func (p *Proc) refusal() error {
 
 // refusalLocked is the closed, dead, poisoned order of the in-process submit:
 // closed first, so a caller whose policy is "on poison, close and reopen" is
-// not sent back to close a handle it already closed.
+// not sent back to close a handle it already closed. A worker that has exited
+// refuses new work before the reader has latched it: the drain window is for
+// answers already owed, and a ticket registered now could only be answered by
+// a descendant still holding the pipes, which would also keep extending it.
 func (p *Proc) refusalLocked() error {
 	switch {
 	case p.closed:
 		return gusset.ErrClosed
 	case p.dead != nil:
 		return p.dead
+	case p.exited():
+		return workerExitError(nil, p.waitErr)
 	case p.poisoned:
 		return &gusset.Error{
 			Code: gusset.ErrPoisoned.Code,
@@ -702,7 +743,13 @@ func (p *Proc) close(budget time.Duration) error {
 		return p.closeErr
 	}
 	p.closed = true
-	for _, t := range p.tickets {
+	for id, t := range p.tickets {
+		if t.res != nil {
+			// Stored and never collected; a closed Proc returns ErrClosed to
+			// its Wait. Its permit came back when it was stored.
+			delete(p.tickets, id)
+			continue
+		}
 		if t.waiter != nil {
 			t.waiter <- result{err: errProcClosed}
 			t.waiter = nil
