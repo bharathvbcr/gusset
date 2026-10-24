@@ -404,6 +404,10 @@ pub unsafe extern "C" fn gusset_shutdown(drain_ms: u32) -> i32 {
 
 /// 4. Opens a new handle with a worker pool (I4).
 ///
+/// Returns `FFI_BAD_ARG` for a pool size over `MAX_POOL_SIZE`, a negative
+/// `pipe_write_fd` and a descriptor that is not the write end of an open pipe
+/// (`DECISIONS.md` 2026-10-24). A refusal leaves the descriptor untouched.
+///
 /// # Safety
 ///
 /// `out_handle` must point to writable memory. `status` if non-null must point to writable `FfiStatus`.
@@ -420,7 +424,7 @@ pub unsafe extern "C" fn gusset_handle_open(
 
     let res = unsafe {
         ffi_guard_code(status, || {
-            let handle = Handle::open(pool_size, pipe_write_fd)?;
+            let handle = Handle::open_classified(pool_size, pipe_write_fd)?;
             let raw = Arc::into_raw(handle) as *mut Handle;
             ptr::write(out_handle, raw);
             Ok(())
@@ -475,6 +479,11 @@ pub unsafe extern "C" fn gusset_handle_close(handle: *mut Handle, status: *mut F
 
 /// 6. Submits work to the handle pool (R16).
 ///
+/// Returns `FFI_BAD_ARG` for a null pointer, an inline input over the
+/// 4096-byte copy limit, and unknown `CallHeader` flag bits (the last after the
+/// handle's state is checked: a poisoned, closed or shutting-down handle
+/// reports that instead; `DECISIONS.md` 2026-10-24).
+///
 /// # Safety
 ///
 /// `handle`, `header`, and `out_ticket` must be valid non-null pointers.
@@ -525,7 +534,7 @@ pub unsafe extern "C" fn gusset_submit(
         ffi_guard_code(status, || {
             #[cfg(test)]
             fault::trip();
-            let ticket = h.submit(call_header, input_slice, buffer_id)?;
+            let ticket = h.submit_classified(call_header, input_slice, buffer_id)?;
             ptr::write(out_ticket, ticket);
             Ok(())
         })
@@ -850,6 +859,9 @@ fn drain_cut(ring: &[u8], cap: usize) -> usize {
 
 /// 13. Allocates 64-byte aligned Rust-owned buffer memory (R16).
 ///
+/// Returns `FFI_BAD_ARG` for a `len` of zero or over `MAX_BUFFER_BYTES`
+/// (`DECISIONS.md` 2026-10-24).
+///
 /// # Safety
 ///
 /// `handle`, `out_id`, and `out_ptr` must be valid non-null writable pointers.
@@ -874,7 +886,7 @@ pub unsafe extern "C" fn gusset_buf_alloc(
         ffi_guard_code(status, || {
             #[cfg(test)]
             fault::trip();
-            let (id, p) = h.buf_alloc_published(len)?;
+            let (id, p) = h.buf_alloc_published_classified(len)?;
             ptr::write(out_id, id);
             ptr::write(out_ptr, p);
             Ok(())
@@ -1391,6 +1403,234 @@ mod export_panic_poisons_tests {
         assert!(handle.close().is_ok());
         // SAFETY: `r` is the read end this test opened.
         unsafe { libc::close(r) };
+    }
+}
+
+/// The caller's own bad arguments reach a C host as `FFI_BAD_ARG`, not
+/// `FFI_ERR` (`DECISIONS.md` 2026-10-24): the pool size, a negative or non-FIFO
+/// completion descriptor, unknown `CallHeader` flag bits, and a buffer length of
+/// zero or over the ceiling. Go validates the pool size and the buffer length
+/// before it calls in and never builds a bad descriptor or flag word, so none
+/// of this is reachable from the public Go API; the exports are driven here
+/// directly.
+///
+/// Every refusal outside that list keeps `FFI_ERR`, and the last test says so.
+#[cfg(test)]
+mod argument_refusal_tests {
+    use super::*;
+    use crate::header::GUSSET_FLAG_DIAGNOSTIC_ENGINE;
+    use crate::pool::MAX_POOL_SIZE;
+
+    /// The status's message, with the status freed.
+    fn take_msg(st: &mut FfiStatus) -> String {
+        let msg = if st.msg.is_null() {
+            String::new()
+        } else {
+            // SAFETY: a non-null `msg` is `msg_len` bytes the export allocated.
+            let bytes = unsafe { std::slice::from_raw_parts(st.msg, st.msg_len) };
+            String::from_utf8_lossy(bytes).into_owned()
+        };
+        // SAFETY: the export initialised `st`.
+        unsafe { gusset_status_free(st) };
+        msg
+    }
+
+    /// Calls `gusset_handle_open`, returning its code, the status code it wrote
+    /// and the message. A handle it opened is closed again.
+    fn open_with(pool_size: u32, fd: i32) -> (i32, i32, String) {
+        let mut handle: *mut Handle = ptr::null_mut();
+        let mut st = FfiStatus::ok();
+        // SAFETY: `handle` and `st` are valid locals.
+        let rc = unsafe { gusset_handle_open(pool_size, fd, &mut handle, &mut st) };
+        let code = st.code;
+        let msg = take_msg(&mut st);
+        if rc == FFI_OK {
+            // SAFETY: the open succeeded, so this is a live handle.
+            let mut close_st = FfiStatus::ok();
+            assert_eq!(
+                unsafe { gusset_handle_close(handle, &mut close_st) },
+                FFI_OK
+            );
+        } else {
+            assert!(handle.is_null(), "a refused open wrote a handle");
+        }
+        (rc, code, msg)
+    }
+
+    fn pipe() -> (i32, i32) {
+        let mut fds = [0i32; 2];
+        // SAFETY: `fds` is a valid two-element array for pipe(2) to fill.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe() failed");
+        (fds[0], fds[1])
+    }
+
+    fn close_fd(fd: i32) {
+        // SAFETY: the test owns `fd`.
+        unsafe { libc::close(fd) };
+    }
+
+    fn assert_bad_arg(got: (i32, i32, String), what: &str, needle: &str) {
+        let (rc, code, msg) = got;
+        assert_eq!(rc, FFI_BAD_ARG, "{what}: returned code (message: {msg})");
+        assert_eq!(code, FFI_BAD_ARG, "{what}: status code (message: {msg})");
+        assert!(msg.contains(needle), "{what}: message was {msg:?}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn open_refuses_its_arguments_as_bad_arg() {
+        let (r, w) = pipe();
+
+        assert_bad_arg(
+            open_with(MAX_POOL_SIZE as u32 + 1, w),
+            "pool size over the ceiling",
+            "exceeds maximum",
+        );
+        assert_bad_arg(
+            open_with(u32::MAX, w),
+            "pool size u32::MAX",
+            "exceeds maximum",
+        );
+        assert_bad_arg(open_with(1, -1), "negative fd", "non-negative");
+
+        // Open, writable, and not a FIFO.
+        // SAFETY: a NUL-terminated path; the descriptor is closed below.
+        let file = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY) };
+        assert!(file >= 0, "cannot open /dev/null");
+        assert_bad_arg(
+            open_with(1, file),
+            "a non-FIFO descriptor",
+            "not the write end",
+        );
+        close_fd(file);
+
+        // The read end is a FIFO, but not open for writing.
+        assert_bad_arg(
+            open_with(1, r),
+            "the read end of a pipe",
+            "not the write end",
+        );
+
+        // A descriptor that is not open at all. i32::MAX, not a just-closed
+        // pipe end: tests in this binary open pipes concurrently, and a number
+        // another test has been handed since would be a valid descriptor here.
+        assert_bad_arg(
+            open_with(1, i32::MAX),
+            "a descriptor that is not open",
+            "not the write end",
+        );
+
+        // Control: the same pipe opens with valid arguments, so the refusals
+        // above were about the arguments.
+        let (rc, code, msg) = open_with(1, w);
+        assert_eq!((rc, code), (FFI_OK, FFI_OK), "a valid open: {msg}");
+        close_fd(r);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn submit_refuses_unknown_flag_bits_as_bad_arg() {
+        let (r, w) = pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {e}"),
+        };
+        let raw = Arc::as_ptr(&handle) as *mut Handle;
+        let input = [0u8; 1];
+
+        let bad = CallHeader {
+            flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE | (1 << 31),
+            ..CallHeader::default()
+        };
+        let mut ticket = 0u64;
+        let mut st = FfiStatus::ok();
+        // SAFETY: `raw` is live; every pointer is local.
+        let rc = unsafe { gusset_submit(raw, &bad, input.as_ptr(), 1, 0, &mut ticket, &mut st) };
+        let code = st.code;
+        let msg = take_msg(&mut st);
+        assert_eq!(rc, FFI_BAD_ARG, "unknown flag bits: {msg}");
+        assert_eq!(code, FFI_BAD_ARG, "unknown flag bits, status: {msg}");
+        assert!(msg.contains("unknown CallHeader flag"), "{msg:?}");
+        assert!(
+            !handle.is_poisoned(),
+            "a refused argument poisoned the handle"
+        );
+
+        assert!(handle.close().is_ok());
+        close_fd(r);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn buf_alloc_refuses_a_bad_length_as_bad_arg() {
+        let (r, w) = pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {e}"),
+        };
+        let raw = Arc::as_ptr(&handle) as *mut Handle;
+
+        for (len, needle) in [
+            (0usize, "greater than zero"),
+            (crate::pool::sys::MAX_BUFFER_BYTES + 1, "exceeds maximum"),
+        ] {
+            let (mut id, mut p) = (0u64, ptr::null_mut());
+            let mut st = FfiStatus::ok();
+            // SAFETY: `raw` is live; every pointer is local.
+            let rc = unsafe { gusset_buf_alloc(raw, len, &mut id, &mut p, &mut st) };
+            let code = st.code;
+            let msg = take_msg(&mut st);
+            assert_eq!(rc, FFI_BAD_ARG, "length {len}: {msg}");
+            assert_eq!(code, FFI_BAD_ARG, "length {len}, status: {msg}");
+            assert!(msg.contains(needle), "length {len}: {msg:?}");
+            assert_eq!(id, 0, "a refused length registered a buffer");
+        }
+
+        // Control: a valid length allocates.
+        let (mut id, mut p) = (0u64, ptr::null_mut());
+        let mut st = FfiStatus::ok();
+        // SAFETY: as above.
+        let rc = unsafe { gusset_buf_alloc(raw, 64, &mut id, &mut p, &mut st) };
+        assert_eq!(rc, FFI_OK, "a valid length: {}", take_msg(&mut st));
+        assert!(handle.buf_free(id).is_ok());
+
+        assert!(handle.close().is_ok());
+        close_fd(r);
+    }
+
+    /// The change is the enumerated refusals and nothing more: a refusal that
+    /// is not the caller's argument stays `FFI_ERR`.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn refusals_outside_the_argument_list_stay_ffi_err() {
+        let (r, w) = pipe();
+        let handle = match Handle::open(1, w) {
+            Ok(h) => h,
+            Err(e) => panic!("open failed: {e}"),
+        };
+        let raw = Arc::as_ptr(&handle) as *mut Handle;
+
+        // An unknown input buffer id is neither a flag nor a length.
+        let header = CallHeader::default();
+        let mut ticket = 0u64;
+        let mut st = FfiStatus::ok();
+        // SAFETY: `raw` is live; every pointer is local.
+        let rc =
+            unsafe { gusset_submit(raw, &header, ptr::null(), 0, u64::MAX, &mut ticket, &mut st) };
+        let msg = take_msg(&mut st);
+        assert_eq!(rc, FFI_ERR, "an unknown buffer id: {msg}");
+        assert!(msg.contains("not found"), "{msg:?}");
+
+        // A ticket nobody holds.
+        let (mut id, mut p, mut n) = (0u64, ptr::null_mut(), 0usize);
+        let mut st = FfiStatus::ok();
+        // SAFETY: as above.
+        let rc = unsafe { gusset_take(raw, u64::MAX, &mut id, &mut p, &mut n, &mut st) };
+        let msg = take_msg(&mut st);
+        assert_eq!(rc, FFI_ERR, "an unknown ticket: {msg}");
+
+        assert!(handle.close().is_ok());
+        close_fd(r);
     }
 }
 

@@ -48,7 +48,11 @@ var (
 	// open another.
 	ErrPoisoned = ffi.ErrPoisoned
 	// ErrBadArg matches an *Error with status FFI_BAD_ARG: an export refused
-	// an argument that is outside its contract (a null pointer, for one).
+	// an argument that is outside its contract (a null pointer, a pool size
+	// over the ceiling, a descriptor that is not a pipe's write end, unknown
+	// call flag bits, a buffer length of zero or over the ceiling, for
+	// instance). Open also returns it for a nil Option. Go checks the pool size
+	// and buffer length itself first, so most callers meet only the nil Option.
 	ErrBadArg = ffi.ErrBadArg
 
 	// ErrShutdown matches work cancelled by Shutdown or refused after it. It

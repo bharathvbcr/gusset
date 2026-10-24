@@ -7,6 +7,12 @@ import (
 )
 
 // Option configures Handle settings.
+//
+// Option is a func type, so nil compiles. A nil Option passed to Open is an
+// error matching ErrBadArg, returned before anything is allocated; Open does not
+// panic and does not skip it, because an Option the caller meant to apply and
+// forgot to build (a failed constructor's zero value) would otherwise be dropped
+// without a word.
 type Option func(*handleConfig)
 
 type handleConfig struct {

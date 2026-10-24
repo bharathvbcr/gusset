@@ -1,8 +1,9 @@
 //! The Rust-owned buffer registry (R16).
 
-use super::sys::RawBuffer;
+use super::sys::{self, RawBuffer};
 use super::{
-    lock_recover, reserve_id, Handle, JobResult, MAX_BUFFER_BYTES, MAX_INLINE_INPUT, NEXT_BUFFER_ID,
+    lock_recover, reserve_id, Handle, JobResult, PoolError, MAX_BUFFER_BYTES, MAX_INLINE_INPUT,
+    NEXT_BUFFER_ID,
 };
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -56,6 +57,17 @@ impl Handle {
     /// result path would free it when the waiter finishes.
     pub fn buf_alloc_published(&self, len: usize) -> Result<(u64, *mut u8), String> {
         self.allocate_buffer(len, true)
+    }
+
+    /// [`Handle::buf_alloc_published`] with the refusal classified: a zero or
+    /// oversized length is [`PoolError::BadArg`]. The length is checked before
+    /// the handle's state, so a bad length on a closed handle reports the length.
+    pub(crate) fn buf_alloc_published_classified(
+        &self,
+        len: usize,
+    ) -> Result<(u64, *mut u8), PoolError> {
+        sys::check_buffer_len(len).map_err(PoolError::BadArg)?;
+        self.buf_alloc_published(len).map_err(PoolError::Failed)
     }
 
     fn allocate_buffer(&self, len: usize, caller_held: bool) -> Result<(u64, *mut u8), String> {
