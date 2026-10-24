@@ -89,7 +89,7 @@ flowchart TD
 3. **(I3) Deadline & Cancellation:** Deadlines and cancellations are enforced inside Rust between work units using relative `timeout_ns` and per-job `AtomicBool` flags.
 4. **(I4) Bounded Concurrency:** In-flight calls per handle never exceed the configured pool size. Callers park on the Go semaphore, never on an OS thread in cgo. Pool size is capped at `gusset.MaxPoolSize` (1024); a larger request is refused, not clamped. On Linux the completion pipe is grown to hold one inline record per worker, or one 8-byte ticket per worker when it cannot, and `Open` is refused only when even the tickets will not fit. `Open` attaches a completion ring by default, so steady-state records live there and the pipe carries wake tokens and overflow.
 5. **(I5) Rust-Owned Stacks:** Heavy Rust work runs on Rust-spawned threads with an explicit 8 MiB stack, never on the caller's g0 stack (musl's default is 128 KiB). Each worker installs its own guard-paged `sigaltstack` (at least 64 KiB, larger where the kernel's signal frame needs it) so Go's signal handler can run on a Rust thread, and a failure to do so is logged rather than silently accepted. The alternate stack does not make a stack overflow survivable: the process still exits. Workers also block SIGPIPE, so a write to a closed pipe returns EPIPE instead of killing the process.
-6. **(I6) ABI Verification:** Go `init()` verifies ABI version, struct sizes, alignments, and the offset and size of every named field against Rust before the process starts serving — for all four `#[repr(C)]` types that cross the boundary, `AllocStats` included.
+6. **(I6) ABI Verification:** Go `init()` verifies ABI version, struct sizes, alignments, and the offset and size of every named field against Rust before the process starts serving — for the four `#[repr(C)]` types in the ABI manifest, `AllocStats` included. (`RingShared` and `Slot` are `#[repr(C)]` too; C reads them through offsets that `tests/constants_match.rs` checks.)
 
 ---
 
@@ -103,7 +103,7 @@ flowchart TD
 | **[Adoption Guide](docs/adoption.md)** | Production adoption recipe, umbrella crate pattern, build tags, module-cache layout, and DevCouncil case study. |
 | **[Plotted Benchmarks](docs/benchmarks.md)** | Certified benchmark gallery, darwin and Linux VM comparison, methodology, and provenance gates. |
 | **[Production Integrations](docs/integrations.md)** | Real-world usage in DevCouncil (`dc-glob`), Manvi, and GitPulse, plus warm vs. cold process costs. |
-| **[Supported Platforms](docs/platforms.md)** | Unix target matrix (darwin, linux glibc/musl), the 128 KiB stack trap, and Windows port prerequisites. |
+| **[Supported Platforms](docs/platforms.md)** | Supported target matrix (macOS, Linux glibc/musl; every other target, Windows and other unix systems included, fails with a named error), the 128 KiB stack trap, and Windows port prerequisites. |
 | **[Static Archive Sealing (R14)](docs/rfc-r14.md)** | Multi-engine staticlib isolation with `tools/gussetseal` to prevent duplicate `std` collisions. |
 | **[Dynamic Linking & Codesigning](docs/dylib.md)** | `cdylib` builds, macOS hardened runtime, and Gatekeeper signing requirements. |
 | **[Out-of-Process IPC (Phase 4)](docs/ipc.md)** | Hardware GPU driver reset crash isolation (`gusset-ipc`) and `internal/isolate` prototype. |
@@ -281,7 +281,7 @@ that never calls `JobContext::check` keeps running until it is done, and the onl
 thing that changes is that nobody is blocked on it.
 
 ### 4 Boundary `#[repr(C)]` Types (ABI Version 2)
-At startup, `gusset_abi_layout` exports the memory layout of all four types crossing the FFI boundary. Go's `init()` checks them against both compiled-in constants and cgo's compiled struct layouts. `gusset_abi_fields` exports the offset and size of every named field of those structs; Go checks that against cgo `unsafe.Offsetof` and `unsafe.Sizeof`. Size and alignment stay the same when two equal-width fields trade places, so the field table is the check that catches it. The table is its own export: `AbiLayout` stays 36 bytes, which is what an ABI version 2 caller allocates.
+At startup, `gusset_abi_layout` exports the memory layout of the four types in the ABI manifest (`CallHeader`, `FfiStatus`, `AbiLayout`, `AllocStats`). Go's `init()` checks them against both compiled-in constants and cgo's compiled struct layouts. `gusset_abi_fields` exports the offset and size of every named field of those structs; Go checks that against cgo `unsafe.Offsetof` and `unsafe.Sizeof`. Size and alignment stay the same when two equal-width fields trade places, so the field table is the check that catches it. The table is its own export: `AbiLayout` stays 36 bytes, which is what an ABI version 2 caller allocates.
 - `CallHeader` (40 bytes, align 8): Relative `timeout_ns` (uint64), OpenTelemetry `trace_id` (16 bytes), `span_id` (8 bytes), `flags` (uint32), `reserved` (uint32).
 - `FfiStatus` (48 bytes, align 8): Status code (i32), message pointer (`*mut u8`) and length (`usize`), file pointer (`*const u8`) and length (`usize`), line (u32).
 - `AbiLayout` (36 bytes, align 4): ABI version (`2`), array of 4 sizes (`[u32; 4]`), array of 4 alignments (`[u32; 4]`).
@@ -466,7 +466,9 @@ against the module-cache layout. 13 glob cases matched Python `fnmatch` exactly,
 4 malformed payloads came back as engine errors rather than panics, and 12,800
 calls from 64 concurrent goroutines completed in 64–74 ms using 8–10 OS threads —
 the thread count being the point, since 64 concurrent callers park on Gusset's
-semaphore rather than each pinning an M. Details in
+semaphore rather than each pinning an M. (A historical one-off check made
+while deriving the recipe, not an R15 benchmark: no raw output is committed and
+nothing regenerates it.) Details in
 [`docs/adoption.md`](docs/adoption.md).
 
 ---
@@ -486,7 +488,7 @@ We welcome contributions! Please review our community guidelines before submitti
 
 Gusset's design builds upon insights, hard-won lessons, and patterns from prior Go–Rust integration work:
 - **[rust2go](https://github.com/ihciah/rust2go)**: Pioneered parameter ownership and buffer passing across the boundary; informed Gusset's rejection of manual-assembly Go callbacks and `cgocheck=0`.
-- **[uniffi-bindgen-go](https://github.com/NordSecurity/uniffi-bindgen-go)**: The primary binding generator Gusset pairs with; influenced Gusset's buffer allocation and layout conventions.
+- **[uniffi-bindgen-go](https://github.com/NordSecurity/uniffi-bindgen-go)**: The binding generator Gusset is meant to sit under; no example combining the two exists in this repository yet. Gusset borrows its `RustBuffer` shape (ptr, len, capacity) as a design reference (`AGENTS.md`, Borrow and avoid).
 - **[iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2)**: Inspired Gusset's Phase 4 zero-copy shared memory IPC architecture for GPU hardware crash containment.
 - **[Stoolap](https://stoolap.io/blog/2026/04/08/calling-a-rust-library-from-go-with-cgo-disabled/)**: Established benchmark discipline demonstrating that engine compute, rather than FFI trampolines, dominates real workloads.
 - **[Tokio](https://tokio.rs/)**: Influenced Gusset's cooperative flag-based cancellation model across FFI rather than dropped futures.

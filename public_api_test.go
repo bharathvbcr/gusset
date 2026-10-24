@@ -131,12 +131,24 @@ func genDeclEntries(fset *token.FileSet, d *ast.GenDecl) []string {
 	return out
 }
 
+// render prints one entry. format.Node lays lines out from the original
+// positions, so a comment that is dropped from the entry (a doc comment on an
+// interface method or struct field) still leaves its blank line behind. Blank
+// lines carry no part of a declaration, so they are removed: the surface is then
+// the same whether or not, and however, a member is documented.
 func render(fset *token.FileSet, node any) string {
 	var buf bytes.Buffer
 	if err := format.Node(&buf, fset, node); err != nil {
 		return "<unprintable: " + err.Error() + ">"
 	}
-	return buf.String()
+	lines := strings.Split(buf.String(), "\n")
+	kept := lines[:0]
+	for _, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			kept = append(kept, l)
+		}
+	}
+	return strings.Join(kept, "\n")
 }
 
 // lineDiff lists entries present in only one side. Entries are separated by
@@ -209,5 +221,33 @@ func TestPublicSurfaceSeesAnAddedExport(t *testing.T) {
 		if lineDiff(before, after) == "" {
 			t.Errorf("%s: lineDiff names nothing", name)
 		}
+	}
+}
+
+// A comment, or a blank line, inside an interface or struct is not part of the
+// exported surface. format.Node prints positions from the original file, so a
+// doc comment that is itself dropped still leaves its line gap behind, and the
+// rendered entry gained blank lines whenever someone documented a member.
+func TestPublicSurfaceIgnoresCommentsInsideAnEntry(t *testing.T) {
+	const bare = "package p\n\ntype I interface {\n\tM() int\n\tN() int\n}\n\ntype S struct {\n\tA int\n\tB int\n}\n"
+	const documented = "package p\n\n// I is an interface.\ntype I interface {\n\t// M is documented.\n\tM() int\n\n\t// N is documented.\n\tN() int // trailing\n}\n\n// S is a struct.\ntype S struct {\n\t// A is documented.\n\tA int\n\n\t// B is documented.\n\tB int\n}\n"
+	surface := func(src string) string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, err := publicSurface(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	got := surface(documented)
+	if strings.Contains(strings.TrimSuffix(got, "\n"), "\n\n") {
+		t.Errorf("a rendered entry contains a blank line:\n%q", got)
+	}
+	if want := surface(bare); got != want {
+		t.Errorf("documenting members changed the surface.\n%s", lineDiff(want, got))
 	}
 }

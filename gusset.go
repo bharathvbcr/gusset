@@ -37,10 +37,19 @@ import (
 type Error = ffi.Error
 
 var (
-	ErrGeneric  = ffi.ErrGeneric
-	ErrPanic    = ffi.ErrPanic
+	// ErrGeneric matches an *Error with status FFI_ERR: the engine or the
+	// runtime returned an error without panicking.
+	ErrGeneric = ffi.ErrGeneric
+	// ErrPanic matches an *Error with status FFI_PANIC: a panic was caught in
+	// Rust. The handle that ran the job is poisoned.
+	ErrPanic = ffi.ErrPanic
+	// ErrPoisoned matches an *Error with status FFI_POISONED: the handle was
+	// poisoned by an earlier caught panic and refuses new work. Close it and
+	// open another.
 	ErrPoisoned = ffi.ErrPoisoned
-	ErrBadArg   = ffi.ErrBadArg
+	// ErrBadArg matches an *Error with status FFI_BAD_ARG: an export refused
+	// an argument that is outside its contract (a null pointer, for one).
+	ErrBadArg = ffi.ErrBadArg
 
 	// ErrShutdown matches work cancelled by Shutdown or refused after it. It
 	// is not context.Canceled: the caller's own context was still live.
@@ -141,16 +150,26 @@ var errHandlePoisoned = &ffi.Error{
 // rather than generated, which makes this runtime check the only guard against the
 // header drifting from the Rust structs.
 const (
+	// ExpectedAbiVersion is the version gusset_abi_layout must report.
 	ExpectedAbiVersion = 2
+	// ExpectedHeaderSize is size_of CallHeader, in bytes.
 	ExpectedHeaderSize = 40
+	// ExpectedStatusSize is size_of FfiStatus, in bytes.
 	ExpectedStatusSize = 48
+	// ExpectedLayoutSize is size_of AbiLayout, in bytes; it stays at its
+	// version-2 size so an older caller's buffer is never overwritten.
 	ExpectedLayoutSize = 36
-	ExpectedStatsSize  = 24
+	// ExpectedStatsSize is size_of AllocStats, in bytes.
+	ExpectedStatsSize = 24
 
+	// ExpectedHeaderAlign is align_of CallHeader, in bytes.
 	ExpectedHeaderAlign = 8
+	// ExpectedStatusAlign is align_of FfiStatus, in bytes.
 	ExpectedStatusAlign = 8
+	// ExpectedLayoutAlign is align_of AbiLayout, in bytes.
 	ExpectedLayoutAlign = 4
-	ExpectedStatsAlign  = 8
+	// ExpectedStatsAlign is align_of AllocStats, in bytes.
+	ExpectedStatsAlign = 8
 )
 
 // abiReport is everything the I6 check compares: what the Rust archive reports
@@ -384,7 +403,11 @@ type spanContextKey struct{}
 
 // TraceCarrier is the shape Gusset reads trace correlation from (R9).
 type TraceCarrier interface {
+	// TraceID returns the 16-byte trace id copied into the call header's
+	// trace_id field.
 	TraceID() [16]byte
+	// SpanID returns the 8-byte span id copied into the call header's span_id
+	// field.
 	SpanID() [8]byte
 }
 

@@ -19,16 +19,17 @@ completion path works there.
 | :--- | :--- | :--- |
 | `aarch64-apple-darwin` | supported | `unit`, `soak`, `allocator-api`, `r14`, `adopter` (runtime); `cross` (compile) |
 | `x86_64-apple-darwin` | supported | `r14` under Rosetta on the arm64 runner (runtime); `cross` (compile) |
-| `x86_64-unknown-linux-gnu` | supported | `unit`, `race-gc`, `soak`, `cgocheck2`, `memlimit`, `lint`, `bench`, `fuzz`, `r14`, `adopter`, the two floor jobs; nightly `sanitizer` (ASan), `miri`, `hammer`, `hammer-heap` (runtime) |
+| `x86_64-unknown-linux-gnu` | supported | `unit`, `race`, `soak`, `cgocheck2`, `memlimit`, `lint`, `bench`, `fuzz`, `r14`, `adopter`, the two floor jobs; nightly `sanitizer` (ASan), `miri`, `hammer`, `hammer-heap` (runtime) |
 | `aarch64-unknown-linux-gnu` | supported | `unit` and `r14` on a native arm64 runner (runtime); `cross` (compile) |
 | `x86_64-unknown-linux-musl` | supported | `musl`, `r14-musl` (runtime), `cross` (compile) |
 | `*-pc-windows-*` | **not supported** | Rust and Go builds fail with a named error |
 | other unix (FreeBSD, OpenBSD, illumos, …) | **not supported** | Rust build fails with the same named error |
 
 A job runs only where this table says. In particular macOS does not run
-`race-gc`, `cgocheck2`, `memlimit`, `lint` or `bench` (the committed darwin
-benchmark file is from a local run), and the Go race detector and `GOGC=1` pass
-therefore have no macOS leg. Job names are those of `.github/workflows/`; the
+`race`, `cgocheck2`, `memlimit`, `lint` or `bench` (the committed darwin
+benchmark file is from a local run), so the full race-detector pass and the
+`GOGC=1` pass have no macOS leg. The race detector runs on macOS only in the
+`allocator-api` interop stress and the `r14` harness. Job names are those of `.github/workflows/`; the
 runner list of each job is the authority if this table lags it.
 
 `make cross` compile-checks the whole set in one command.

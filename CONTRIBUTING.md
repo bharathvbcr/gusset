@@ -23,8 +23,8 @@ Every contribution must preserve the six core runtime invariants:
 
 Gusset supports the latest and latest-minus-one releases of both Go and Rust:
 - **Go:** `1.26+` (developed on `1.27.x`)
-- **Rust:** `1.97+` (developed on `1.98.x`)
-- **Supported Platforms:** Unix only (`linux-gnu`, `linux-musl`, `darwin/arm64`, `darwin/amd64`). Windows is unsupported by construction.
+- **Rust:** `1.97+` (developed on the current stable; CI uses `stable`)
+- **Supported Platforms:** Linux and macOS only (`linux-gnu`, `linux-musl`, `darwin/arm64`, `darwin/amd64`). Every other target, Windows and the other unix systems included, is refused by a `compile_error!` (`docs/platforms.md`).
 
 ---
 

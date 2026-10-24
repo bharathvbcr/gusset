@@ -119,8 +119,8 @@ archive** too: its only member must be byte-identical to the object that passed,
 or the archive is deleted. The object check runs standalone as `-verify OBJ.o`.
 
 `gussetseal` runs on darwin and Linux, which is Gusset's whole supported set
-(`docs/platforms.md`). Gusset is unix-only and fails its own build on Windows,
-so there is no Windows binary to seal an engine beside.
+(`docs/platforms.md`). Gusset supports only Linux and macOS and fails its own build on any other
+target, Windows included, so there is no Windows binary to seal an engine beside.
 
 ## 4. The demonstration
 
