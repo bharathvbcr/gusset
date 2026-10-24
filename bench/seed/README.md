@@ -4,6 +4,17 @@ Re-run on every toolchain bump (R15). Both measured columns are kept: a single
 column would have to be relabelled on every bump, and the point of these numbers
 is that the *shape* is portable while the magnitudes are not.
 
+**The figures below are historical and hand-recorded, not R15-generated.** The
+x86-64 Linux column was measured on 2026-09-20 (the README of the first commit,
+`9ebb56f`) and the darwin column was added on 2026-09-21 (`7a56c3c`). No raw
+`go test -bench` output for either column was committed, so `make docs-check`
+cannot regenerate or check them, and both predate the completion ring
+(`8030b81`, 2026-09-26). The one committed raw seed run,
+`bench/results/linux-amd64-vm/seed-micro.txt`, is from a different host (a
+4 vCPU Xeon, about 39 ns for the Rust no-op) and is not the source of either
+column. The seed measures a bare cgo call, not Gusset; Gusset's own figures are
+the generated tables in the top-level `README.md`.
+
 ```
 cd rs && cargo build --release
 cd ../go && go test -run xxx -bench 'Cgo|Batch|Channel|Unbuffered|PureGo' -benchtime=1s .
@@ -37,7 +48,7 @@ Two results that do survive the platform change, and one that does not:
 
 - **`#cgo noescape` still earns its place.** It removes the same single 64-byte
   allocation and about a third of the call on both machines (89 -> 67 ns there,
-  23.86 -> 15.90 ns here). This is why R13 requires it on every export.
+  23.86 -> 15.90 ns here). This is why R5 requires it on every export.
 - **Batching still dominates.** Per-item cost falls roughly 27x from 16 to 4096
   items on both. A boundary crossing is a fixed cost to amortise, not a rate.
 - **"C is cheaper than Rust across cgo" does not survive.** The inline-C no-op

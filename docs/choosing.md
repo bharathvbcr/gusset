@@ -26,9 +26,9 @@ top — a few microseconds a blocking `C.rs_do_work()` does not pay.
 
 (At high concurrency the gap closes, because blocking cgo starts paying for its
 own thread pressure. Measured at 2048 in-flight calls the two land close enough
-that the ordering flips between recordings — cgo ahead by 1–3% on one, Gusset
-ahead by 9% on the next — with blocking cgo's spread several times Gusset's.
-Treat that as a tie with one noisy side, not as a win for either.)
+that the ordering flips between recordings, with blocking cgo's spread several
+times Gusset's. Treat that as a tie with one noisy side, not as a win for
+either.)
 
 What it changes is the *shape* of the cost. A blocking cgo call is cheap per
 call and unbounded in aggregate: each in-flight call parks an OS thread, so your
@@ -376,10 +376,11 @@ it is mileage:
 - **v0.0.3, one adopter outside this repository.** Audits keep finding real
   defects: one made context deadlines decorative for any engine that does not
   cooperate, and v0.0.2 shipped a `WaitBuffer` write-after-free that v0.0.3
-  fixes, in a tree that already had 100+ tests and a detailed audit trail.
+  fixes, in a tree that already had a large test suite and a detailed audit trail.
   That is a healthy audit and an immature codebase at the same time: the defects
   still being found are ones only real use surfaces. You would be early.
-- **Unix only.** Windows is a `compile_error!`, not a gap. Completions travel
+- **Linux and macOS only.** Windows, and every unix other than those two, is a
+  `compile_error!`, not a gap. Completions travel
   in a Rust-owned ring, but a parked reader still waits on a POSIX pipe, and
   the signal protection is `sigaltstack`.
 - **In-process is a fault domain, not a sandbox.** Gusset contains Rust
@@ -387,8 +388,10 @@ it is mileage:
   corrupt C library or a GPU driver fault — those take the Go process with them.
   If any engine uses `unsafe` Rust, wraps a C/C++ library, or touches a device
   driver, the right boundary is a separate process, and Gusset's Phase 4 answer
-  to that depends on iceoryx2 Go bindings that **do not exist upstream** today
-  (iceoryx2 ships C, C++, Python, Rust and C#).
+  to that depends on an iceoryx2 Go binding that has no merged code, tag or
+  release yet: `eclipse-iceoryx/iceoryx2-go` was created on 2026-10-23 and holds
+  only its initial commit, with its first pull request open (as of 2026-10-24).
+  iceoryx2 itself ships C, C++, Python, Rust and C#.
 - **No typed RPC.** Gusset moves bytes and an opcode. Schema is yours —
   Protobuf, FlatBuffers, `bincode`, or a hand-rolled layout.
 
@@ -410,7 +413,13 @@ sum of squares over bytes, three ways and checks that they agree.
 It was measured on a 4-vCPU Linux VM (Xeon, AVX-512), taking the median of 6
 runs. The raw data and the full before/after comparison are in
 [`bench/results/linux-amd64-vm/`](../bench/results/linux-amd64-vm/README.md).
-A no-op Gusset round trip costs about 10 µs on that VM:
+The two tables in this section are not generated: they are medians of 6
+transcribed by hand from `bench/results/linux-amd64-vm/simd.txt` and
+`simd-ring-multiversion.txt`, and `make docs-check` does not check them. Every
+table median was re-derived from those files on 2026-10-24 (the first table
+leaves out the 256 B row). The GB/s and crossover-size figures in the prose are
+arithmetic on those medians, or come from the write-up beside the raw files
+(`bench/results/linux-amd64-vm/README.md`); none is regenerated. A no-op Gusset round trip costs about 10 µs on that VM:
 
 | Input | Go scalar | Go SIMD | Gusset → Rust (chunked kernel) |
 | --- | --- | --- | --- |
@@ -471,7 +480,7 @@ GOEXPERIMENT=simd go test ./bench -run SIMD -bench SumSquares -benchtime=1s -cou
 | Engine can segfault (`unsafe`, C libs, GPU) | A separate process |
 | You need Windows | Not Gusset — it will not compile |
 | You want generated types across the boundary | `uniffi-bindgen-go` or Protobuf, *over* Gusset's transport |
-| You want a sandbox for untrusted code | WebAssembly (Wasmtime ~2.4× native, wazero ~4.7×, 2026 figures) |
+| You want a sandbox for untrusted code | WebAssembly (an in-process fault domain, at a cost in native speed that depends on the runtime and workload) |
 
 ---
 

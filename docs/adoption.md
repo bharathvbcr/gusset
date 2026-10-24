@@ -515,8 +515,9 @@ The thread count is the invariant worth watching: 64 concurrent Go callers produ
 8–10 OS threads, because callers queue on Gusset's semaphore rather than each
 pinning an M inside a cgo call.
 
-These are throughput numbers for this workload on this machine, not a benchmark
-result under R15 — `dc-glob` is microseconds of work, so the figure is dominated by
+These are historical throughput numbers for this workload on this machine,
+recorded once with the toolchain named above and with no raw output committed,
+not a benchmark result under R15 (nothing regenerates or checks them) — `dc-glob` is microseconds of work, so the figure is dominated by
 boundary overhead, which is exactly what makes it a useful check on the boundary and
 a poor proxy for a real engine. The point of comparison is not the absolute rate but
 that the same work previously cost one process spawn per call.

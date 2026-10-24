@@ -25,12 +25,12 @@ func TestACommentIsNotAnUnsupportedPlatformCheck(t *testing.T) {
 		"  cross:",
 		"    steps:",
 		"      # cargo check --locked -p gusset --target x86_64-unknown-freebsd",
-		"      # gusset supports unix targets only pthread_getattr_np E0425",
+		"      # gusset supports Linux and macOS only pthread_getattr_np E0425",
 		"      # CGO_ENABLED=0 go build ./... gusset requires cgo on a unix target docs/platforms.md",
 		"      - name: looks like a gate",
 		"        run: |",
 		"          # if cargo check --locked -p gusset --target x86_64-unknown-freebsd 2>err.txt; then",
-		"          # if ! grep -q \"gusset supports unix targets only\" err.txt; then",
+		"          # if ! grep -q \"gusset supports Linux and macOS only\" err.txt; then",
 		"          # if grep -q \"pthread_getattr_np\" err.txt || grep -q \"E0425\" err.txt; then",
 		"          # if cargo check --locked -p gusset --target x86_64-unknown-illumos 2>err.txt; then",
 		"          # if CGO_ENABLED=0 go build ./... >err.txt 2>&1; then",
@@ -107,7 +107,7 @@ func hasMakeCross(steps [][]string) bool {
 
 func hasRustNamedRefusal(steps [][]string, target string, cascade bool) bool {
 	needle := "if cargo check --locked -p gusset --target " + target + " 2>err.txt; then"
-	named := `if ! grep -q "gusset supports unix targets only" err.txt; then`
+	named := `if ! grep -q "` + platformRefusalPhrase + `" err.txt; then`
 	cascadeLine := `if grep -q "pthread_getattr_np" err.txt || grep -q "E0425" err.txt; then`
 	for _, st := range steps {
 		code := stepCode(st)

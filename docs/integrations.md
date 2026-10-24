@@ -35,7 +35,10 @@ attached to the session that wrote this page, so nothing in it has been checked.
 
 `dc/devmap` starts the `devmap` binary once per query. It guards each run with a
 timeout, an output cap, a process group and `WaitDelay`. Measured per query on
-Gusset's own repository, indexed in 0.67 s:
+Gusset's own repository, indexed in 0.67 s. These are historical, one-off timings
+from 2026-09-27, taken as described under "How the numbers were taken". The
+timing script and its raw samples were not committed, so `make docs-check`
+cannot regenerate or check this table, and it is not a Gusset benchmark:
 
 | Query | New process each time | One warm process (`devmap mcp`) | Saved |
 | --- | ---: | ---: | ---: |
@@ -81,7 +84,7 @@ parses all three.
 
 **Running `devmap` in-process through Gusset stays the wrong tool** even for
 such a caller. On top of a warm process it would save only the pipe round trip,
-about 0.1–0.2 ms against a 4 µs Gusset call. That is under 2% of the fastest
+about 0.1–0.2 ms (an estimate; no measurement of it is recorded here) against a 4 µs Gusset call (the serial no-op in `bench/results/linux-amd64-vm/ring-main-after.txt`, median 3.7 µs). That is under 2% of the fastest
 query above. The price would be:
 
 - Giving up `CGO_ENABLED=0`, which `dc/store/store.go` records as a
@@ -99,7 +102,7 @@ microseconds to a few milliseconds, and cgo is already acceptable in that binary
 - Hot per-item work: matching, hashing, parsing or scoring each item of a large
   batch.
 - Kernels that vectorize. The multiversioned kernel ran 1 MiB in 46 µs against
-  69 µs for Go SIMD on the same host (see `docs/choosing.md`).
+  69 µs for Go SIMD on the same host (medians of 6 in `bench/results/linux-amd64-vm/simd-ring-multiversion.txt`; see `docs/choosing.md`).
 
 In those cases the 4 µs round trip and a fixed thread count beat both a process
 per call and a blocking cgo call per request. If DevCouncil or Manvi ever needs

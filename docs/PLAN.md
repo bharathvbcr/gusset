@@ -23,7 +23,7 @@ Out of scope, on purpose:
 - Type marshalling and binding generation: sit on top of `cbindgen`, hand-written cgo, or uniffi-bindgen-go
 - cgo-free calling paths (`purego`, `asmcgocall` trampolines): every Go minor release can break them
 - Rust-driving-Go async (rust2go already owns that, at the cost of `cgocheck=0`)
-- Zero-copy IPC transport: defer to iceoryx2, whose Go binding is planned but unbuilt (Phase 4)
+- Zero-copy IPC transport: defer to iceoryx2, whose Go binding has a repository (`eclipse-iceoryx/iceoryx2-go`, created 2026-10-23) that holds only its initial commit, with no tag or release, as of 2026-10-24 (Phase 4)
 
 ## Architecture
 
@@ -33,7 +33,7 @@ Two small packages and a hand-maintained C header verified by type-level CI diff
 flowchart TD
     GoApp["Go Application Code"] --> GoPkg["Go Package (gusset)\nBounded handles, semaphore queue, netpoller wait"]
     GoPkg --> CGO["cgo Bindings (internal/ffi)\n#cgo noescape & #cgo nocallback"]
-    CGO --> Header["C Header (gusset.h)\nABI v2: 4 #[repr(C)] struct layouts verified"]
+    CGO --> Header["C Header (gusset.h)\nABI v2: 4 #[repr(C)] struct layouts in the manifest, verified"]
     Header --> RustCrate["Rust Crate (crates/gusset)\nffi_guard, panic hook, 8 MiB workers, Counting allocator"]
     RustCrate --> RustEngine["Rust Engine\nadopter handler / dc-glob / tessl / sparsl"]
     RustCrate -. "completion ring; pipe is the doorbell" .-> GoPkg
@@ -43,10 +43,10 @@ The Go package never parks an OS thread on Rust work: a call submits to the Rust
 
 | Component | Language | Responsibilities | Public surface (v0.1) |
 | --- | --- | --- | --- |
-| Runtime crate | Rust | `ffi_guard_code`, `FfiStatus` (ptr+len, never NUL-terminated), `gusset_status_free`, panic hook with location, ABI layout export, named field offsets, worker pool with explicit 8 MiB stack size, allocator stats, timeout and cancel checks | 17 exported functions, 4 `#[repr(C)]` types (`CallHeader`, `FfiStatus`, `AbiLayout`, `AllocStats`) |
+| Runtime crate | Rust | `ffi_guard_code`, `FfiStatus` (ptr+len, never NUL-terminated), `gusset_status_free`, panic hook with location, ABI layout export, named field offsets, worker pool with explicit 8 MiB stack size, allocator stats, timeout and cancel checks | 17 exported functions; 4 `#[repr(C)]` types in the ABI manifest (`CallHeader`, `FfiStatus`, `AbiLayout`, `AllocStats`), plus `RingShared` and `Slot`, also `#[repr(C)]`, which C reads through the `GUSSET_RING_*` offsets (6 in the crate) |
 | Runtime package | Go | `Handle` with semaphore, timeout, poison state; `init()` ABI check including named field offsets; completion ring polled by the dispatch goroutine, with an `os.Pipe` whose write end Rust owns for wake tokens and overflow; `noescape` and `nocallback` on every export; allocator stats bridged to `debug.SetMemoryLimit` | `Open`, `Close`, `Call`, `CallBuffer`, `Submit`, `Wait` (and `WaitBuffer`), `Discard`, `NewBuffer` (with `Buffer.Free`), `Shutdown`, `Stats`, `AdviseMemoryLimit`, `Threads`, `DrainLogs` (13 public entry points; `WaitBuffer`, `CallBuffer`, and `Shutdown` logged in `DECISIONS.md` 2026-09-20; `Discard` logged in `DECISIONS.md` 2026-10-07) |
 | Header | C | Hand-maintained `internal/ffi/gusset.h`; verified by `tests/header_match.rs` parameter and return types against Rust exports | one `.h` file |
-| Example engine | Rust + Go | Reference engine that exercises every failure mode: panic, NUL in message, deadline miss, large allocation, deep recursion | reference for adopters (`crates/gusset-example`) |
+| Example engine | Rust | Reference adopter engine (`crates/gusset-example`, no Go code): opcode 10 sums squares in chunks and checks cancellation once per chunk, 11 panics, 12 echoes, 13 (Rust 1.100+) reverses into `BufferAlloc` memory; any other opcode is refused. The panic, NUL-in-message, deadline and recursion cases belong to the diagnostic engine (`crates/gusset/src/pool/diagnostic.rs`) and its tests | reference for adopters |
 
 Invariants the packages enforce:
 
@@ -96,8 +96,8 @@ Five phases; each has an exit criterion that is a test, not an opinion. Duration
 
 ```mermaid
 flowchart LR
-    P0["Phase 0: Seed Repro\n(Firewall NUL panic & benchmarks)\n[SHIPPED]"] --> P1["Phase 1: v0.1 Core Runtime\n(6 Invariants, exports, CI matrix)\n[SHIPPED]"]
-    P1 --> P2["Phase 2: 2nd-App Validation\n(DevCouncil dc-glob & gusset-example)\n[SHIPPED]"]
+    P0["Phase 0: Seed Repro\n(Firewall NUL panic & benchmarks)\n[SHIPPED]"] --> P1["Phase 1: v0.1 Core Runtime\n(6 Invariants, exports, CI matrix)\n[SHIPPED, one exit criterion pending]"]
+    P1 --> P2["Phase 2: 2nd-App Validation\n(DevCouncil dc-glob & gusset-example)\n[SHIPPED, exit criteria pending]"]
     P2 --> P3["Phase 3: Public Release\n(Generated benchdoc, release packages)\n[IN PROGRESS]"]
     P3 --> P4["Phase 4: Out-of-Process IPC\n(iceoryx2 daemon for GPU crash isolation)\n[SPECIFIED, spike only]"]
 ```
@@ -110,7 +110,14 @@ flowchart LR
 | 3 · Public release | README with the measured numbers, the example engine, uniffi-bindgen-go interop example, `v0.x` tags, crate + Go module published | First external issue that is a real bug report, not a question | 1–2 weeks |
 | 4 · Out-of-process module | Go binding for iceoryx2 (contributed upstream) as a separate module for the GPU-engine case where in-process crash isolation is impossible | tessl behind the daemon survives an induced Metal fault with the Go service still serving | 4–8 weeks, only if Phase 1 shows the need |
 
-Phase 1 build order is in `AGENTS.md` (Repo layout and build order).
+Status against recorded evidence, 2026-10-24 (`AGENTS.md`, Phase status, carries the same statuses):
+
+- **Phase 0** is evidenced: `TestGuardedNUL` in `bench/seed/go` reproduces the abort the hardened guard survives.
+- **Phase 1** shipped, with one exit criterion pending. The thread-cap soak is evidenced (`TestSoak_*`, run on every push). "The Go service in front of tessl/sparsl runs on it" has no record in this repository.
+- **Phase 2** shipped for the one second app that is evidenced, DevCouncil's `dc-glob` (`docs/adoption.md`, `docs/integrations.md`). Pending, with no record here: both apps green on Linux and macOS, and tessl/sparsl showing no thread growth under the soak test.
+- **Phase 3** is in progress. The uniffi-bindgen-go interop example in its row above does not exist and is pending.
+
+The Phase 1 layout and architecture are in `AGENTS.md` (Repo layout and architecture).
 
 ## Verification matrix
 
@@ -145,11 +152,11 @@ Naming convention: crate `gusset`, Go module `github.com/bharathvbcr/gusset`, ou
 | Risk | Likelihood | Mitigation |
 | --- | --- | --- |
 | Scope creep into type marshalling or cgo-free calling | High | The out-of-scope list is in the README; PRs that add marshalling are declined with a pointer to uniffi-bindgen-go |
-| Go runtime changes break the completion path or `noescape` semantics | Medium | CI runs against Go tip weekly; blocking fallback under the semaphore stays supported |
+| Go runtime changes break the completion path or `noescape` semantics | Medium | CI runs against Go tip weekly. There is no blocking call path to fall back to: all 17 exports are asynchronous (`internal/ffi/exports.txt`), so the answer to a Go release that breaks the completion path is a version-gated code path plus a test (`AGENTS.md`, working rule 6), not a degraded mode. The blocking fallback under "Kill or narrow" is a contingency that would need a new export and a `DECISIONS.md` row |
 | Rust `panic=abort` in a dependency's profile silently disables the firewall | Medium | Build script asserts `panic=unwind`; the panic zoo test fails otherwise |
 | Two Rust staticlibs in one Go binary (duplicate `std` symbols) | Medium for adopters | Document the umbrella-crate rule; example repo shows it |
 | Solo maintenance stalls after Phase 3 | Medium | Keep the surface small (17 exports); the matrix does the reviewing |
-| The iceoryx2 Go binding lives in a separate repository synced only on iceoryx2 releases | Realized (iceoryx2 #225, 2026-10-12): `eclipse-iceoryx/iceoryx2-go`, agreed by a project lead, otterdog pull request not yet opened | `gusset-ipc` pins a release tag or a pseudo-version of `iceoryx2-go`, never `main`; the binding pins iceoryx2 by submodule at a release tag; a nightly job against iceoryx2 `main` surfaces C API drift before a release; Phase 4 depends only on the request/response and waitset surface |
-| Merges into the Eclipse-hosted binding repository need a committer, and Gusset's maintainer is not one | Realized: only committers place content, and `main` needs one approving review | Pull requests from a fork into `main`, each from scratch and at or under 1,000 lines including documentation, so none needs an IP Team review a committer would have to file; request/response is the first step unlikely to fit, and the point to raise the committer election agreed on #225 (comment 6135155559) |
+| The iceoryx2 Go binding lives in a separate repository synced only on iceoryx2 releases | Realized. A project lead agreed on iceoryx2 #225 (2026-10-12) to `eclipse-iceoryx/iceoryx2-go`; it was created on 2026-10-23 through otterdog `eclipse-iceoryx/.eclipsefdn#28` (merged 2026-10-22). As of 2026-10-24 it holds only its initial commit, with no tag or release | `gusset-ipc` pins a release tag or a pseudo-version of `iceoryx2-go`, never `main`; the binding pins iceoryx2 by submodule at a release tag; a nightly job against iceoryx2 `main` surfaces C API drift before a release; Phase 4 depends only on the request/response and waitset surface |
+| Merges into the Eclipse-hosted binding repository need a committer, and Gusset's maintainer is not one | Realized: only committers place content, and `main` needs one approving review. As of 2026-10-24 the first pull request there (`iceoryx2-go` #1, 1,291 additions in 22 files) is open, not draft, and awaiting review; nothing has been merged | Pull requests from a fork into `main`, each from scratch and at or under 1,000 lines including documentation, so none needs an IP Team review a committer would have to file; request/response is the first step unlikely to fit, and the point to raise the committer election agreed on #225 (comment 6135155559) |
 
 Open decisions from the first draft are all resolved in `DECISIONS.md`.
