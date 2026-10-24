@@ -1490,12 +1490,12 @@ func writeFramesSteadily(pw *os.File, payloads [][]byte, gap time.Duration) {
 }
 
 // The reaper's wake has already put the reader into its probe, and frames then
-// keep arriving 15ms apart: each inside queuedFrameProbe, all of them together
-// well past it. The probe used to be armed once, so every frame after its
-// first 50ms got the poison instead.
+// keep arriving 5ms apart: each far inside queuedFrameProbe, all of them
+// together twice past it. The probe used to be armed once, so every frame
+// after its first 50ms got the poison instead.
 func TestRead_SteadyFramesAfterTheProbeAreAllDelivered(t *testing.T) {
-	const gap = 15 * time.Millisecond
-	payloads := make([][]byte, 8)
+	const gap = 5 * time.Millisecond
+	payloads := make([][]byte, 20)
 	for i := range payloads {
 		payloads[i] = []byte{0x40, byte(i)}
 	}
@@ -1519,12 +1519,12 @@ func TestRead_SteadyFramesAfterTheProbeAreAllDelivered(t *testing.T) {
 }
 
 // A worker that has exited while a descendant still writes its answers, one
-// every 100ms: each inside protocolDrain, all of them together past
+// every 50ms: each far inside protocolDrain, all of them together twice past
 // protocolDrain plus the probe. The reaper's window used to be wall-clock from
 // the exit, so the later frames were lost.
 func TestDrain_SteadyFramesAfterTheWorkerExitsAreAllDelivered(t *testing.T) {
-	const gap = 100 * time.Millisecond
-	payloads := make([][]byte, 5)
+	const gap = 50 * time.Millisecond
+	payloads := make([][]byte, 10)
 	for i := range payloads {
 		payloads[i] = []byte{0x50, byte(i)}
 	}
