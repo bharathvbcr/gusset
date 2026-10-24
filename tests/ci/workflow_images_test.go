@@ -27,7 +27,7 @@ var (
 	imageKeyLine   = regexp.MustCompile(`^\s*(?:- )?(container|image):\s*(.*)$`)
 	dockerUsesLine = regexp.MustCompile(`^\s*(?:- )?uses:\s*docker://(\S+)`)
 	containerRun   = regexp.MustCompile(`\b(?:docker|podman)\s+(?:run|pull|create)\b`)
-	rustupExec     = regexp.MustCompile(`(?:^|[\s;&|(])(?:\S*/)?rustup-init\s+(?:-y|--)`)
+	rustupExec     = regexp.MustCompile(`(?:^|[\s;&|(])((?:\S*/)?rustup-init)\s+(?:-y|--)`)
 	rustupPipe     = regexp.MustCompile(`rustup\.rs\b`)
 	versionsVar    = regexp.MustCompile(`^([A-Z][A-Z0-9_]*)=(.*)$`)
 )
@@ -199,8 +199,9 @@ func imageDriftViolations(all map[string][]string) []string {
 
 // rustupInitViolations reports an unverified rustup-init. A step that runs
 // rustup-init must source tools/ci/versions.env, download the pinned
-// $RUSTUP_VERSION, and check $RUSTUP_INIT_SHA256_X86_64_MUSL with `sha256sum -c`
-// before the first run. `apk add rustup` is refused too: it installs a
+// $RUSTUP_VERSION, and, before each run, check the very path it runs against
+// $RUSTUP_INIT_SHA256_X86_64_MUSL with `sha256sum -c` (a check of some other
+// file does not count). `apk add rustup` is refused too: it installs a
 // rustup-init this repo never checked, and the unverified-download shortcut
 // (sh.rustup.rs) is refused for the same reason.
 func rustupInitViolations(name string, lines []string) []string {
@@ -222,8 +223,7 @@ func rustupInitViolations(name string, lines []string) []string {
 			body = append(body, stripShellComment(l))
 		}
 		text := strings.Join(body, "\n")
-		loc := rustupExec.FindStringIndex(text)
-		if loc == nil {
+		if !rustupExec.MatchString(text) {
 			continue
 		}
 		step := name + ": step " + strconv.Quote(stepTitle(st)) + " runs rustup-init "
@@ -235,15 +235,35 @@ func rustupInitViolations(name string, lines []string) []string {
 				out = append(out, step+"without using $"+v)
 			}
 		}
-		sum := regexp.MustCompile(`sha256sum\s+-c\b`).FindStringIndex(text)
-		switch {
-		case sum == nil:
-			out = append(out, step+"without `sha256sum -c` on the download")
-		case sum[0] > loc[0]:
-			out = append(out, step+"before checking it with `sha256sum -c`")
+		// Each run of rustup-init needs an earlier `sha256sum -c` line that
+		// names that same path and the pinned checksum: verifying some other
+		// file, or any hash, proves nothing about what gets executed.
+		for _, m := range rustupExec.FindAllStringSubmatchIndex(text, -1) {
+			path := strings.Trim(text[m[2]:m[3]], `"'`)
+			if !checksumVerifies(text[:m[0]], path) {
+				out = append(out, step+"("+strconv.Quote(path)+") without an earlier `sha256sum -c` line that checks that path against $RUSTUP_INIT_SHA256_X86_64_MUSL")
+			}
 		}
 	}
 	return out
+}
+
+var sha256Check = regexp.MustCompile(`sha256sum\s+-c\b`)
+
+// checksumVerifies reports whether a line of before runs `sha256sum -c` over
+// path using the pinned checksum variable. The path must appear as a whole
+// word ("./x" and "x" are the same file), so /tmp/rustup-init.new and
+// /tmp/other do not count for /tmp/rustup-init.
+func checksumVerifies(before, path string) bool {
+	want := regexp.MustCompile(`(?:^|[\s"'=])(?:\./)?` + regexp.QuoteMeta(strings.TrimPrefix(path, "./")) + `(?:$|[\s"'])`)
+	for _, l := range strings.Split(before, "\n") {
+		if sha256Check.MatchString(l) &&
+			(strings.Contains(l, "$RUSTUP_INIT_SHA256_X86_64_MUSL") || strings.Contains(l, "${RUSTUP_INIT_SHA256_X86_64_MUSL")) &&
+			want.MatchString(l) {
+			return true
+		}
+	}
+	return false
 }
 
 // apkAddsRustup reports an `apk add` command line that names the rustup package.
@@ -339,6 +359,10 @@ func TestPlantedImageViolationsAreCaught(t *testing.T) {
 		{"digest in a comment only", containerImageViolations("x", []string{"    container: golang:1.27-alpine # @" + digest}), nil},
 		{"rustup-init with no checksum", rustupInitViolations("x", step("          rustup-init -y --default-toolchain stable")), rustupInitViolations("x", step(verified))},
 		{"checksum after the run", rustupInitViolations("x", step(". tools/ci/versions.env\n          wget -O /tmp/rustup-init \"$RUSTUP_VERSION\"\n          /tmp/rustup-init -y\n          echo \"$RUSTUP_INIT_SHA256_X86_64_MUSL  /tmp/rustup-init\" | sha256sum -c -")), nil},
+		{"checksum verifies a different file than the one run", rustupInitViolations("x", step(". tools/ci/versions.env\n          wget -q -O /tmp/rustup-init \"https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-musl/rustup-init\"\n          echo \"$RUSTUP_INIT_SHA256_X86_64_MUSL  /tmp/other\" | sha256sum -c -\n          chmod +x /tmp/rustup-init\n          /tmp/rustup-init -y")), nil},
+		{"checksum line does not use the pinned checksum", rustupInitViolations("x", step(". tools/ci/versions.env\n          wget -q -O /tmp/rustup-init \"https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-musl/rustup-init\"\n          echo \"$RUSTUP_VERSION  /tmp/rustup-init\" | sha256sum -c -\n          /tmp/rustup-init -y")), nil},
+		{"checksum on a bare name, run by path", rustupInitViolations("x", step(". tools/ci/versions.env\n          echo \"$RUSTUP_VERSION $RUSTUP_INIT_SHA256_X86_64_MUSL  rustup-init\" | sha256sum -c -\n          /tmp/rustup-init -y")), nil},
+		{"checksum target only shares a prefix with the run path", rustupInitViolations("x", step(". tools/ci/versions.env\n          echo \"$RUSTUP_VERSION $RUSTUP_INIT_SHA256_X86_64_MUSL  /tmp/rustup-init.new\" | sha256sum -c -\n          /tmp/rustup-init -y")), nil},
 		{"unpinned download", rustupInitViolations("x", step(". tools/ci/versions.env\n          wget -O /tmp/rustup-init https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-musl/rustup-init\n          echo \"$RUSTUP_INIT_SHA256_X86_64_MUSL  /tmp/rustup-init\" | sha256sum -c -\n          /tmp/rustup-init -y")), nil},
 		{"checksum named in a comment", rustupInitViolations("x", step(". tools/ci/versions.env\n          # sha256sum -c $RUSTUP_VERSION $RUSTUP_INIT_SHA256_X86_64_MUSL\n          rustup-init -y")), nil},
 		{"apk add rustup", rustupInitViolations("x", []string{"          apk add --no-cache build-base rustup"}), rustupInitViolations("x", []string{"          apk add --no-cache build-base musl-dev"})},
