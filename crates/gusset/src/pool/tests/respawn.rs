@@ -39,6 +39,7 @@ fn header() -> CallHeader {
 /// released across the wait, the second submit blocked until the first had
 /// removed the failed worker, then respawned it itself.
 #[test]
+#[cfg_attr(miri, ignore)] // pipe(2), worker threads and fcntl: not Miri-runnable
 fn concurrent_respawn_does_not_lose_a_failed_worker() {
     let _serialise = lock_recover(&INJECT_LOCK);
     let (r, w) = make_pipe();
@@ -89,6 +90,7 @@ fn concurrent_respawn_does_not_lose_a_failed_worker() {
 /// exit: when a concurrent reap took it first, `await_ready` must not
 /// subtract again (that wraps `exited` to usize::MAX).
 #[test]
+#[cfg_attr(miri, ignore)] // pipe(2), worker threads and fcntl: not Miri-runnable
 fn only_the_remover_uncounts_a_failed_worker() {
     let _serialise = lock_recover(&INJECT_LOCK);
     let (r, w) = make_pipe();
@@ -128,6 +130,7 @@ fn only_the_remover_uncounts_a_failed_worker() {
 /// `await_ready` finds nothing to remove and must leave the worker's exit
 /// counted: uncounting it as well would subtract an exit nobody reaped.
 #[test]
+#[cfg_attr(miri, ignore)] // pipe(2), worker threads and fcntl: not Miri-runnable
 fn a_failed_worker_closed_away_is_not_uncounted() {
     let _serialise = lock_recover(&INJECT_LOCK);
     let (r, w) = make_pipe();
