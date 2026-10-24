@@ -26,6 +26,12 @@ jobs:
   miri:
     name: Miri Undefined Behavior Check
     runs-on: ubuntu-latest
+    # Without a bound the job ran into GitHub's 6 h default and was cancelled
+    # (2026-10-15, 2026-10-23) before the seed sweep below ever ran. Passing runs
+    # took 3.5 to 5 h, 3 h 30 m of it in one_cut_evicts_what_line_by_line_eviction_does,
+    # which now runs 20 rounds under Miri. A run that still needs 4 h has
+    # regressed, and the report job names it as cancelled.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -354,10 +360,29 @@ jobs:
         working-directory: fuzz
         run: |
           set -euo pipefail
-          for t in log_ring truncate_payload ring_records call_header ffi_exports; do
+          for t in log_ring truncate_payload ring_records call_header; do
             echo "== $t"
             cargo "+$RUST_NIGHTLY" fuzz run -O "$t" -- -max_total_time=300 -max_len=4096 -rss_limit_mb=2048
           done
+          # ffi_exports opens and closes a handle per input, and under ASan
+          # each open/close keeps ~78 KB of RSS that is never returned (flat
+          # 26 MB without a sanitizer, so not a Gusset leak): one 300 s run
+          # crossed 2048 MB with a 26 MB live heap. Five 60 s processes keep
+          # the same time and the same corpus, each well under the limit, and
+          # the limit still catches a real out-of-memory.
+          for i in 1 2 3 4 5; do
+            echo "== ffi_exports ($i/5)"
+            cargo "+$RUST_NIGHTLY" fuzz run -O ffi_exports -- -max_total_time=60 -max_len=4096 -rss_limit_mb=2048
+          done
+
+      # libFuzzer writes crash-, oom- and timeout- inputs to fuzz/artifacts/<target>/,
+      # which went with the runner: the ffi_exports OOM input was lost every night.
+      - name: Keep crashers
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cargo-fuzz-artifacts
+          path: fuzz/artifacts/
 
   # The per-push matrix fuzzes each Go target for 45 s; this gives each one
   # four minutes, where the timing-dependent reader targets find more.
@@ -404,10 +429,17 @@ jobs:
   # nightly did not, and on 2026-09-30 the chaos hammer took the test process
   # down with a SIGSEGV inside gusset_take that nobody was told about. Only on
   # main: a dispatch on a branch is someone already watching the run.
+  #
+  # Any result other than success is reported. A job that hits its timeout
+  # concludes `cancelled`, and `failure()` is false for that, so the Miri job's
+  # 6 h cancels on 2026-10-15..17 opened no issue (run 38710039955: miri
+  # cancelled, this job skipped).
   report:
     name: Open an issue on failure
     needs: [miri, sanitizer, hammer, hammer-heap, step5-snippet, cargo-fuzz, go-fuzz]
-    if: failure() && github.ref == 'refs/heads/main'
+    if: >-
+      always() && github.ref == 'refs/heads/main' &&
+      (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped'))
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -416,11 +448,20 @@ jobs:
         with:
           script: |
             const prefix = 'Nightly sanity failed';
-            const failed = Object.entries(${{ toJSON(needs) }})
-              .filter(([, job]) => job.result === 'failure')
-              .map(([name]) => name);
+            const byResult = {};
+            for (const [name, job] of Object.entries(${{ toJSON(needs) }})) {
+              if (job.result !== 'success') {
+                (byResult[job.result] ??= []).push(name);
+              }
+            }
+            if (Object.keys(byResult).length === 0) {
+              return;
+            }
+            const label = { failure: 'Failed', cancelled: 'Cancelled or timed out', skipped: 'Skipped' };
+            const lines = Object.entries(byResult)
+              .map(([result, names]) => `${label[result] ?? `Result ${result}`} jobs: ${names.join(', ')}`);
             const body = [
-              `Failed jobs: ${failed.join(', ')}`,
+              ...lines,
               '',
               `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               `Commit: ${context.sha}`,
