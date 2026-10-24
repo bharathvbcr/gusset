@@ -19,6 +19,19 @@ From the 2026-10-23 audit: tracker `ft-97faf4f4`, plus `ft-c689767b`, `gs-isolat
 ### Process
 - **`main` is protected.** A PR is required, and the 23 Matrix and adopter checks are required, strict and enforced for admins. See DECISIONS 2026-10-23, which also records keeping `gusset_buf_alloc` uncapped and splitting iceoryx2-go PR #1.
 
+## [Unreleased] - 2026-10-23 · The ffi_exports fuzz target commits at most 1 MiB per buffer
+
+From `gs-boundary-defence-in-depth` (audit 2026-10-23, A-4 and B-7). No export signature, ABI, default or public Go API change. Raw `gusset_buf_alloc` stays uncapped, as the owner decided on 2026-10-23. GitHub Actions has not run this tree, so the nightly cargo-fuzz job has not gone green.
+
+### Fuzz
+- **Op 2 of `ffi_exports` never commits more than 1 MiB per allocation (I1, I2).** Its hostile case passed `c.u64() as usize` straight through, so any valid length up to `MAX_BUFFER_BYTES` (1 GiB) was allocated. `BUFFER_ALIGN` is 64, so `alloc_zeroed` writes every byte. A crafted 11-byte input reproduces it: `libFuzzer: out-of-memory (malloc(1073741824))` from `RawBuffer::allocate_with`. The hostile case now draws only from `MAX_BUFFER_BYTES + 1` up to `usize::MAX`, which is refused before the allocator runs. The valid case is at most `MAX_REAL_BUFFER`.
+- **The bound has its own file and tests.** `crates/gusset/tests/ffi_exports_bound.rs` holds `MAX_OPS`, `MAX_REAL_BUFFER`, `MAX_JOB_OUTPUT`, `MAX_LIVE_BYTES` (64 MiB) and `buf_alloc_len`. The fuzz target includes it by path, and `cargo test --workspace` runs its tests. They sweep every selector against the library's own `check_buffer_len` without allocating. Both fail on the old length choice (`selector 3, raw 0x20000000: length 536870912 would be committed`). A `const` assertion fails the build if `MAX_OPS` × (`MAX_REAL_BUFFER` + `MAX_JOB_OUTPUT`) exceeds `MAX_LIVE_BYTES`. While it runs, the target asserts both bounds after every call.
+- **Still red: RSS grows on the handle open/close path under ASan.** A 300 s local run with the nightly flags (nightly-2026-10-05, macOS arm64, `-malloc_limit_mb=2` added) still reached `out-of-memory (used: 2300Mb; limit: 2048Mb)` after about 29k execs, with a live heap of 26 MB. An empty input only opens and closes a two-worker handle. Peak RSS for it rose from 240 MB at 2,000 runs to 1,644 MB at 20,000 under ASan. Rebuilt without a sanitizer (`-s none`), it was 26 MB at both counts. With a one-worker handle it was 1,199 MB at 20,000, so part of the growth scales with worker threads and part does not. That split is inferred from one run each. `quarantine_size_mb=0`, `detect_stack_use_after_return=0` and `malloc_context_size=0` did not remove it. Linux was not measured. The green-gate criterion stays open.
+
+### Boundary docs
+- **`Handle::open` names the one refusal that changes the caller's descriptor (I1).** On Darwin, if `F_SETNOSIGPIPE` fails and the `F_SETFL` that restores the saved flags also fails, `O_NONBLOCK` stays set. The error names both failures.
+- **`gusset.h` states what `gusset_buf_alloc` commits.** It commits `len` zero-filled bytes per call, for any `len` up to `GUSSET_MAX_BUFFER_BYTES` (1 GiB). It has no lower cap and no cross-call budget (`WithBufferBudget` is Go-only and opt-in), so a C host must cap the length itself. This is a comment only. The default and the allocator are unchanged (DECISIONS 2026-09-24, 2026-09-25, 2026-10-23).
+
 ## [Unreleased] - 2026-10-13 · Unsupported targets fail with the named error
 
 From `ft-9977d2b2`. No export signature, ABI or public Go API change. GitHub Actions has not run this tree. No benchmark baseline was recorded.
