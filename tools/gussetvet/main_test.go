@@ -122,7 +122,7 @@ import "C"
 // A helper whose doc names the #cgo noescape lines is documentation.
 func f() { C.gusset_cancel(); C.gusset_cancel_all() }
 `)
-	if v, err := checkDirectives(good, exports); err != nil || len(v) != 0 {
+	if v, err := checkDirectives(buildContext(nil), good, exports); err != nil || len(v) != 0 {
 		t.Fatalf("doc comment naming a directive flagged: %v %v", v, err)
 	}
 
@@ -138,7 +138,7 @@ import "C"
 // #cgo nocallback gusset_cancel
 func f() { C.gusset_cancel() }
 `)
-	v, err := checkDirectives(stray, exports)
+	v, err := checkDirectives(buildContext(nil), stray, exports)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ import "C"
 // #cgo nocallback gusset_cancel_all
 func f() { C.gusset_cancel(); C.gusset_cancel_all() }
 `)
-	if v, err := checkDirectives(moved, exports); err == nil {
+	if v, err := checkDirectives(buildContext(nil), moved, exports); err == nil {
 		t.Fatalf("directives outside the preamble must not pass R5, got %v", v)
 	}
 }
@@ -256,7 +256,7 @@ func A() { C.gusset_a() }
 import "C"
 func Also() { C.gusset_a() }
 `)
-	if v, err := checkDirectives(dir, exports); err != nil || len(v) != 0 {
+	if v, err := checkDirectives(buildContext(nil), dir, exports); err != nil || len(v) != 0 {
 		t.Fatalf("LDFLAGS file or unreferenced export flagged: %v %v", v, err)
 	}
 
@@ -268,7 +268,7 @@ func Also() { C.gusset_a() }
 import "C"
 func A() { C.gusset_a() }
 `)
-	v, err := checkDirectives(missing, exports)
+	v, err := checkDirectives(buildContext(nil), missing, exports)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ import "C"
 			dir := t.TempDir()
 			write(t, dir, tc.file, tc.src)
 			write(t, dir, "ldflags.go", ref)
-			v, err := checkDirectives(dir, exports)
+			v, err := checkDirectives(buildContext(nil), dir, exports)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -343,7 +343,7 @@ import "C"
 	dir := t.TempDir()
 	write(t, dir, "ffi_"+runtime.GOOS+".go", directives)
 	write(t, dir, "ldflags.go", ref)
-	if v, err := checkDirectives(dir, exports); err != nil || len(v) != 0 {
+	if v, err := checkDirectives(buildContext(nil), dir, exports); err != nil || len(v) != 0 {
 		t.Fatalf("directives in ffi_%s.go must cover the reference: %v %v", runtime.GOOS, v, err)
 	}
 }
@@ -370,7 +370,7 @@ func TestR1RequiresAWrapperForEveryExport(t *testing.T) {
 import "C"
 func A() { C.gusset_a() }
 `)
-	v, err := checkWrappers(dir, []string{"gusset_a", "gusset_b", "# comment", ""})
+	v, err := checkWrappers(buildContext(nil), dir, []string{"gusset_a", "gusset_b", "# comment", ""})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,6 +460,10 @@ func TestUsageErrors(t *testing.T) {
 		"unknown flag":    {"-nope"},
 		"two directories": {"a", "b"},
 		"empty -exports":  {"-exports", "", "x"},
+		// go build's legacy space-separated -tags; read as one tag it would
+		// match no file and check the default build instead.
+		"-tags with a space": {"-tags", "gusset_pkgconfig other", "x"},
+		"-tags with a quote": {"-tags", "'gusset_pkgconfig'", "x"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var stdout, stderr strings.Builder
@@ -498,5 +502,173 @@ func TestExportsFlagTakesAListOutsideTheDirectory(t *testing.T) {
 	if code := realMain([]string{"-exports", bad, ffi}, &out3, &err3); code == 0 ||
 		!strings.Contains(err3.String(), "myservice_other") {
 		t.Fatalf("unwrapped export not reported (exit %d): %s", code, err3.String())
+	}
+}
+
+// writeModule lays out an adopter module with its shim in shim/ and its export
+// list beside it, and returns the shim directory and the list.
+func writeModule(t *testing.T, files map[string]string) (string, string) {
+	t.Helper()
+	mod := t.TempDir()
+	write(t, mod, "go.mod", "module example.com/adopter\n\ngo 1.26\n")
+	ffi := filepath.Join(mod, "shim")
+	if err := os.MkdirAll(ffi, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, src := range files {
+		write(t, ffi, name, src)
+	}
+	write(t, mod, "engine-exports.txt", "myservice_engine_init\n")
+	return ffi, filepath.Join(mod, "engine-exports.txt")
+}
+
+// Option A gates the adopter's pkg-config shim behind //go:build
+// gusset_pkgconfig. gussetvet had no -tags, so it never read that file, and a
+// shim missing a directive passed for the build that links with it. -tags
+// selects files the way `go build -tags` does, for R5 and R1 alike.
+func TestTagsSelectTheFilesR5AndR1Check(t *testing.T) {
+	ffi, list := writeModule(t, map[string]string{
+		"shim.go": `//go:build !gusset_pkgconfig
+
+package shim
+
+/*
+#cgo LDFLAGS: -lgusset
+#cgo noescape myservice_engine_init
+#cgo nocallback myservice_engine_init
+void myservice_engine_init(void);
+*/
+import "C"
+
+func Init() { C.myservice_engine_init() }
+`,
+		"shim_pkgconfig.go": `//go:build gusset_pkgconfig
+
+package shim
+
+/*
+#cgo pkg-config: gusset
+#cgo nocallback myservice_engine_init
+void myservice_engine_init(void);
+*/
+import "C"
+
+func Init() { C.myservice_engine_init() }
+`,
+	})
+
+	var stdout, stderr strings.Builder
+	if code := realMain([]string{"-exports", list, ffi}, &stdout, &stderr); code != 0 {
+		t.Fatalf("default build: exit %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	for _, tags := range []string{"gusset_pkgconfig", "other,gusset_pkgconfig"} {
+		t.Run(tags, func(t *testing.T) {
+			var stdout, stderr strings.Builder
+			code := realMain([]string{"-tags", tags, "-exports", list, ffi}, &stdout, &stderr)
+			got := stderr.String()
+			if code != 1 {
+				t.Fatalf("-tags %s: exit %d, want 1 (a violation); stderr: %s", tags, code, got)
+			}
+			if !strings.Contains(got, "shim_pkgconfig.go: missing '#cgo noescape myservice_engine_init'") {
+				t.Errorf("the gated shim's missing noescape is not reported:\n%s", got)
+			}
+			if n := strings.Count(got, "\n  - "); n != 1 {
+				t.Errorf("want exactly the one missing directive, got %d violations:\n%s", n, got)
+			}
+			if strings.Contains(stdout.String(), "passed") {
+				t.Errorf("reported a pass alongside a violation:\n%s", stdout.String())
+			}
+		})
+	}
+
+	// R1 judges the same set: a wrapper only in the gated file counts under
+	// the tag and not without it.
+	ffi, list = writeModule(t, map[string]string{
+		"shim.go": `package shim
+
+/*
+#cgo noescape myservice_engine_init
+#cgo nocallback myservice_engine_init
+void myservice_engine_init(void);
+*/
+import "C"
+`,
+		"wrap_pkgconfig.go": `//go:build gusset_pkgconfig
+
+package shim
+
+// void myservice_engine_init(void);
+import "C"
+
+func Init() { C.myservice_engine_init() }
+`,
+	})
+	var out1, err1 strings.Builder
+	if code := realMain([]string{"-exports", list, ffi}, &out1, &err1); code != 1 ||
+		!strings.Contains(err1.String(), "R1: export myservice_engine_init has no Go wrapper") {
+		t.Fatalf("default build: want the R1 violation (exit 1), got exit %d: %s", code, err1.String())
+	}
+	var out2, err2 strings.Builder
+	if code := realMain([]string{"-tags", "gusset_pkgconfig", "-exports", list, ffi}, &out2, &err2); code != 0 {
+		t.Fatalf("-tags gusset_pkgconfig: exit %d, want 0; stderr: %s", code, err2.String())
+	}
+}
+
+// R1 asks whether the package wraps each export. A reference in a file the
+// build never compiles is not a wrapper: a //go:build ignore file, a file for
+// another GOOS, and a _test.go file (cgo refuses import "C" in tests). R5
+// already skipped these; R1 walked them, so the two rules judged different
+// files and an export wrapped only by a file nobody builds passed R1.
+func TestR1CountsOnlyFilesTheBuildCompiles(t *testing.T) {
+	shim := `package shim
+
+/*
+#cgo noescape myservice_engine_init
+#cgo nocallback myservice_engine_init
+void myservice_engine_init(void);
+*/
+import "C"
+
+func Unrelated() {}
+`
+	ref := `package shim
+
+import "C"
+
+func Init() { C.myservice_engine_init() }
+`
+	cases := []struct {
+		name string
+		file string
+		src  string
+	}{
+		{"go:build ignore", "ignored.go", "//go:build ignore\n\n" + ref},
+		{"other GOOS filename", "wrap_" + otherGOOS() + ".go", ref},
+		{"other GOOS build tag", "tagged.go", "//go:build " + otherGOOS() + "\n\n" + ref},
+		{"test file", "wrap_test.go", ref},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ffi, list := writeModule(t, map[string]string{"shim.go": shim, tc.file: tc.src})
+			var stdout, stderr strings.Builder
+			code := realMain([]string{"-exports", list, ffi}, &stdout, &stderr)
+			got := stderr.String()
+			if code != 1 {
+				t.Fatalf("exit %d, want 1: a reference only in %s satisfied R1\nstdout: %s\nstderr: %s",
+					code, tc.file, stdout.String(), got)
+			}
+			if !strings.Contains(got, "R1: export myservice_engine_init has no Go wrapper") {
+				t.Errorf("want the R1 violation, got:\n%s", got)
+			}
+		})
+	}
+
+	// The same reference in a file the build compiles is a wrapper. A matcher
+	// that dropped every file would fail this instead of the cases above.
+	ffi, list := writeModule(t, map[string]string{"shim.go": shim, "wrap_" + runtime.GOOS + ".go": ref})
+	var stdout, stderr strings.Builder
+	if code := realMain([]string{"-exports", list, ffi}, &stdout, &stderr); code != 0 {
+		t.Fatalf("a wrapper in wrap_%s.go: exit %d, want 0; stderr: %s", runtime.GOOS, code, stderr.String())
 	}
 }
