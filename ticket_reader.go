@@ -14,6 +14,14 @@ import (
 	"github.com/bharathvbcr/gusset/internal/ffi"
 )
 
+// inlineHeaderBytes is the ticket word and the length word that precede an
+// inline result in a completion record: what a full record weighs beyond the
+// result bytes it can carry. Taken from the header's two maxima rather than
+// typed, so the reader cannot disagree with gusset.h about where the payload
+// starts; tests/constants_match.rs pins the difference to those two u64 words
+// and fails if this file goes back to a literal.
+const inlineHeaderBytes = ffi.InlineRecordMax - ffi.InlineResultMax
+
 // ticketReaderSpin is how long the drain reader polls the pipe after a
 // completion before parking in the netpoller.
 //
@@ -175,7 +183,7 @@ func (tr *ticketReader) popRing() (uint64, []byte, bool, error) {
 			return 0, nil, false, fmt.Errorf("gusset: corrupt ring record (length %d)", n)
 		}
 		// Ordered after the acquire load of the sequence in ringReady.
-		copy(tr.ringData[:n], unsafe.Slice((*byte)(unsafe.Add(rec, 16)), n))
+		copy(tr.ringData[:n], unsafe.Slice((*byte)(unsafe.Add(rec, inlineHeaderBytes)), n))
 		data = tr.ringData[:n]
 		w &^= ffi.InlineRecordFlag
 	}
@@ -232,19 +240,19 @@ func (tr *ticketReader) parseBuffered() (ticket uint64, data []byte, inline bool
 	if w&ffi.InlineRecordFlag == 0 {
 		return w, nil, false, 8, nil
 	}
-	if len(b) < 16 {
+	if len(b) < inlineHeaderBytes {
 		return 0, nil, false, 0, nil
 	}
-	n := binary.NativeEndian.Uint64(b[8:16])
+	n := binary.NativeEndian.Uint64(b[8:inlineHeaderBytes])
 	if n > uint64(ffi.InlineResultMax) {
 		// Rust never writes this; a stream that does is not ours to parse.
 		return 0, nil, false, 0, fmt.Errorf("gusset: corrupt completion record (length %d)", n)
 	}
-	size = 16 + (int(n)+7)&^7
+	size = inlineHeaderBytes + (int(n)+7)&^7
 	if len(b) < size {
 		return 0, nil, false, 0, nil
 	}
-	return w &^ ffi.InlineRecordFlag, b[16 : 16+int(n)], true, size, nil
+	return w &^ ffi.InlineRecordFlag, b[inlineHeaderBytes : inlineHeaderBytes+int(n)], true, size, nil
 }
 
 // fillMode reads more pipe bytes after the buffered ones, with the given
