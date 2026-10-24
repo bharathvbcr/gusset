@@ -100,6 +100,17 @@ jobs:
           go test -timeout 10m ./...
           go test -run SIMD -count=1 ./bench
 
+      # bench/record.sh is the one way a benchmark figure is recorded, and its
+      # guards (the lock and its takeover, signal cleanup, the zero-row and COUNT
+      # refusals, the cargo arm, the idle sampling) were code nothing ran: no
+      # workflow or make target invoked its test. It needs only sh, python3 and
+      # the stubs it writes, so it runs on every leg here. On the Linux legs the
+      # /proc/stat branch of cpu_idle executes for real, as the test's idle case
+      # reads it unstubbed; the macOS leg takes the top branch.
+      - name: Benchmark recorder self-test
+        if: success() || failure()
+        run: sh bench/record_test.sh
+
   # go.mod declares Go 1.26 (latest minus one, per DECISIONS), and nothing
   # else here runs it: every other lane is 1.27. Build, vet and test on the
   # floor so a 1.27-only API or behaviour cannot slip in unnoticed.
