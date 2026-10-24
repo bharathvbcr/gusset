@@ -9,7 +9,8 @@
 #
 # Everything lives under bench/.probe/run.XXXXXX, removed on every exit path,
 # failure included. RECORD_TEST_FAULT=1 makes a run fail straight after setup,
-# which is how the suite checks that claim about itself.
+# which is how the suite checks that claim about itself. RECORD_TEST_ONLY names
+# the cases to run (see run_case at the bottom).
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -973,30 +974,43 @@ cleanup_case() {
 	echo "ok a failing run removes its scratch tree"
 }
 
-count_case
-dup_variant_case
-norows_case
-order_case
-grace_case
-grace_expiry_case
-stale_case
-race_case 8
-race_case 8 stale
-signal_case INT sep
-signal_case TERM sep
-signal_case HUP sep
-signal_case QUIT sep
-signal_case INT family
-signal_case TERM family
-kill9_case
-refusal_case
-stage_case
-cargo_case
-foreign_case
-commit_case
-real_idle_case
-linux_branch_case
-mutant_case
-cleanup_case
+# RECORD_TEST_ONLY="count_case order_case" runs just those cases (a case name is
+# the function name; the arguments of a case that takes some are not part of it).
+run_case() {
+	if [ -n "${RECORD_TEST_ONLY:-}" ]; then
+		case " $RECORD_TEST_ONLY " in
+		*" $1 "*) ;;
+		*) return 0 ;;
+		esac
+	fi
+	"$@"
+}
+
+run_case count_case
+run_case dup_variant_case
+run_case norows_case
+run_case order_case
+run_case grace_case
+run_case grace_expiry_case
+run_case stale_case
+run_case race_case 8
+run_case race_case 8 stale
+run_case signal_case INT sep
+run_case signal_case TERM sep
+run_case signal_case HUP sep
+run_case signal_case QUIT sep
+run_case signal_case INT family
+run_case signal_case TERM family
+run_case kill9_case
+run_case refusal_case
+run_case stage_case
+run_case cargo_case
+run_case foreign_case
+run_case commit_case
+run_case real_idle_case
+run_case linux_branch_case
+run_case mutant_case
+run_case cleanup_case
+
 kill -0 "$CANARY" 2>/dev/null || fail "parent process group did not survive"
 echo "ok record.sh"
