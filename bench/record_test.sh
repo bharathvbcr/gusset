@@ -158,8 +158,18 @@ wait_file() {
 	return 1
 }
 
+# alive PID: running. A zombie is not: kill -0 succeeds for one, and under a
+# PID 1 that does not reap orphans a group-killed process stays one, which read
+# as a survivor. ps -o stat= puts Z in the state for a zombie on both procps and
+# BSD ps (modifier letters never include Z); any other state is alive, so the
+# check stays strict for a live process.
 alive() {
-	kill -0 "$1" 2>/dev/null
+	kill -0 "$1" 2>/dev/null || return 1
+	state=$(ps -o stat= -p "$1" 2>/dev/null || true)
+	case $state in
+	*Z*) return 1 ;;
+	esac
+	return 0
 }
 
 # wait_dead PID: up to 5s for a process that was signalled to be gone.
@@ -836,6 +846,62 @@ cargo_case() {
 	echo "ok cargo arm"
 }
 
+# --- an arm that fails reports why, and writes nothing ---
+# A cargo arm whose build fails never opens its results file, and the report of
+# the failure read that file: under `set -e` the script exited on the missing file
+# before it printed the compiler's own words, so the one thing that explains the
+# failure was the one thing lost.
+arm_failure_case() {
+	new_case armfail fast
+	marker=ARMFAIL-MARKER-7f3a
+	# A cargo whose build step fails, and one whose run step fails.
+	printf '%s\n' '#!/bin/sh' \
+		'for a in "$@"; do' \
+		'	if [ "$a" = "--no-run" ]; then echo "error: $ARMFAIL_MARKER could not compile" >&2; exit 1; fi' \
+		'done' \
+		'exit 0' >"$D/bin/cargo"
+	printf '%s\n' '#!/bin/sh' \
+		'for a in "$@"; do' \
+		'	if [ "$a" = "--no-run" ]; then exit 0; fi' \
+		'done' \
+		'echo "error: $ARMFAIL_MARKER panicked in the bench" >&2' \
+		'exit 1' >"$D/bin/cargo-run-fails"
+	printf '%s\n' '#!/bin/sh' \
+		'echo "FAIL $ARMFAIL_MARKER build failed"' \
+		'echo "$ARMFAIL_MARKER on stderr" >&2' \
+		'exit 1' >"$D/bin/go-fails"
+	chmod +x "$D/bin/cargo" "$D/bin/cargo-run-fails" "$D/bin/go-fails"
+
+	arm_fails() {
+		desc=$1
+		shift
+		sentinel "$D/out.txt"
+		rec "$D" RECORD_DIR=. "ARMFAIL_MARKER=$marker" -- "$D/out.txt" "$@"
+		[ "$REC_RC" != 0 ] || fail "$desc: a failing arm exited 0"
+		if ! cat "$D/stdout" "$D/stderr" | grep -q "$marker"; then
+			echo "--- stdout ---" >&2
+			cat "$D/stdout" >&2
+			echo "--- stderr ---" >&2
+			cat "$D/stderr" >&2
+			fail "$desc: the arm's own diagnostic ($marker) was not printed"
+		fi
+		grep -q "failed in" "$D/stderr" || fail "$desc: no 'failed in' report"
+		assert_sentinel "$D/out.txt" "$desc"
+		assert_no_lock "$D" "$desc"
+	}
+
+	arm_fails "cargo build fails (first arm)" 1x 12 cargo:gusset/dispatch
+	arm_fails "cargo build fails (after a go arm)" 1x 12 "Dispatch\$" cargo:gusset/dispatch
+
+	cp "$D/bin/cargo-run-fails" "$D/bin/cargo"
+	arm_fails "cargo run fails" 1x 12 cargo:gusset/dispatch
+
+	cp "$D/bin/go-fails" "$D/bin/go"
+	arm_fails "go arm fails" 1x 1 "Dispatch\$"
+	echo "ok a failing arm prints its diagnostic and writes nothing"
+}
+
+
 # --- a benchmark process the recorder did not start refuses the recording ---
 foreign_case() {
 	new_case foreign fast
@@ -1024,6 +1090,7 @@ run_case kill9_case
 run_case refusal_case
 run_case stage_case
 run_case cargo_case
+run_case arm_failure_case
 run_case foreign_case
 run_case commit_case
 run_case real_idle_case

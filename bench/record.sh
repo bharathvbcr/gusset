@@ -683,6 +683,10 @@ arm_exec() {
 		spec=${2#cargo:}
 		pkg=${spec%%/*}
 		bench=${spec#*/}
+		# Both files exist before anything can fail: a build that fails never
+		# reaches the redirect that would create OUT, and the failure report
+		# reads it.
+		: > "$5"
 		: > "$5.err"
 		if ! spawn_group cargo bench --locked --manifest-path "$1/Cargo.toml" \
 			-p "$pkg" --bench "$bench" --no-run > /dev/null 2> "$5.err"; then
@@ -713,24 +717,36 @@ arm_exec "$WARM_DIR" "$1" 1s "$WARM_COUNT" "$TMP/warmup" || true
 #
 # $TMP/parts lists those files in the order they are assembled.
 
+# show_arm_output prints what the arm that just failed said, on stderr: its
+# stdout/stderr (go) or stdout (cargo) in $TMP/run, and cargo's stderr in
+# $TMP/run.err. It cannot itself fail: it runs on a path that is about to exit
+# non-zero, and under `set -e` a missing file here ended the script before the
+# diagnostic that explains the failure was printed.
+show_arm_output() {
+	for f in "$TMP/run" "$TMP/run.err"; do
+		if [ -f "$f" ]; then
+			cut -c1-200 < "$f" >&2 || true
+		fi
+	done
+}
+
 # run_arm DIR ARM COUNT: one benchmark process into $TMP/run, or no results.
 #
 # Exit status 0 is not enough: an arm whose -bench regex matches nothing exits 0
 # having printed `PASS` and no Benchmark row, and was assembled into the results
 # file as an empty section under a header that listed it.
 run_arm() {
+	: > "$TMP/run"
 	: > "$TMP/run.err"
 	if ! arm_exec "$1" "$2" "$BENCHTIME" "$3" "$TMP/run"; then
 		echo "record: arm $2 failed in $1; no results written" >&2
-		cut -c1-200 < "$TMP/run" >&2
-		cut -c1-200 < "$TMP/run.err" >&2
+		show_arm_output
 		exit 1
 	fi
 	rows=$(grep -cE '^Benchmark[^[:space:]]*[[:space:]]+[1-9][0-9]*[[:space:]]+[0-9][0-9.eE+-]*[[:space:]]+[^[:space:]]+' "$TMP/run" || true)
 	if [ "${rows:-0}" -lt 1 ]; then
 		echo "record: arm $2 in $1 produced no Benchmark rows; no results written" >&2
-		cut -c1-200 < "$TMP/run" >&2
-		cut -c1-200 < "$TMP/run.err" >&2
+		show_arm_output
 		exit 1
 	fi
 	grep -E '^Benchmark' "$TMP/run" | cut -c1-120 || true
