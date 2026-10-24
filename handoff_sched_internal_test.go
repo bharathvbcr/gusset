@@ -90,7 +90,9 @@ func TestSerialCall_HandsOffWithoutScheduling(t *testing.T) {
 //
 // The check sees the starvation only where it shows. With the process pinned
 // to two Linux CPUs (taskset 0,1) the code before the fix passed it 55 times
-// out of 55, and on a darwin host at load 17.5 it passed 13 of 16. No tail
+// out of 55, on a darwin host at load 17.5 it passed 13 of 16, and on GitHub's
+// macos-latest runners it woke 25-45 us late, inside the bound. On GitHub's
+// Linux runners it fails every run (6.3-14 ms). No tail
 // statistic set beside the median separated the two builds on Linux either
 // (bench/results/handoff-gomaxprocs/wake-tail/). TestQuietProcs_FollowsGOMAXPROCS
 // and TestPollResult_Gates check the gate itself rather than a wake time, and
@@ -116,16 +118,39 @@ func TestSerialCall_LeavesAPForOtherGoroutines(t *testing.T) {
 		return late
 	}
 
-	// The same sleeps with no Call running: what this host does to a 200 us
-	// nap on its own. A fixed limit measured the host (a median of 127-170 us
-	// was seen on a build with nothing wrong, under load), so the claim is
-	// relative to this.
+	// The same sleeps with no Call running, but with the scheduler cycling as
+	// it does beside correct Calls (the waiter parks and the reader yields):
+	// what this host does to a 200 us nap on its own. A fixed limit measured
+	// the host (a median of 127-170 us was seen on a build with nothing wrong,
+	// under load), so the claim is relative to this.
+	//
+	// The baseline must not be an idle process. With every P idle, Go's Linux
+	// netpoller rounds a sub-millisecond timer wait up to epoll_wait(1)
+	// (runtime/netpoll_epoll.go), so an idle 200 us nap wakes ~860 us late on
+	// every Linux host. That baseline skipped this test on every Linux runner,
+	// and GUSSET_REQUIRE_PROBES made the skip a failure (Matrix 39270656716).
+	// A pure spinner sits on the same floor; a goroutine cycling through the
+	// scheduler checks timers on each pass. Measured on GitHub runners
+	// (probe/w1-linux-evidence, run 40058658715, 10 runs each): this baseline
+	// 2-5 us on ubuntu-latest and ubuntu-24.04-arm and 0.5-17 us on
+	// macos-latest; the fixed build beside Calls 1.5-5 us on Linux; the code
+	// before the fix 6.3-14 ms on Linux, every run.
+	var cycling atomic.Bool
+	cycled := make(chan struct{})
+	go func() {
+		defer close(cycled)
+		for !cycling.Load() {
+			runtime.Gosched()
+		}
+	}()
 	baseline := wakes()
+	cycling.Store(true)
+	<-cycled
 	base := baseline[len(baseline)/2]
 	if base > 100*time.Microsecond {
-		hostprobe.Skip(t, "this host wakes a 200 us nap %v late at the median with no Calls running: "+
-			"too noisy to show the cost of a handoff (TestPollResult_Gates and "+
-			"TestQuietProcs_FollowsGOMAXPROCS check the gate itself)", base)
+		hostprobe.Skip(t, "this host wakes a 200 us nap %v late at the median with the scheduler "+
+			"cycling and no Calls running: too noisy to show the cost of a handoff "+
+			"(TestPollResult_Gates and TestQuietProcs_FollowsGOMAXPROCS check the gate itself)", base)
 	}
 
 	var stop atomic.Bool

@@ -56,26 +56,60 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// execProbe exits 0 when the protocol fd is not open in this process (EBADF)
-// and 2 when it is. Dup does not read the descriptor, so a failed CLOEXEC
-// cannot consume a protocol byte.
+// execProbeIDEnv carries the protocol pipe's identity ("dev:ino", from fstat
+// in the worker) to the exec probe.
+const execProbeIDEnv = "GUSSET_ISOLATE_EXEC_PROBE_ID"
+
+// fdIdentity is the device and inode behind fd, the same for every
+// descriptor that refers to one pipe.
+func fdIdentity(fd int) (string, error) {
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%d:%d", uint64(st.Dev), uint64(st.Ino)), nil
+}
+
+// execProbe exits 0 when no descriptor in this process refers to the
+// worker's protocol pipe and 2 when one does. It asks by identity, not by
+// number: after exec closes a close-on-exec descriptor, the number is free and
+// the runtime may take it. On Linux the Go runtime opens the cgroup cpu.max at
+// start-up (containermaxprocs) and it lands on fd 3, so "fd 3 is open" failed
+// on every Linux runner with CLOEXEC working (probe/w1-linux-evidence, run
+// 40058658715). Fstat does not read the descriptor, so a leaked one cannot
+// consume a protocol byte.
 func execProbe() int {
-	fd, err := strconv.Atoi(os.Getenv(EnvProtocolFD))
-	if err != nil || fd < 3 {
-		fmt.Fprintln(os.Stderr, "probe: protocol fd", os.Getenv(EnvProtocolFD), err)
+	want := os.Getenv(execProbeIDEnv)
+	if want == "" {
+		fmt.Fprintln(os.Stderr, "probe:", execProbeIDEnv, "is not set")
 		return 3
 	}
-	dup, err := syscall.Dup(fd)
-	if err != nil {
+	var rl syscall.Rlimit
+	limit := 1024
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rl); err == nil && rl.Cur < uint64(limit) {
+		limit = int(rl.Cur)
+	}
+	open := 0
+	for fd := 0; fd < limit; fd++ {
+		id, err := fdIdentity(fd)
 		if errors.Is(err, syscall.EBADF) {
-			return 0
+			continue
 		}
-		fmt.Fprintln(os.Stderr, "probe:", err)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "probe: fstat fd %d: %v\n", fd, err)
+			return 3
+		}
+		open++
+		if id == want {
+			fmt.Fprintf(os.Stderr, "probe: fd %d is the protocol pipe (%s) after exec\n", fd, id)
+			return 2
+		}
+	}
+	if open < 3 {
+		fmt.Fprintf(os.Stderr, "probe: saw only %d open descriptors; stdio should be among them\n", open)
 		return 3
 	}
-	_ = syscall.Close(dup)
-	fmt.Fprintf(os.Stderr, "probe: fd %d still open after exec\n", fd)
-	return 2
+	return 0
 }
 
 func workerMain() int {
@@ -176,18 +210,28 @@ func answerThenHold(out *os.File) int {
 	return 0
 }
 
-// execProtocolChild replaces this worker with a probe. The protocol fd must
+// execProtocolChild replaces this worker with a probe. The protocol pipe must
 // not be open there: ProtocolOut marks it close-on-exec.
 func execProtocolChild() int {
-	env := make([]string, 0, len(os.Environ())+1)
+	fd, err := strconv.Atoi(os.Getenv(EnvProtocolFD))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cloexec probe:", err)
+		return 1
+	}
+	id, err := fdIdentity(fd)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cloexec probe: fstat protocol fd:", err)
+		return 1
+	}
+	env := make([]string, 0, len(os.Environ())+2)
 	for _, e := range os.Environ() {
 		k, _, _ := strings.Cut(e, "=")
-		if k == workerEnv || k == modeEnv || k == execProbeEnv {
+		if k == workerEnv || k == modeEnv || k == execProbeEnv || k == execProbeIDEnv {
 			continue
 		}
 		env = append(env, e)
 	}
-	env = append(env, execProbeEnv+"=1")
+	env = append(env, execProbeEnv+"=1", execProbeIDEnv+"="+id)
 	cmd := exec.Command(os.Args[0])
 	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
