@@ -24,6 +24,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -98,7 +100,8 @@ func FuzzCallRefusesWithoutEngine(f *testing.F) {
 //
 // A poisoned handle cannot serve the next input, so the target reopens. That is
 // the documented recovery path (I2: close and reopen), which this exercises
-// thousands of times in a way no single test does.
+// thousands of times in a way no single test does. The handle is carried across
+// inputs by diagFuzzer, which never leaves a closed one behind.
 func FuzzDiagnosticEngineNeverAborts(f *testing.F) {
 	f.Add([]byte{0, 1, 2, 3})
 	f.Add([]byte{1})
@@ -111,58 +114,221 @@ func FuzzDiagnosticEngineNeverAborts(f *testing.F) {
 	f.Add([]byte{8})
 	f.Add([]byte{10, 9, 9, 9})
 
-	open := func(t *testing.T) *gusset.Handle {
-		t.Helper()
+	d := &diagFuzzer{open: func() (diagHandle, error) {
 		h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
+		if err != nil {
+			return nil, err
+		}
+		return h, nil
+	}}
+	h, err := d.open()
+	if err != nil {
+		f.Fatalf("Open failed: %v", err)
+	}
+	d.h = h
+	f.Cleanup(d.close)
+
+	f.Fuzz(func(t *testing.T, payload []byte) { d.run(t, payload) })
+}
+
+// diagHandle is what the diagnostic fuzz target needs from a handle, so a test
+// can plant a Close or an Open that fails.
+type diagHandle interface {
+	Call(ctx context.Context, in []byte) ([]byte, error)
+	Close() error
+}
+
+// fatalReporter is the part of *testing.T one fuzz iteration reports through.
+type fatalReporter interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}
+
+// diagFuzzer carries FuzzDiagnosticEngineNeverAborts' handle from one input to
+// the next. The target used to keep the handle in a closure variable and call
+// Close, then Fatalf if Close or the reopen failed, so the variable kept the
+// closed handle. The fuzzing engine then minimized against it, every input
+// reported "gusset: handle is closed", and the first failure's own message was
+// never printed (nightly 39112666661, 2026-10-18).
+//
+// A poisoned handle is now taken out of h before anything about it is checked,
+// and the replacement is opened before anything is reported. h is nil only when
+// that Open failed. The next input then opens first and reports Open's own
+// error.
+type diagFuzzer struct {
+	open func() (diagHandle, error)
+	h    diagHandle
+}
+
+func (d *diagFuzzer) close() {
+	if d.h != nil {
+		_ = d.h.Close()
+		d.h = nil
+	}
+}
+
+func (d *diagFuzzer) run(t fatalReporter, payload []byte) {
+	t.Helper()
+	if d.h == nil {
+		h, err := d.open()
 		if err != nil {
 			t.Fatalf("Open failed: %v", err)
 		}
-		return h
+		d.h = h
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), fuzzCallTimeout)
+	defer cancel()
 
-	h := open(&testing.T{})
-	f.Cleanup(func() { _ = h.Close() })
+	// Reaching this line at all is most of the assertion: the previous
+	// iteration's panic was caught rather than aborting the process.
+	_, err := d.h.Call(ctx, payload)
 
-	f.Fuzz(func(t *testing.T, payload []byte) {
-		ctx, cancel := context.WithTimeout(context.Background(), fuzzCallTimeout)
-		defer cancel()
-
-		// Reaching this line at all is most of the assertion: the previous
-		// iteration's panic was caught rather than aborting the process.
-		_, err := h.Call(ctx, payload)
-
-		if errors.Is(err, gusset.ErrPoisoned) || errors.Is(err, gusset.ErrPanic) {
-			// A caught panic must poison; a poisoned handle must stay refused.
-			if _, again := h.Call(ctx, []byte{0}); !errors.Is(again, gusset.ErrPoisoned) {
-				t.Fatalf("handle served work after a caught panic; expected ErrPoisoned, got %v", again)
+	if errors.Is(err, gusset.ErrPoisoned) || errors.Is(err, gusset.ErrPanic) {
+		old := d.h
+		d.h = nil
+		// A caught panic must poison; a poisoned handle must stay refused.
+		_, again := old.Call(ctx, []byte{0})
+		closeErr := old.Close()
+		next, openErr := d.open()
+		if openErr == nil {
+			d.h = next
+		}
+		if !errors.Is(again, gusset.ErrPoisoned) {
+			t.Fatalf("handle served work after a caught panic; expected ErrPoisoned, got %v", again)
+		}
+		if closeErr != nil {
+			t.Fatalf("Close after poisoning failed: %v", closeErr)
+		}
+		if openErr != nil {
+			t.Fatalf("reopen after poisoning failed: %v", openErr)
+		}
+		return
+	}
+	// Engine errors and cancellations are legitimate outcomes for arbitrary
+	// input. A copy-limit refusal is R16, not a malformed FFI call.
+	// ErrBadArg is not: it would mean the Go side built a malformed call
+	// out of a well-formed payload that was otherwise legal to submit.
+	if err != nil {
+		if strings.Contains(err.Error(), "copy limit") {
+			if len(payload) <= 4096 {
+				t.Fatalf("copy-limit refusal for %d-byte payload (ceiling is 4096)", len(payload))
 			}
-			if err := h.Close(); err != nil {
-				t.Fatalf("Close after poisoning failed: %v", err)
-			}
-			h = open(t)
 			return
 		}
-		// Engine errors and cancellations are legitimate outcomes for arbitrary
-		// input. A copy-limit refusal is R16, not a malformed FFI call.
-		// ErrBadArg is not: it would mean the Go side built a malformed call
-		// out of a well-formed payload that was otherwise legal to submit.
-		if err != nil {
-			if strings.Contains(err.Error(), "copy limit") {
-				if len(payload) <= 4096 {
-					t.Fatalf("copy-limit refusal for %d-byte payload (ceiling is 4096)", len(payload))
-				}
-				return
-			}
-			if errors.Is(err, gusset.ErrBadArg) {
-				t.Fatalf("payload of %d bytes produced ErrBadArg: %v", len(payload), err)
-			}
-			if !errors.Is(err, context.DeadlineExceeded) &&
-				!errors.Is(err, gusset.ErrGeneric) &&
-				!strings.Contains(err.Error(), "cancel") {
-				t.Fatalf("payload of %d bytes produced an unexpected error: %v", len(payload), err)
-			}
+		if errors.Is(err, gusset.ErrBadArg) {
+			t.Fatalf("payload of %d bytes produced ErrBadArg: %v", len(payload), err)
 		}
-	})
+		if !errors.Is(err, context.DeadlineExceeded) &&
+			!errors.Is(err, gusset.ErrGeneric) &&
+			!strings.Contains(err.Error(), "cancel") {
+			t.Fatalf("payload of %d bytes produced an unexpected error: %v", len(payload), err)
+		}
+	}
+}
+
+// plantedHandle stands in for a diagnostic handle: payload [1] panics and
+// poisons it, a closed one refuses with ErrClosed, and Close returns closeErr.
+type plantedHandle struct {
+	poisoned, closed bool
+	closeErr         error
+}
+
+func (p *plantedHandle) Call(_ context.Context, in []byte) ([]byte, error) {
+	switch {
+	case p.closed:
+		return nil, gusset.ErrClosed
+	case p.poisoned:
+		return nil, gusset.ErrPoisoned
+	case len(in) > 0 && in[0] == 1:
+		p.poisoned = true
+		return nil, gusset.ErrPanic
+	}
+	return in, nil
+}
+
+func (p *plantedHandle) Close() error {
+	p.closed = true
+	return p.closeErr
+}
+
+// recordingReporter keeps what an iteration reported. Fatalf ends the
+// iteration's goroutine as testing.T's does.
+type recordingReporter struct{ msgs []string }
+
+func (r *recordingReporter) Helper() {}
+
+func (r *recordingReporter) Fatalf(format string, args ...any) {
+	r.msgs = append(r.msgs, fmt.Sprintf(format, args...))
+	runtime.Goexit()
+}
+
+func iterate(d *diagFuzzer, payload []byte) []string {
+	rec := &recordingReporter{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.run(rec, payload)
+	}()
+	<-done
+	return rec.msgs
+}
+
+// A failure on the poison path reports its own message, and the next input,
+// which is also what the minimizer reruns, gets a live handle. Before
+// diagFuzzer, each of these cases reported the planted failure once and then
+// "gusset: handle is closed" for every later input.
+func TestFuzzDiagnosticTarget_FailureDoesNotStrandAClosedHandle(t *testing.T) {
+	plantedClose := errors.New("planted close failure")
+	plantedOpen := errors.New("planted open failure")
+	cases := []struct {
+		name  string
+		first *plantedHandle
+		opens []error // the result of each Open after the first handle, in order
+		want  string
+	}{
+		{"close fails", &plantedHandle{closeErr: plantedClose}, []error{nil, nil}, "Close after poisoning failed: planted close failure"},
+		{"reopen fails", &plantedHandle{}, []error{plantedOpen, nil, nil}, "reopen after poisoning failed: planted open failure"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			n := 0
+			d := &diagFuzzer{h: c.first, open: func() (diagHandle, error) {
+				if n >= len(c.opens) {
+					return nil, fmt.Errorf("Open #%d was not planned", n+2)
+				}
+				err := c.opens[n]
+				n++
+				if err != nil {
+					return nil, err
+				}
+				return &plantedHandle{}, nil
+			}}
+			if got := iterate(d, []byte{1}); len(got) != 1 || got[0] != c.want {
+				t.Fatalf("poisoning input reported %q; want only %q", got, c.want)
+			}
+			if !c.first.closed {
+				t.Error("the poisoned handle was not closed")
+			}
+			// A later input, the minimizer's rerun of the poisoning one, and
+			// another later input: none may meet a closed handle.
+			for _, in := range [][]byte{{0}, {1}, {0}} {
+				if got := iterate(d, in); len(got) != 0 {
+					t.Errorf("input % x after the failure reported %q; want a live handle", in, got)
+				}
+			}
+			if n != len(c.opens) {
+				t.Errorf("%d reopens ran; want %d", n, len(c.opens))
+			}
+		})
+	}
+
+	// An Open that keeps failing is reported as itself on every input.
+	d := &diagFuzzer{open: func() (diagHandle, error) { return nil, plantedOpen }}
+	for range 2 {
+		if got := iterate(d, []byte{0}); len(got) != 1 || got[0] != "Open failed: planted open failure" {
+			t.Fatalf("with Open failing, an input reported %q; want only the Open failure", got)
+		}
+	}
 }
 
 // FuzzBufferLifecycle fuzzes the Rust-owned buffer path (I1, R4, R16).
