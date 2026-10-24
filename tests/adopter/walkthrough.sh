@@ -13,15 +13,17 @@
 #   step 3      Option B (CGO_LDFLAGS) and Option A (make install ARCHIVE=... then
 #               -tags gusset_pkgconfig), both against a copy of the module with no
 #               target/ and read-only, the way the module cache is
-#   step 5      the Allocator snippet, compiled when the compiler supports it.
-#               A skip is a GitHub warning, not a silent echo. A copy of the
+#   step 5      the Allocator snippet, compiled when the umbrella's own build.rs
+#               (the document's) sets the cfg; gusset's probe printing the same
+#               line does not count. A skip is a GitHub warning, not a silent echo. A copy of the
 #               snippet with a type that does not exist must fail to compile.
 #               GUSSET_REQUIRE_STEP5=1 fails the run when the snippet was not
 #               compiled (the nightly job).
 #   installers  make install (PREFIX, DESTDIR, odd characters, tracked files) and
 #               install.sh (from a file, piped, bad ref, pinned commit) installing
 #               the same set of files
-#   gussetvet   run from the install against the adopter's shim
+#   gussetvet   run from the install against the adopter's shim, default build
+#               and -tags gusset_pkgconfig
 #
 # Nothing is installed outside WORKDIR. Needs cargo, go, make, pkg-config, git.
 
@@ -45,6 +47,38 @@ expect_fail() { # description command...
 		cat "$W/expect_fail.out" >&2
 		fail "$what: succeeded, but must fail"
 	fi
+}
+
+# umbrella_sets_step5_cfg BUILD_DIR PACKAGE: whether PACKAGE's own build script
+# printed cargo::rustc-cfg=gusset_allocator_api. gusset's allocator probe prints
+# that identical line into gusset's own output under BUILD_DIR, so a grep over
+# all of BUILD_DIR reported the snippet compiled when the document's build.rs set
+# nothing. Only PACKAGE's output is read, in either cargo layout:
+#   BUILD_DIR/PACKAGE-<hash>/output       (stable 1.99)
+#   BUILD_DIR/PACKAGE/<hash>/run/stdout   (nightly-2026-10-05, the step5-snippet job)
+# Exactly one must exist: none means the check could not run, which is a
+# failure, not a skip.
+umbrella_sets_step5_cfg() {
+	local f hash found=""
+	for f in "$1/$2"-*/output "$1/$2"/*/run/stdout; do
+		[ -f "$f" ] || continue
+		case "$f" in
+		"$1/$2"-*/output)
+			hash="${f#"$1/$2"-}"
+			hash="${hash%/output}"
+			;;
+		*)
+			hash="${f#"$1/$2"/}"
+			hash="${hash%/run/stdout}"
+			;;
+		esac
+		# A bare hash only: PACKAGE-other-<hash> is another package.
+		case "$hash" in "" | *[!0-9a-f]*) continue ;; esac
+		[ -z "$found" ] || fail "two build-script outputs for $2 under $1: $found and $f"
+		found="$f"
+	done
+	[ -n "$found" ] || fail "no build-script output for the umbrella package $2 under $1; the step 5 check could not run"
+	grep -x -F -q 'cargo::rustc-cfg=gusset_allocator_api' "$found"
 }
 
 cleanup() {
@@ -79,6 +113,9 @@ ENGINE_RS="$(extract rust 'myservice_engine_init')"
 SHIM_GO="$(extract go 'registerEngine')"
 BUILD_RS="$(extract rust 'DEP_GUSSET_ALLOCATOR_API')"
 STEP5_RS="$(extract rust 'BufferAlloc, JobOutput')"
+# cargo names a build script's output directory after the [package], not the [lib].
+UMB_PACKAGE="$(printf '%s\n' "$CARGO_TOML" | sed -n '/^\[package\]/,/^\[/{s/^name = "\([^"]*\)".*/\1/p;}')"
+[ -n "$UMB_PACKAGE" ] || fail "docs/adoption.md step 1 has no [package] name for the step 5 check to read"
 
 step "no Rust block in the document names the crate 'gusset' after step 1 renamed it"
 for block in "$ENGINE_RS" "$STEP5_RS"; do
@@ -161,8 +198,9 @@ cp "$UMB/Cargo.toml" "$UMB/Cargo.toml.orig"
 (cd "$UMB" && CARGO_TARGET_DIR="$UMB/target" cargo build --release 2>&1 | tail -5)
 [ -f "$UMB/target/release/libgusset.a" ] || fail "umbrella did not produce libgusset.a ([lib] name = \"gusset\")"
 # The build script always prints cargo::rustc-check-cfg=cfg(gusset_allocator_api).
-# Only cargo::rustc-cfg=gusset_allocator_api means step5.rs was compiled.
-if grep -R -x -F -q 'cargo::rustc-cfg=gusset_allocator_api' "$UMB/target/release/build"; then
+# Only cargo::rustc-cfg=gusset_allocator_api, from the umbrella's own build
+# script, means step5.rs was compiled.
+if umbrella_sets_step5_cfg "$UMB/target/release/build" "$UMB_PACKAGE"; then
 	echo "step 5 snippet compiled (compiler reports the Allocator API)"
 else
 	echo "::warning::step 5 snippet not compiled here: this compiler's allocator probe is off (gusset_core::ALLOCATOR_API)"
@@ -277,6 +315,22 @@ grep -E "library 'gusset' not found|cannot find -lgusset|library not found for -
 EXPECT_VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}' "$CHECKOUT/Cargo.toml")"
 [ -n "$EXPECT_VERSION" ] || fail "could not read the version from Cargo.toml"
 HASH_BEFORE="$(cksum <"$CHECKOUT/internal/ffi/archive_hash.go")"
+# internal/ffi/libgusset.a is ignored, so a dev checkout may already hold a
+# leftover one. The installs must leave it as they found it: absent, or the
+# same bytes. Asserting it is absent failed a local run nothing had written to.
+LIBGUSSET="$CHECKOUT/internal/ffi/libgusset.a"
+file_state() { if [ -e "$1" ]; then cksum <"$1"; else echo absent; fi; }
+LIBGUSSET_BEFORE="$(file_state "$LIBGUSSET")"
+check_libgusset() { # who
+	local now
+	now="$(file_state "$LIBGUSSET")"
+	[ "$now" = "$LIBGUSSET_BEFORE" ] && return 0
+	case "$LIBGUSSET_BEFORE:$now" in
+	absent:*) fail "$1 wrote libgusset.a into internal/ffi" ;;
+	*:absent) fail "$1 removed the libgusset.a internal/ffi held before the installs" ;;
+	*) fail "$1 rewrote the libgusset.a internal/ffi held before the installs" ;;
+	esac
+}
 
 fileset() { (cd "$1" && find . -type f | LC_ALL=C sort); }
 want_files="./bin/gussetvet
@@ -293,7 +347,7 @@ make -C "$CHECKOUT" install PREFIX="$PM" >/dev/null
 [ "$(PKG_CONFIG_PATH="$PM/lib/pkgconfig" pkg-config --variable=libdir gusset)" = "$PM/lib" ] || fail "gusset.pc libdir is not $PM/lib"
 PKG_CONFIG_PATH="$PM/lib/pkgconfig" pkg-config --cflags gusset | grep -F -- "-I$PM/include" >/dev/null || fail "gusset.pc cflags do not name $PM/include"
 [ "$(cksum <"$CHECKOUT/internal/ffi/archive_hash.go")" = "$HASH_BEFORE" ] || fail "make install rewrote the tracked internal/ffi/archive_hash.go"
-[ ! -e "$CHECKOUT/internal/ffi/libgusset.a" ] || fail "an install wrote libgusset.a into internal/ffi"
+check_libgusset "an install"
 
 step "make install honours LIBDIR/INCLUDEDIR overrides in the .pc"
 PL="$W/prefix-libdir"
@@ -337,6 +391,8 @@ step "gussetvet from the install, on the adopter's shim"
 EXPORTS="$W/adopter/engine-exports.txt"
 [ ! -e "$APP/exports.txt" ] || fail "the toy app holds an exports.txt, so gussetvet has a default list to find"
 "$PA/bin/gussetvet" -exports "$EXPORTS" "$APP"
+# Option A builds with -tags gusset_pkgconfig; vet the files that build compiles.
+"$PA/bin/gussetvet" -tags gusset_pkgconfig -exports "$EXPORTS" "$APP"
 : >"$W/empty-exports.txt"
 expect_fail "an empty export list" "$PA/bin/gussetvet" -exports "$W/empty-exports.txt" "$APP"
 expect_fail "gussetvet with no export list in an adopter repo" "$PA/bin/gussetvet" "$APP"
@@ -352,7 +408,7 @@ PS="$W/prefix-script"
 [ "$(PKG_CONFIG_PATH="$PS/lib/pkgconfig" pkg-config --modversion gusset)" = "$EXPECT_VERSION" ] || fail "install.sh's .pc version is not Cargo.toml's"
 cmp "$PM/include/gusset.h" "$PS/include/gusset.h" || fail "headers differ"
 [ "$(cksum <"$CHECKOUT/internal/ffi/archive_hash.go")" = "$HASH_BEFORE" ] || fail "install.sh rewrote the tracked internal/ffi/archive_hash.go"
-[ ! -e "$CHECKOUT/internal/ffi/libgusset.a" ] || fail "install.sh wrote libgusset.a into internal/ffi"
+check_libgusset "install.sh"
 
 step "install.sh with a |, & and \\ in the prefix"
 PO="$W/p|q&r"
