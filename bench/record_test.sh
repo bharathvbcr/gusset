@@ -130,6 +130,25 @@ os.waitpid(canary, 0)' "$dir" "$fam" "$@" >"$out" 2>&1 &
 	STARTED=$!
 }
 
+# start_zombie DIR: a zombie that this shell does not own. A python3 parent in a
+# session of its own forks a child that exits at once and then sleeps without
+# ever calling wait, so the child stays a zombie until the parent is killed.
+# DIR/zombie gets "PARENT ZOMBIE" pids once the child has exited. Sets STARTED to
+# the parent's pid.
+start_zombie() {
+	python3 -c 'import os,sys,time
+os.setsid()
+child = os.fork()
+if child == 0:
+    os._exit(0)
+time.sleep(0.3)
+with open(sys.argv[1] + ".tmp", "w") as f:
+    f.write("%d %d\n" % (os.getpid(), child))
+os.rename(sys.argv[1] + ".tmp", sys.argv[1])
+time.sleep(300)' "$1/zombie" >"$1/zombie.out" 2>&1 &
+	STARTED=$!
+}
+
 # wait_grep FILE PATTERN: up to 20s, generous because the host may be busy.
 wait_grep() {
 	file=$1
@@ -522,6 +541,69 @@ stale_case() {
 	grep -q '^BenchmarkDispatch' "$D/out.txt" || fail "no results written after taking over a dead lock"
 	assert_no_lock "$D" "dead lock takeover"
 	echo "ok stale lock takeover"
+}
+
+# --- a zombie holder is gone ---
+# A recorder SIGKILLed while its parent has not yet reaped it is a zombie: `ps -p`
+# still lists it, so a liveness check built on that alone read it as running, and
+# its lock (or takeover claim) was never cleared. MODE lock: the lock's owner is
+# the zombie and its recorded group is the zombie's real one, so the pid-reuse key
+# agrees and only the state can say it is dead. MODE claim: the lock is dead and
+# the claim blocking its takeover belongs to the zombie.
+zombie_case() {
+	mode=$1
+	new_case zombie fast
+	start_zombie "$D"
+	note_pid "$STARTED"
+	wait_file "$D/zombie" || fail "zombie/$mode: the zombie was never made"
+	zpid=$(cut -d' ' -f2 "$D/zombie")
+	state=$(ps -o stat= -p "$zpid" 2>/dev/null || true)
+	case $state in
+	*Z*) ;;
+	*) fail "zombie/$mode: pid $zpid is not a zombie (state '$state'), so the case proves nothing" ;;
+	esac
+	zgroup=$(ps -o pgid= -p "$zpid" 2>/dev/null | tr -d ' ' || true)
+	lockdir=$D/run/bench/results/.record.lock
+	if [ "$mode" = "lock" ]; then
+		mkdir -p "$lockdir"
+		echo "$zpid" >"$lockdir/owner"
+		echo "${zgroup:-$(cut -d' ' -f1 "$D/zombie")}" >"$lockdir/pgid"
+	else
+		dead_lock "$D"
+		mkdir -p "$lockdir.claim"
+		echo "$zpid" >"$lockdir.claim/owner"
+	fi
+	# Started in the background and waited for with a bound: a recorder that reads
+	# the zombie's claim as live retries forever instead of exiting.
+	start_at "$D/run" 0 "$D/stdio" /bin/sh -c "$STUB_ENV"'exec /bin/sh "$3" "$4" 1x 1 "Dispatch\$"' \
+		_ "$D/bin" "$D" "$SUT" "$D/out.txt"
+	recorder=$STARTED
+	note_pid "$recorder"
+	i=0
+	while [ "$i" -lt 300 ] && alive "$recorder"; do
+		sleep 0.05
+		i=$((i + 1))
+	done
+	if alive "$recorder"; then
+		kill -TERM "$recorder" 2>/dev/null || true
+		wait "$recorder" 2>/dev/null || true
+		cat "$D/stdio" >&2
+		fail "zombie/$mode: the recorder was still waiting on the zombie's $mode after 15 s"
+	fi
+	status=0
+	wait "$recorder" || status=$?
+	if [ "$status" != 0 ]; then
+		cat "$D/stdio" >&2
+		fail "zombie/$mode: the recording exited $status"
+	fi
+	grep -q "another recording is in progress" "$D/stdio" && fail "zombie/$mode: a zombie was treated as a live recorder"
+	grep -q "clearing a lock" "$D/stdio" || fail "zombie/$mode: the zombie's lock was not cleared"
+	if [ "$mode" = "claim" ]; then
+		grep -q "clearing a takeover claim left by pid $zpid" "$D/stdio" || fail "zombie/$mode: the zombie's claim was not cleared"
+	fi
+	grep -q '^BenchmarkDispatch' "$D/out.txt" || fail "zombie/$mode: no results written"
+	assert_no_lock "$D" "zombie $mode"
+	echo "ok a zombie holder of a $mode is gone"
 }
 
 # --- N concurrent starts: exactly one winner ---
@@ -1078,6 +1160,8 @@ run_case order_case
 run_case grace_case
 run_case grace_expiry_case
 run_case stale_case
+run_case zombie_case lock
+run_case zombie_case claim
 run_case race_case 8
 run_case race_case 8 stale
 run_case signal_case INT sep
