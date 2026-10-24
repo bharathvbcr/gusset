@@ -126,9 +126,14 @@ func backstopClose(s *handleState) {
 }
 
 // Open opens a new Gusset handle with bounded concurrency (I4).
+//
+// A nil Option is refused with an error matching [ErrBadArg]; see [Option].
 func Open(opts ...Option) (*Handle, error) {
 	cfg := handleConfig{poolSize: 4}
 	for _, opt := range opts {
+		if opt == nil {
+			return nil, &Error{Code: ErrBadArg.Code, Msg: "gusset: nil Option passed to Open"}
+		}
 		opt(&cfg)
 	}
 	if cfg.poolSizeErr != nil {
