@@ -16,7 +16,8 @@ extern "C" {
  *
  * FFI_BAD_ARG means the caller's own argument was refused; correct it and call
  * again. These refusals return it, and no others do:
- *   - any export given a NULL pointer it requires (a NULL status is allowed);
+ *   - any export that returns a status code, given a NULL pointer it requires
+ *     (a NULL status is allowed);
  *   - gusset_handle_open: pool_size above GUSSET_MAX_POOL_SIZE, a negative
  *     pipe_write_fd, or a descriptor that is not the write end of an open pipe;
  *   - gusset_submit: an inline input over GUSSET_MAX_INLINE_INPUT, a NULL
@@ -28,7 +29,14 @@ extern "C" {
  * shutting-down runtime, an engine's own error) stays FFI_ERR. Before this
  * release the pool size, descriptor, flag-bit and buffer-length refusals
  * returned FFI_ERR (DECISIONS.md 2026-10-24); a host that tested for FFI_ERR
- * there must now test for FFI_BAD_ARG. */
+ * there must now test for FFI_BAD_ARG.
+ *
+ * The exports that return nothing cannot report a refusal. Given a NULL
+ * pointer they do nothing: gusset_abi_layout, gusset_alloc_stats,
+ * gusset_status_free and gusset_ring_release write or free nothing, and
+ * gusset_drain_logs writes nothing when out_written is NULL (with a NULL buf or
+ * a len of 0 it writes 0 to out_written). gusset_abi_fields, which returns the
+ * field count, skips a NULL out pointer. */
 #define FFI_OK 0
 #define FFI_ERR 1
 #define FFI_PANIC 2

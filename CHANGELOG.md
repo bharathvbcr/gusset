@@ -13,7 +13,7 @@ Changes since v0.0.3. The C ABI layout is unchanged (17 exports, ABI layout vers
 
 - `ErrShutdownIncomplete` is exercised end to end. `tests/rust_shutdown.rs` submits a non-cooperative diagnostic job (mode 17), waits for the engine's own gauge to show it running, calls `shutdown(10ms)`, asserts work remains and `gusset_shutdown` returns `FFI_ERR`, then re-arms. `tests/shutdown_incomplete` asserts `Shutdown` returns `ErrShutdownIncomplete` for the same work, and that a negative budget is zero and a budget past `MaxDrain` is capped rather than wrapped, each with work in flight. A `Shutdown` that returned nil with undrained work passed every earlier test.
 - The two cancel messages Go maps to `ErrShutdown` and `context.Canceled`, `cancelled: Shutdown` and `cancelled: Explicit`, are pinned in `tests/rust_shutdown.rs` beside the pinned `cancelled: DeadlineExceeded`.
-- `TestOpen_NilOptionIsRefusedNotPanicked`, `TestFFI_ArgumentRefusalsAreBadArg` and the Rust `argument_refusal_tests` pin the two changes above, and that the refusals outside the list stay `FFI_ERR`.
+- `TestPitfall_OpenNilOptionIsRefusedNotPanicked`, `TestFFI_ArgumentRefusalsAreBadArg` and the Rust `argument_refusal_tests` pin the two changes above, and that the refusals outside the list stay `FFI_ERR`.
 
 ### 2026-10-24 · Documentation drift: the docs say what the code does (card ft-86b4ae63)
 
