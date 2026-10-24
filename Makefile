@@ -1,4 +1,4 @@
-.PHONY: all linked-target-dir build test bench bench-crossover bench-scaling lint alloc-gate ci-local docs docs-check cross fuzz clean install install-build uninstall
+.PHONY: all linked-target-dir build test bench bench-crossover bench-scaling bench-dispatch lint alloc-gate ci-local docs docs-check cross fuzz clean install install-build uninstall
 
 export PATH := $(PATH):$(shell go env GOPATH)/bin
 
@@ -218,6 +218,18 @@ bench-scaling: linked-target-dir
 		'ThreadScaling/RawCgo'
 	bench/record.sh bench/results/crossover/scaling-gusset-$(CROSS_SUFFIX) 3x $(SCALING_COUNT) \
 		'ThreadScaling/Gusset'
+
+# The in-process dispatch comparison, crates/gusset/benches/dispatch.rs: the
+# diagnostic engine against registered engines, opcode 0 and nonzero. A cargo
+# arm of record.sh, so it takes the same lock, idle checks and provenance header
+# as the Go arms. COUNT is the bench's --rounds (its floor is 10); BENCHTIME does
+# not apply. cargo bench builds its own binary and links no Go, so this target
+# needs neither the linked archive nor `cargo build --release`. A subdirectory
+# for the reason bench-crossover has one: benchdoc reads bench/results/*.txt as
+# one platform's copy of one measurement.
+bench-dispatch:
+	RECORD_DIR=. bench/record.sh bench/results/dispatch/$(CROSS_SUFFIX) 1s $(BENCH_COUNT) \
+		cargo:gusset/dispatch
 
 # Supported platform set, compile-verified. Gusset is unix-only by construction
 # (POSIX pipe, sigaltstack, pthread stack accounting); lib.rs fails the build on a
