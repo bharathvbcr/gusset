@@ -62,7 +62,7 @@ From `.github/workflows/`. Linux means GitHub's Ubuntu runners on glibc unless a
 | `cgocheck2` | Linux | `GOEXPERIMENT=cgocheck2 go test ./...` |
 | `soak` | Linux, macOS | every Soak test: the OS-thread cap and an empty `goroutineleak` profile after drain |
 | `memlimit` | Linux | allocator stats and `AdviseMemoryLimit` under `GOMEMLIMIT=256MiB` |
-| `allocator-api` | Linux, macOS | the Rust 1.100+ allocator surface: Rust and Go suites, `go test -race` interop stress, `cgocheck2`, and the fallback build |
+| `allocator-api` | Linux, macOS | the Rust 1.100+ allocator surface: Rust and Go suites, `go test -race` interop stress, and the fallback build on the same compiler |
 | `go-floor`, `rust-floor` | Linux | `go test ./...` on Go 1.26; clippy, `cargo test` and `go test ./...` on Rust 1.97 |
 | `r14`, `r14-musl` | Linux x86-64 and arm64, macOS arm64 and x86-64 (Rosetta), musl | the sealed second-staticlib harness. Its binaries run under `-race`, `cgocheck2`, Go `-asan` and with Gusset and both engines built `-Zsanitizer=address`; the two ASan scenarios run on Linux glibc only |
 | `musl` | Linux musl (Alpine) | the Go tests against a musl build, and the worker stack size read-back |
