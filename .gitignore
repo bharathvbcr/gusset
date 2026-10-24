@@ -62,8 +62,16 @@ perf.data*
 # GitPulse (agent worktrees and task state)
 .gitpulse/
 
-# bench/record.sh holds this while a recording runs and removes it on exit.
+# bench/record.sh holds this while a recording runs and removes it on exit. The
+# stage and claim directories are the private directory a lock is built in and a
+# claim a takeover of a dead recorder's lock holds; both are removed on every exit it can
+# handle, and these patterns cover the one it cannot (SIGKILL).
 bench/results/.record.lock/
+bench/results/.record.lock.stage.*/
+bench/results/.record.lock.claim/
+
+# bench/record_test.sh's scratch directories; it removes them on every exit.
+bench/.probe/
 
 # bench/r14/run.sh stamps the linked archives' hash here before every link.
 bench/r14/host/zz_archives.go
