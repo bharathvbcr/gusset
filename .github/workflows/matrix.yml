@@ -631,7 +631,7 @@ jobs:
             echo "::error::a Windows build succeeded; docs/platforms.md says it cannot"
             exit 1
           fi
-          if ! grep -q "gusset supports unix targets only" err.txt; then
+          if ! grep -q "gusset supports Linux and macOS only" err.txt; then
             echo "::error::Windows build failed, but not with the declared platform error"
             cat err.txt
             exit 1
@@ -648,7 +648,7 @@ jobs:
             echo "::error::a FreeBSD build succeeded; docs/platforms.md says it cannot"
             exit 1
           fi
-          if ! grep -q "gusset supports unix targets only" err.txt; then
+          if ! grep -q "gusset supports Linux and macOS only" err.txt; then
             echo "::error::FreeBSD build failed, but not with the declared platform error"
             cat err.txt
             exit 1
@@ -667,7 +667,7 @@ jobs:
             echo "::error::an illumos build succeeded; docs/platforms.md says it cannot"
             exit 1
           fi
-          if ! grep -q "gusset supports unix targets only" err.txt; then
+          if ! grep -q "gusset supports Linux and macOS only" err.txt; then
             echo "::error::illumos build failed, but not with the declared platform error"
             cat err.txt
             exit 1

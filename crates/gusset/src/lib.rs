@@ -29,8 +29,9 @@
 // out with it: rustc still typechecks a crate that only also has `compile_error!`.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!(
-    "gusset supports unix targets only (linux-gnu, linux-musl, macos). The completion \
-     pipe, sigaltstack and pthread stack accounting have no Windows implementation; \
+    "gusset supports Linux and macOS only (linux-gnu, linux-musl, macos); other targets, \
+     including Windows and the other unix systems, are refused. The completion pipe, \
+     sigaltstack and pthread stack accounting have no implementation there; \
      see docs/platforms.md."
 );
 
