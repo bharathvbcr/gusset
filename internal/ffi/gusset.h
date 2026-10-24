@@ -156,6 +156,12 @@ void gusset_alloc_stats(AllocStats* out);
  * than len is split on a UTF-8 character boundary. A partial fill does not
  * mean the ring is empty: drain until *out_written is 0. */
 void gusset_drain_logs(uint8_t* buf, size_t len, size_t* out_written);
+/* Commits len bytes, zero-filled, per call: any len from 1 to
+ * GUSSET_MAX_BUFFER_BYTES (1 GiB) is accepted, and 0 or a larger len is refused
+ * with FFI_ERR before anything is allocated. There is no cap below that and no
+ * budget across calls (the Go wrapper's WithBufferBudget is opt-in and is not
+ * applied here), so a C host that takes len from untrusted input must cap it
+ * itself. */
 int32_t gusset_buf_alloc(GussetHandle* handle, size_t len, uint64_t* out_id, uint8_t** out_ptr, FfiStatus* status);
 int32_t gusset_buf_free(GussetHandle* handle, uint64_t id, FfiStatus* status);
 
