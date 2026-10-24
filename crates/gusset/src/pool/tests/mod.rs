@@ -608,7 +608,13 @@ fn respawn_and_failed_open_release_threads_and_mappings() {
 /// regular file or socket took 8-byte tickets that no reader would ever poll.
 /// Each is refused before a thread exists, and the caller's descriptor is
 /// left as it was handed in.
+///
+/// Not under Miri: the refusal reads the descriptor with fcntl(F_GETFL), which
+/// Miri does not support ("unsupported operation"), and the fd checks it covers
+/// are not the kind Miri checks for. No nightly Miri run reached it before
+/// 2026-10-23, because every run since 10-20 was cancelled earlier.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn open_refuses_a_descriptor_that_is_not_a_pipe_write_end() {
     let (r, w) = make_pipe();
     let res = Handle::open(1, r);
