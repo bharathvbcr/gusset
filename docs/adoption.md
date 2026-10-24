@@ -280,9 +280,30 @@ pub extern "C" fn myservice_reset_engines() -> i32 {
 ```
 
 ```go
+package main
+
+/*
+#cgo noescape myservice_reset_engines
+#cgo nocallback myservice_reset_engines
+int myservice_reset_engines(void);
+*/
+import "C"
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/bharathvbcr/gusset"
+)
+
 // recoverHandle replaces a handle that returned gusset.ErrPoisoned.
 func recoverHandle(bad *gusset.Handle, opts ...gusset.Option) (*gusset.Handle, error) {
-	_ = bad.Close() // a poisoned handle takes no new work; Close releases its Rust pool
+	if err := bad.Close(); err != nil {
+		// A worker never returned within Close's 30s budget, so the Rust pool is
+		// still allocated until it exits. The engine's memory is not freed: stop
+		// here, and retry the recovery later rather than resetting around it.
+		return nil, fmt.Errorf("close poisoned handle: %w", err)
+	}
 	if C.myservice_reset_engines() != 0 {
 		return nil, errors.New("engine reset failed")
 	}
@@ -290,13 +311,18 @@ func recoverHandle(bad *gusset.Handle, opts ...gusset.Option) (*gusset.Handle, e
 }
 ```
 
+Like every Rust export your shim imports, the reset carries `#cgo noescape` and
+`#cgo nocallback` (R5, checked by `gussetvet`, below). `Close` can fail, and a
+failed `Close` is not a released pool (see step 4, "`Handle.Close` waits at most
+30 seconds"), so the recipe reports the error and does not go on to reset or reopen.
+
 Four things about the reset:
 
 - **Reinstalling without clearing does not work for an opcode.** `register_engine`
   refuses the duplicate and the torn handler keeps running. Clear first. (Only
   opcode 0, whose `set_engine_handler` replaces, would take the new engine.)
 - **It clears every opcode, not the one that panicked.** Reinstall all of them,
-  as `install` does.
+  as `install_engines` does.
 - **It is not atomic.** A job another handle submits between the clear and the
   reinstall is refused with `no engine handler registered`: an error result, not a
   crash. Run the reset from one goroutine at a time, and when several handles

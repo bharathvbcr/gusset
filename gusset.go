@@ -51,8 +51,12 @@ var (
 	// an argument that is outside its contract (a null pointer, a pool size
 	// over the ceiling, a descriptor that is not a pipe's write end, unknown
 	// call flag bits, a buffer length of zero or over the ceiling, for
-	// instance). Open also returns it for a nil Option. Go checks the pool size
-	// and buffer length itself first, so most callers meet only the nil Option.
+	// instance). Go checks the pool size, the buffer budget and the buffer
+	// length itself before it calls in, and those refusals match ErrBadArg too:
+	// a pool size outside 1 to [MaxPoolSize] or a negative buffer budget at
+	// [Open], a buffer length of zero or less or over [MaxBufferBytes] at
+	// [Handle.NewBuffer], and a nil Option at Open. The same caller mistake has
+	// the same class from Go and from C.
 	ErrBadArg = ffi.ErrBadArg
 
 	// ErrShutdown matches work cancelled by Shutdown or refused after it. It
