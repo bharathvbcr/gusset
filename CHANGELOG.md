@@ -19,6 +19,20 @@ From the 2026-10-23 audit: tracker `ft-97faf4f4`, plus `ft-c689767b`, `gs-isolat
 ### Process
 - **`main` is protected.** A PR is required, and the 23 Matrix and adopter checks are required, strict and enforced for admins. See DECISIONS 2026-10-23, which also records keeping `gusset_buf_alloc` uncapped and splitting iceoryx2-go PR #1.
 
+## [Unreleased] - 2026-10-23 · The hashed archive is the linked archive
+
+From `ft-1a7e8a99`. No export signature, ABI or public Go API change. `ffi.go`'s LDFLAGS and every workflow are unchanged. GitHub Actions has not run this tree. No benchmark baseline was recorded.
+
+### Build
+- **`make build` refuses a redirected cargo target directory (I6).** With `CARGO_TARGET_DIR=/x`, cargo built `/x/release/libgusset.a`, while cgo linked and `gen.go` hashed `./target/release/libgusset.a`. That was an old archive, linked silently, or no archive and a failed link. `build`, `test`, `bench`, `bench-crossover` and `bench-scaling` now stop before running anything, naming both archives. `ci-local` stops through `build`. The check is a `$(error)`, so `make -n` refuses too. `CARGO_TARGET_DIR=target` and the absolute path of `./target` still pass. `install` still honours the variable, because it does not link Go against the archive. A `build.target-dir` in a cargo config file is not detected: the Makefile reads only the environment, as `install` does.
+- **`go generate ./internal/ffi` fails when there is no archive.** It used to write a placeholder hash over the tracked file and exit 0. It now exits 1 and lists each path it searched, which are the `-L` directories in `ffi.go`, in the same order. It writes nothing. When `CARGO_TARGET_DIR` is set, it says that cargo writes there and that cgo does not link from it. An empty or unreadable archive is also an error. It is not a reason to try the next path, because the linker would stop at that file too. The write is a rename, and an unchanged hash is not rewritten.
+- **The archive hash is untracked.** `gen.go` writes `internal/ffi/zz_archive_hash.go`, which is gitignored. This follows `bench/r14/host/zz_archives.go`. `internal/ffi/archive_hash.go` stays tracked as a stub that declares nothing and that nothing rewrites. The stub is kept because it carries no build tag, which `unsupported.go` relies on, and because the adopter walkthrough checksums it. A checkout without the generated file builds the same. Running `go generate` no longer dirties the tree or needs an "update archive hash" commit. The mechanism chosen is the ignored file with a committed stub. A runtime build identity checked in `init` would widen the ABI and was not added.
+- **AGENTS.md no longer says CI uses `go build -a`.** No workflow does. The row now says that `make build` runs `go generate` and that only some CI jobs do.
+
+### Tests
+- `internal/ffi/gen_test.go` runs a temp copy of `gen.go`. With no archive, it checks the non-zero exit, that every searched path is named, and that the stub and any previous hash are byte-identical. It checks that release wins over debug, as it does for the linker, and that the hash lands in the ignored file in gofmt form. It checks that an empty archive fails, that the hash file is ignored and untracked, that the stub declares nothing, and that the placeholder string is gone from the tree. The searched paths are compared against the `-L` list parsed from `ffi.go`, so the two cannot drift.
+- `tests/ci/makefile_target_dir_test.go` runs `make -n` for each guarded target with a temporary `CARGO_TARGET_DIR`. It checks that each target refuses, names both archives and prints no command first. It checks that `unset`, `target` and the absolute `./target/` are accepted, and that `install` still takes the redirected archive.
+
 ## [Unreleased] - 2026-10-23 · The ffi_exports fuzz target commits at most 1 MiB per buffer
 
 From `gs-boundary-defence-in-depth` (audit 2026-10-23, A-4 and B-7). No export signature, ABI, default or public Go API change. Raw `gusset_buf_alloc` stays uncapped, as the owner decided on 2026-10-23. GitHub Actions has not run this tree, so the nightly cargo-fuzz job has not gone green.
