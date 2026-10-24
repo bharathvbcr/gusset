@@ -75,6 +75,28 @@ func latched(t *testing.T, p *Proc) {
 	}
 }
 
+// poisonedNaming checks a Call that races the worker's end against the
+// protocol error that ended it. A Submit that arrives after the worker exited
+// is refused at once, before the reader latches the cause (DECISIONS
+// 2026-10-23; TestProc_SubmitAfterExitIsRefusedBeforeTheDrainEnds), so the
+// Call's own error names the cause only when the reader got there first; on
+// macos-latest the exit won (PR #14, job 120823305624). Either way the Call is
+// ErrPoisoned, and once the reader has latched, the Proc's refusal names the
+// cause.
+func poisonedNaming(t *testing.T, p *Proc, err error, cause string) {
+	t.Helper()
+	if !errors.Is(err, gusset.ErrPoisoned) {
+		t.Fatalf("Call = %v; want ErrPoisoned", err)
+	}
+	if !strings.Contains(err.Error(), cause) && !strings.Contains(err.Error(), "worker process") {
+		t.Fatalf("Call = %v; want it to name %q or the worker's exit", err, cause)
+	}
+	latched(t, p)
+	if refusal := p.refusal(); refusal == nil || !strings.Contains(refusal.Error(), cause) {
+		t.Fatalf("latched refusal = %v; want it to name %q", refusal, cause)
+	}
+}
+
 // A frame whose declared length is over the limit ends the worker at once,
 // whatever follows, and says why.
 func TestProc_OversizeFrameLatchesTheWorkerDead(t *testing.T) {
@@ -84,13 +106,10 @@ func TestProc_OversizeFrameLatchesTheWorkerDead(t *testing.T) {
 	start := time.Now()
 	var err error
 	within(t, 3*time.Second, "Call", func() { _, err = p.Call(ctx, []byte{0}) })
-	if !errors.Is(err, gusset.ErrPoisoned) || !strings.Contains(err.Error(), "exceeds") {
-		t.Fatalf("Call = %v; want ErrPoisoned naming the oversize frame", err)
-	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("waiter released after %v, near its 5s deadline", elapsed)
 	}
-	latched(t, p)
+	poisonedNaming(t, p, err, "exceeds")
 }
 
 // A stream that ends inside a frame is io.ErrUnexpectedEOF, not a clean end,
@@ -102,13 +121,10 @@ func TestProc_EOFMidFrameLatchesTheWorkerDead(t *testing.T) {
 	start := time.Now()
 	var err error
 	within(t, 3*time.Second, "Call", func() { _, err = p.Call(ctx, []byte{0}) })
-	if !errors.Is(err, gusset.ErrPoisoned) || !strings.Contains(err.Error(), "unexpected EOF") {
-		t.Fatalf("Call = %v; want ErrPoisoned naming the unexpected EOF", err)
-	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("waiter released after %v, near its 5s deadline", elapsed)
 	}
-	latched(t, p)
+	poisonedNaming(t, p, err, "unexpected EOF")
 }
 
 // A live worker stalled inside a frame leaves the reader blocked, which no
