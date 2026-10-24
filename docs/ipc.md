@@ -2,7 +2,7 @@
 
 [Documentation Hub](README.md) · [Why Gusset is Needed](why.md) · [Architecture Plan (PLAN.md)](PLAN.md)
 
-As of 2026-09-20.
+As of 2026-10-24. Written 2026-09-20; the Transport row and the Prototype section have been revised since.
 
 ## Overview
 
@@ -16,7 +16,7 @@ For GPU workloads requiring zero-downtime serving from Go, Gusset defines the Ph
 
 | Item | Choice | Rationale |
 | :--- | :--- | :--- |
-| **Transport** | `iceoryx2` upstream Go binding (in no release as of iceoryx2 v0.10.0, 2026-09-18; Gusset is contributing it, agreed on iceoryx2 #225; the move to its own repository is tracked in iceoryx2 #2104) | Zero-copy shared memory IPC with formal distribution and maintenance from Eclipse Foundation. C/C++/C#/Python bindings exist. The Go binding lives in its own release-synced repository, as `iceoryx2-csharp` does. Agreed on iceoryx2 #225 (comment 6135155559): `eclipse-iceoryx/iceoryx2-go`, to be created through otterdog (not yet requested as of 2026-10-12), with iceoryx2 as a submodule pinned to a release tag. `gusset-ipc` pins an iceoryx2 release tag, never `main`, and seals or dynamically links `libiceoryx2_ffi_c` under R14 (`DECISIONS.md` 2026-10-12). Phase 4 cannot ship until the binding covers request/response and waitset. |
+| **Transport** | `iceoryx2` Go binding (in no iceoryx2 release as of v0.10.0, 2026-09-18; Gusset is contributing it, agreed on iceoryx2 #225; the move to its own repository is tracked in iceoryx2 #2104) | Zero-copy shared memory IPC with formal distribution and maintenance from Eclipse Foundation. C/C++/C#/Python bindings exist. The Go binding lives in its own release-synced repository, as `iceoryx2-csharp` does. Agreed on iceoryx2 #225 (comment 6135155559): `eclipse-iceoryx/iceoryx2-go`, with iceoryx2 as a submodule pinned to a release tag. The repository exists: it was created on 2026-10-23 through otterdog `eclipse-iceoryx/.eclipsefdn#28` and, as of 2026-10-24, holds only its initial commit and no tag or release. Its first pull request (`iceoryx2-go` #1, scaffold, CI and a minimal `NodeBuilder`/`Node`) is open and awaiting review. `gusset-ipc` pins an iceoryx2 release tag, never `main`, and seals or dynamically links `libiceoryx2_ffi_c` under R14 (`DECISIONS.md` 2026-10-12). Phase 4 cannot ship until the binding covers request/response and waitset. |
 | **Adapter Role** | Thin adapter over iceoryx2 | Gusset avoids maintaining a custom shm transport. `gusset-ipc` provides the identical `gusset.Handle` Go API over IPC. |
 
 ---
@@ -112,8 +112,8 @@ sequenceDiagram
 
 `internal/isolate` is the spike that tests point 5 before any transport work. It is internal and adds no entry point; `DECISIONS.md` 2026-10-08 records what it found.
 
-- **Transport stand-in:** length-prefixed JSON frames on a worker's stdin and stdout, the house process contract. It copies every payload and base64-encodes it, so it says nothing about iceoryx2's cost; it exists so the API question can be answered without waiting on the binding.
-- **Worker:** `isolate.Serve(stdin, stdout, handle, poolSize)` runs an ordinary `*gusset.Handle` and announces its pool size, which the host uses as its semaphore (R11).
+- **Transport stand-in:** length-prefixed JSON frames, the house process contract: requests on the worker's stdin, responses on a protocol pipe that `isolate.Start` appends to `cmd.ExtraFiles` (descriptor 3 when the caller passed no other extra files) and names in `GUSSET_ISOLATE_PROTOCOL_FD`. The worker's stdout stays its own, so an engine's `println!` cannot corrupt the framing (`DECISIONS.md` 2026-10-24). It copies every payload and base64-encodes it, so it says nothing about iceoryx2's cost; it exists so the API question can be answered without waiting on the binding.
+- **Worker:** `isolate.Serve(os.Stdin, out, handle, poolSize)`, with `out` from `isolate.ProtocolOut()`, runs an ordinary `*gusset.Handle` and announces its pool size, which the host uses as its semaphore (R11).
 - **Host:** `isolate.Start(ctx, cmd)` returns a `*Proc` with `Call`, `Submit`, `Wait`, `Discard` and `Close`, which are the same methods and errors as `*gusset.Handle`. Both satisfy `isolate.Caller`, and the parity tests in `internal/isolate` run every assertion against both.
 - **Fault containment:** a worker that dies of SIGKILL or SIGABRT fails its in-flight tickets and every later call with an error matching `gusset.ErrPoisoned`. The host keeps running and can start a replacement. Restart budgets and heartbeats (points 2 and 4) are not prototyped.
 - **Not carried:** `NewBuffer`, `CallBuffer` and `WaitBuffer`. A `*gusset.Buffer` is Rust memory in the calling process, so the out-of-process equivalent is the shared segment this document assigns to iceoryx2. `Proc.Submit` refuses a `*Buffer` with `isolate.ErrBufferUnsupported`. `TestParity_BufferInputDiverges` pins that difference. A public carrier needs three things the prototype does not decide: a third `Buffer` backing beside the Rust id and the Go-heap id 0 (`newHeapBuffer`); an ownership rule for a segment whose worker has died; and a buffer budget charged on the host side.

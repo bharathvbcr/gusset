@@ -30,7 +30,7 @@ Gusset bridges the gap between "FFI bindings exist" and "this runs reliably in p
   A complete, step-by-step implementation guide derived from production adoption in DevCouncil. Covers the umbrella crate pattern (`[lib] name = "gusset"`), build tags (`-tags gusset_pkgconfig`), module-cache linking, zero-copy buffer output using Rust 1.100+ `Allocator` (`BufferAlloc`), and graceful shutdown.
 
 - **[Supported Platforms](platforms.md)**  
-  The Unix-only target matrix (`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`), the mechanics of the Alpine musl 128 KiB stack trap, runtime stack size verification, and prerequisites for a future Windows port.
+  The supported target matrix, Linux and macOS only (`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`), the mechanics of the Alpine musl 128 KiB stack trap, runtime stack size verification, and prerequisites for a future Windows port.
 
 - **[Production Integrations](integrations.md)**  
   Real-world adoption case studies across DevCouncil (`dc-glob`), Manvi, and GitPulse. Includes measured query overheads comparing fresh process spawns against warm processes.
