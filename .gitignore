@@ -70,3 +70,8 @@ bench/r14/host/zz_archives.go
 
 # DevCouncil local state
 !/.devcouncil/
+
+# go generate ./internal/ffi stamps the local archive hash here, through a
+# dot-named temporary file; the tracked stub internal/ffi/archive_hash.go explains.
+internal/ffi/zz_archive_hash.go
+internal/ffi/.zz_archive_hash.go.*
