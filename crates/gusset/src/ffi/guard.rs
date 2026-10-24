@@ -1,7 +1,8 @@
 //! Panic firewall and FFI boundary guard (R1, R2, R3).
 #![allow(unsafe_code)]
 
-use super::status::{FfiStatus, FFI_ERR, FFI_OK, FFI_PANIC};
+use super::status::{FfiStatus, FFI_BAD_ARG, FFI_ERR, FFI_OK, FFI_PANIC};
+use crate::pool::PoolError;
 use std::panic::{catch_unwind, set_hook, take_hook, AssertUnwindSafe};
 use std::ptr;
 
@@ -213,6 +214,22 @@ impl From<String> for FfiError {
             msg,
             file: None,
             line: 0,
+        }
+    }
+}
+
+/// A pool refusal keeps its class: the caller's argument is `FFI_BAD_ARG`, the
+/// rest `FFI_ERR` (`DECISIONS.md` 2026-10-24).
+impl From<PoolError> for FfiError {
+    fn from(err: PoolError) -> Self {
+        match err {
+            PoolError::BadArg(msg) => Self {
+                code: FFI_BAD_ARG,
+                msg,
+                file: None,
+                line: 0,
+            },
+            PoolError::Failed(msg) => Self::from(msg),
         }
     }
 }

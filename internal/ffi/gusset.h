@@ -12,7 +12,23 @@ extern "C" {
 
 /* FFI_PANIC from any call that takes a GussetHandle (a job's panic reported by
  * gusset_take, or one caught in the call itself) poisons that handle: from then
- * on gusset_submit and gusset_buf_alloc return FFI_POISONED. */
+ * on gusset_submit and gusset_buf_alloc return FFI_POISONED.
+ *
+ * FFI_BAD_ARG means the caller's own argument was refused; correct it and call
+ * again. These refusals return it, and no others do:
+ *   - any export given a NULL pointer it requires (a NULL status is allowed);
+ *   - gusset_handle_open: pool_size above GUSSET_MAX_POOL_SIZE, a negative
+ *     pipe_write_fd, or a descriptor that is not the write end of an open pipe;
+ *   - gusset_submit: an inline input over GUSSET_MAX_INLINE_INPUT, a NULL
+ *     input_ptr with a nonzero input_len, or CallHeader flag bits this library
+ *     does not know (checked after the handle's state: a poisoned, closed or
+ *     shut-down handle reports that instead);
+ *   - gusset_buf_alloc: len of 0 or above GUSSET_MAX_BUFFER_BYTES.
+ * Every other refusal (an unknown ticket or buffer id, a closed handle, a
+ * shutting-down runtime, an engine's own error) stays FFI_ERR. Before this
+ * release the pool size, descriptor, flag-bit and buffer-length refusals
+ * returned FFI_ERR (DECISIONS.md 2026-10-24); a host that tested for FFI_ERR
+ * there must now test for FFI_BAD_ARG. */
 #define FFI_OK 0
 #define FFI_ERR 1
 #define FFI_PANIC 2
@@ -158,7 +174,7 @@ void gusset_alloc_stats(AllocStats* out);
 void gusset_drain_logs(uint8_t* buf, size_t len, size_t* out_written);
 /* Commits len bytes, zero-filled, per call: any len from 1 to
  * GUSSET_MAX_BUFFER_BYTES (1 GiB) is accepted, and 0 or a larger len is refused
- * with FFI_ERR before anything is allocated. There is no cap below that and no
+ * with FFI_BAD_ARG before anything is allocated. There is no cap below that and no
  * budget across calls (the Go wrapper's WithBufferBudget is opt-in and is not
  * applied here), so a C host that takes len from untrusted input must cap it
  * itself. */
