@@ -127,7 +127,9 @@ func backstopClose(s *handleState) {
 
 // Open opens a new Gusset handle with bounded concurrency (I4).
 //
-// A nil Option is refused with an error matching [ErrBadArg]; see [Option].
+// A nil Option, a [WithPoolSize] outside 1 to [MaxPoolSize] and a negative
+// [WithBufferBudget] are refused with an error matching [ErrBadArg]; see
+// [Option].
 func Open(opts ...Option) (*Handle, error) {
 	cfg := handleConfig{poolSize: 4}
 	for _, opt := range opts {
@@ -140,7 +142,7 @@ func Open(opts ...Option) (*Handle, error) {
 		return nil, cfg.poolSizeErr
 	}
 	if cfg.bufferBudget < 0 {
-		return nil, fmt.Errorf("gusset: buffer budget must not be negative (got %d); 0 means unlimited", cfg.bufferBudget)
+		return nil, &Error{Code: ErrBadArg.Code, Msg: fmt.Sprintf("buffer budget must not be negative (got %d); 0 means unlimited", cfg.bufferBudget)}
 	}
 
 	r, w, err := os.Pipe()
