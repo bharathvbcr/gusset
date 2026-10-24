@@ -185,6 +185,80 @@ func TestGofmtPathThatLooksLikeAFlag(t *testing.T) {
 	}
 }
 
+// versionTree is the five files version-parity reads, all saying 1.2.3, laid
+// out the way the real ones are: [Unreleased] headings above the newest
+// release, a SECURITY.md table with one supported row, a v-prefixed default
+// ref and a git dependency pinned by tag.
+func versionTree() map[string]string {
+	return map[string]string{
+		"Cargo.toml":          "[workspace]\nmembers = [\"crates/x\"]\n\n[workspace.package]\nversion = \"1.2.3\"\nedition = \"2021\"\n\n[profile.release]\nopt-level = 3\n",
+		"crates/x/Cargo.toml": "[package]\nname = \"x\"\nversion = \"9.9.9\"\n",
+		"CHANGELOG.md": "# Changelog\n\n## [Unreleased] - 2026-10-25 · Something new\n\n- a change\n\n" +
+			"## [1.2.3] - 2026-10-24\n\n### Security\n- a note\n\n## [1.2.2] - 2026-09-26\n",
+		"SECURITY.md": "## Supported Versions\n\n| Version | Supported |\n| :--- | :--- |\n" +
+			"| `v1.2.3` | :white_check_mark: |\n| `< v1.2.3` | :x: |\n",
+		"install.sh":       "#!/usr/bin/env bash\nset -euo pipefail\n\nGUSSET_DEFAULT_REF=\"v1.2.3\"\nGUSSET_UPSTREAM_URL=\"https://example.invalid/x.git\"\n",
+		"docs/adoption.md": "```toml\n[dependencies]\n# pin a release tag\ngusset_core = { package = \"gusset\", git = \"https://github.com/bharathvbcr/gusset\", tag = \"v1.2.3\" }\n```\n",
+	}
+}
+
+func TestVersionParityPassesWhenEveryInputAgrees(t *testing.T) {
+	out, err := lint(t, versionTree(), nil, "version-parity")
+	if err != nil || !strings.Contains(out, "version-parity PASS") {
+		t.Fatalf("five agreeing inputs did not pass: %v\n%s", err, out)
+	}
+	// A crate's own [package] version is not the workspace's.
+	if strings.Contains(out, "9.9.9") {
+		t.Errorf("read a version outside [workspace.package]:\n%s", out)
+	}
+}
+
+// One planted disagreement per input, and each way an input can fail to say
+// anything: a check that could not read an input must not pass.
+func TestVersionParityFailsOnEachMismatch(t *testing.T) {
+	type edit struct{ file, from, to string }
+	for name, c := range map[string]struct {
+		edits []edit
+		drop  string
+		want  string // the input the failure must name
+	}{
+		"cargo bumped alone":          {edits: []edit{{"Cargo.toml", `version = "1.2.3"`, `version = "1.2.4"`}}, want: "CHANGELOG.md"},
+		"changelog heading":           {edits: []edit{{"CHANGELOG.md", "## [1.2.3]", "## [1.2.4]"}}, want: "CHANGELOG.md"},
+		"changelog only unreleased":   {edits: []edit{{"CHANGELOG.md", "## [1.2.3] - 2026-10-24", "## [Unreleased] - 2026-10-24"}, {"CHANGELOG.md", "## [1.2.2] - 2026-09-26", "## [Unreleased] - 2026-09-26"}}, want: "CHANGELOG.md"},
+		"security supported row":      {edits: []edit{{"SECURITY.md", "| `v1.2.3` |", "| `v1.2.2` |"}}, want: "SECURITY.md"},
+		"security two supported rows": {edits: []edit{{"SECURITY.md", "| `< v1.2.3` | :x: |", "| `v1.2.2` | :white_check_mark: |\n| `< v1.2.2` | :x: |"}}, want: "SECURITY.md"},
+		"security unsupported row":    {edits: []edit{{"SECURITY.md", "| `< v1.2.3` |", "| `< v1.2.2` |"}}, want: "SECURITY.md"},
+		"install.sh default ref":      {edits: []edit{{"install.sh", `GUSSET_DEFAULT_REF="v1.2.3"`, `GUSSET_DEFAULT_REF="v1.2.2"`}}, want: "install.sh"},
+		"install.sh ref without v":    {edits: []edit{{"install.sh", `GUSSET_DEFAULT_REF="v1.2.3"`, `GUSSET_DEFAULT_REF="1.2.3"`}}, want: "install.sh"},
+		"adoption.md tag":             {edits: []edit{{"docs/adoption.md", `tag = "v1.2.3"`, `tag = "v1.2.2"`}}, want: "docs/adoption.md"},
+		"adoption.md rev, not a tag":  {edits: []edit{{"docs/adoption.md", `tag = "v1.2.3"`, `rev = "abc123"`}}, want: "docs/adoption.md"},
+		"cargo version not x.y.z":     {edits: []edit{{"Cargo.toml", `version = "1.2.3"`, `version = "1.2"`}}, want: "Cargo.toml"},
+		"cargo version outside table": {edits: []edit{{"Cargo.toml", "[workspace.package]\nversion = \"1.2.3\"\n", "[workspace.package]\n"}}, want: "Cargo.toml"},
+		"missing SECURITY.md":         {drop: "SECURITY.md", want: "SECURITY.md"},
+		"missing docs/adoption.md":    {drop: "docs/adoption.md", want: "docs/adoption.md"},
+	} {
+		files := versionTree()
+		for _, e := range c.edits {
+			body := files[e.file]
+			if !strings.Contains(body, e.from) {
+				t.Fatalf("%s: fixture %s has no %q", name, e.file, e.from)
+			}
+			files[e.file] = strings.Replace(body, e.from, e.to, 1)
+		}
+		if c.drop != "" {
+			delete(files, c.drop)
+		}
+		out, err := lint(t, files, nil, "version-parity")
+		if err == nil || !strings.Contains(out, "version-parity FAIL") {
+			t.Errorf("%s: the mismatch passed: %v\n%s", name, err, out)
+			continue
+		}
+		if !strings.Contains(out, "::error::version-parity: "+c.want) {
+			t.Errorf("%s: the failure does not name %s:\n%s", name, c.want, out)
+		}
+	}
+}
+
 // bench/seed is excluded the way `grep -v '^bench/seed/'` excluded it, including
 // a file gofmt cannot parse. A sibling outside that tree is still gated.
 func TestGofmtStillExcludesBenchSeed(t *testing.T) {

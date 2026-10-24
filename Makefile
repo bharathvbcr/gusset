@@ -257,7 +257,7 @@ fuzz:
 	done
 
 # One pipeline, shared with the CI "Lint & Boundary Audits" job: gofmt, go vet,
-# gussetvet, staticcheck, govulncheck, the forbidden-pattern audit, clippy
+# gussetvet, staticcheck, govulncheck, the forbidden-pattern audit, version parity, clippy
 # (--all-targets, so the R3 disallowed-method rules reach test code), cargo fmt
 # and cargo-deny over both the root and fuzz/ workspaces. A missing or wrongly
 # versioned tool fails the step with the command that installs it; see

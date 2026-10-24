@@ -306,6 +306,13 @@ jobs:
         if: success() || failure()
         run: tools/ci/lint.sh forbidden-patterns
 
+      # Cargo.toml's version against CHANGELOG's newest release heading,
+      # SECURITY.md's supported row, install.sh's default ref and the tag in
+      # docs/adoption.md.
+      - name: Version parity
+        if: success() || failure()
+        run: tools/ci/lint.sh version-parity
+
       # --all-targets matters: without it clippy skips test targets entirely, and
       # the R3 disallowed-method rules went unenforced in exactly the code most
       # likely to reach for unwrap.

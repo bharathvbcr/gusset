@@ -20,8 +20,10 @@
 #               GUSSET_REQUIRE_STEP5=1 fails the run when the snippet was not
 #               compiled (the nightly job).
 #   installers  make install (PREFIX, DESTDIR, odd characters, tracked files) and
-#               install.sh (from a file, piped, bad ref, pinned commit) installing
-#               the same set of files
+#               install.sh (from a file, piped, bad ref, pinned commit, its default
+#               ref into a DESTDIR) installing the same set of files; install.sh
+#               refusing, before it builds, a tree whose make install ignores
+#               DESTDIR (v0.0.2, and a planted Makefile)
 #   gussetvet   run from the install against the adopter's shim, default build
 #               and -tags gusset_pkgconfig
 #
@@ -443,5 +445,62 @@ expect_fail "a GUSSET_COMMIT that is not the tag's commit" \
 	bash -c "cd '$W/empty-cwd' && GUSSET_PREFIX='$W/prefix-pinned-bad' GUSSET_REPO_URL='file://$W/mirror' GUSSET_REF=walkthrough-tag GUSSET_COMMIT=0000000000000000000000000000000000000000 bash < '$CHECKOUT/install.sh'"
 expect_fail "a ref that does not exist" \
 	bash -c "cd '$W/empty-cwd' && GUSSET_PREFIX='$W/prefix-noref' GUSSET_REPO_URL='file://$W/mirror' GUSSET_REF=no-such-ref bash < '$CHECKOUT/install.sh'"
+
+# refuses_no_destdir URL REF WHAT: a piped install of REF into a DESTDIR must
+# stop before make runs, naming the Makefile's missing DESTDIR support, and
+# write nothing into the prefix or the staging root. A non-zero exit alone is
+# not enough: an install that ran make and then missed gussetvet under DESTDIR
+# exits non-zero too, after writing into the real prefix.
+refuses_no_destdir() {
+	local out="$W/no-destdir.out" pfx="$W/prefix-nodest" stage="$W/stage-nodest"
+	if (cd "$W/empty-cwd" && GUSSET_PREFIX="$pfx" DESTDIR="$stage" GUSSET_REPO_URL="$1" GUSSET_REF="$2" bash <"$CHECKOUT/install.sh" >"$out" 2>&1); then
+		cat "$out" >&2
+		fail "$3: install.sh succeeded; it must refuse a tree whose make install ignores DESTDIR"
+	fi
+	grep -F 'does not honour DESTDIR' "$out" >/dev/null || { cat "$out" >&2; fail "$3: install.sh failed, but not by naming the Makefile's missing DESTDIR support"; }
+	if grep -F 'Building and installing' "$out" >/dev/null; then
+		cat "$out" >&2
+		fail "$3: install.sh ran make before it refused"
+	fi
+	[ ! -e "$pfx" ] && [ ! -e "$stage" ] || fail "$3: install.sh wrote into $pfx or $stage"
+}
+
+step "install.sh refuses a planted Makefile whose install recipe has no DESTDIR"
+# If the refusal were missing, make would run this recipe and leave the marker.
+git clone -q "$W/mirror" "$W/mirror-nodest"
+git -C "$W/mirror-nodest" checkout -q -b walkthrough-no-destdir
+printf 'install:\n\t@touch %s\n' "'$W/planted-make-ran'" >"$W/mirror-nodest/Makefile"
+git -C "$W/mirror-nodest" -c user.name=walkthrough -c user.email=walkthrough@example.invalid commit -q -am 'planted: install ignores DESTDIR'
+refuses_no_destdir "file://$W/mirror-nodest" walkthrough-no-destdir "a planted Makefile"
+[ ! -e "$W/planted-make-ran" ] || fail "install.sh ran the planted Makefile's install recipe"
+
+step "install.sh refuses v0.0.2 into a DESTDIR: its make install ignores DESTDIR"
+# v0.0.2's install recipe copies into $(LIBDIR) and never reads DESTDIR. The
+# mirror carries the tag when the checkout does (adopter.yml checks out with
+# fetch-depth: 0); a checkout without it cannot run this case, which is a failure.
+git -C "$W/mirror" rev-parse -q --verify 'refs/tags/v0.0.2^{commit}' >/dev/null ||
+	fail "the checkout has no v0.0.2 tag for the DESTDIR refusal case; fetch tags (git fetch --tags)"
+refuses_no_destdir "file://$W/mirror" v0.0.2 "v0.0.2"
+
+step "install.sh piped with GUSSET_REF unset clones its GUSSET_DEFAULT_REF, into a DESTDIR"
+# The default is what `curl .../<tag>/install.sh | bash` clones, so the script at
+# this commit must name this commit's version. Nothing tags this commit yet, so
+# the mirror gets the tag here; -f because after the release the mirror already
+# carries the real one, on an older commit.
+[ "$(grep -c '^GUSSET_DEFAULT_REF=' "$CHECKOUT/install.sh")" = 1 ] || fail "install.sh does not set GUSSET_DEFAULT_REF exactly once"
+DEFAULT_REF="$(sed -n 's/^GUSSET_DEFAULT_REF="\([^"]*\)"$/\1/p' "$CHECKOUT/install.sh")"
+[ "$DEFAULT_REF" = "v$EXPECT_VERSION" ] || fail "install.sh's GUSSET_DEFAULT_REF is '$DEFAULT_REF', not v$EXPECT_VERSION from Cargo.toml"
+git -C "$W/mirror" tag -f "$DEFAULT_REF" "$TAG_COMMIT" >/dev/null
+[ -z "${GUSSET_REF+set}" ] || fail "GUSSET_REF is set; the default-ref case needs it unset"
+PD="$W/prefix-default"
+SD="$W/stage-default"
+(cd "$W/empty-cwd" && GUSSET_PREFIX="$PD" DESTDIR="$SD" GUSSET_REPO_URL="file://$W/mirror" GUSSET_COMMIT="$TAG_COMMIT" bash <"$CHECKOUT/install.sh" >"$W/default-ref.out" 2>&1) ||
+	{ cat "$W/default-ref.out" >&2; fail "the piped install with the default ref failed"; }
+grep -F "Cloning file://$W/mirror at $DEFAULT_REF..." "$W/default-ref.out" >/dev/null || { cat "$W/default-ref.out" >&2; fail "install.sh did not clone $DEFAULT_REF"; }
+grep -F "Cloned commit $TAG_COMMIT" "$W/default-ref.out" >/dev/null || { cat "$W/default-ref.out" >&2; fail "install.sh did not build $TAG_COMMIT"; }
+[ ! -e "$PD" ] || fail "the DESTDIR install wrote into the prefix $PD"
+[ "$(fileset "$SD$PD")" = "$want_files" ] || { fileset "$SD" >&2; fail "the default-ref install staged the wrong set of files"; }
+[ "$(PKG_CONFIG_PATH="$SD$PD/lib/pkgconfig" pkg-config --modversion gusset)" = "$EXPECT_VERSION" ] || fail "the default-ref install's .pc version is not Cargo.toml's"
+[ "$(PKG_CONFIG_PATH="$SD$PD/lib/pkgconfig" pkg-config --variable=libdir gusset)" = "$PD/lib" ] || fail "the staged .pc does not name the final libdir $PD/lib"
 
 printf '\nwalkthrough: OK (version %s, %s)\n' "$EXPECT_VERSION" "$(uname -sm)"

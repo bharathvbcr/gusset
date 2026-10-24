@@ -1,63 +1,71 @@
 # Changelog
 
-## [Unreleased] - 2026-10-24 · One probe switch per workflow, and the Skip contract written down
+## [0.0.3] - 2026-10-24
+
+Release since v0.0.2 (`b6f5200`). It fixes a write-after-free that v0.0.2 shipped (Security, below), and only this release is supported (`SECURITY.md`). The C ABI is unchanged: 17 exports, ABI layout version 2, and `gusset.h` differs from v0.0.2 only in comments. The Go API gains `Handle.Discard`, the thirteenth entry point, and the exported sentinels `ErrClosed`, `ErrNilHandle`, `ErrNilContext`, `ErrNilBuffer` and `ErrInputTooLarge`. One Go behaviour change: a `WaitBuffer` that loses a race with `Close` returns a buffer whose `Bytes` is nil instead of `ErrClosed`. `install.sh` defaults to this tag and refuses, before building, a tree whose `make install` ignores `DESTDIR`; `tools/ci/lint.sh version-parity` holds CHANGELOG, `SECURITY.md`, `install.sh` and `docs/adoption.md` to the version in `Cargo.toml`. The `FFI_ERR` to `FFI_BAD_ARG` status change (`ft-3d60ee16`) is not in this release; it ships in the next one with its own note. The dated sections after Security are the entries as they landed on `main`, newest first.
+
+### Security
+
+- **v0.0.2 and earlier: `WaitBuffer` could write a result into freed memory (I1).** Affected: 0.0.2 and earlier. Patched: 0.0.3, by `38f0296`. For an inline result, `WaitBuffer` allocated a Rust buffer, took its view with `Bytes` (which releases `cgoMu` on return) and copied the result into it with no lock held. `Close` frees every buffer of the handle under that lock, so a `Close` in the gap freed the buffer first and up to 4 KiB of result landed in a freed C-heap chunk. The buffer is now filled before `cgoMu` is released. It needs a `Close` racing a `WaitBuffer` on the same handle. `TestWaitBuffer_CloseCannotFreeTheResultBeingFilled` holds the window open and fails on the old code; the 2026-10-12 section below has the details. Upgrade to v0.0.3: there is no backport. A GitHub security advisory will follow.
+
+### 2026-10-24 · One probe switch per workflow, and the Skip contract written down
 
 From the 2026-10-23 audit of `ft-1f4a1228`, the hostprobe contract criterion and A-9 (approved as a fenced follow-up once main was green). Workflow and test changes only: no runtime, export, ABI or public Go API change, and no hot path, so no benchmark delta is claimed. GitHub Actions has not run this tree; the step and job names are unchanged, so the required checks are too.
 
-### CI
+#### CI
 - **`GUSSET_REQUIRE_PROBES: '1'` is set once, in the top-level `env:` of `matrix.yml`, `nightly.yml` and `tip.yml` (I4).** The 25 step-level copies are gone. `adopter.yml` runs no `go test` and does not carry it. No step needs the switch absent: `internal/hostprobe/probe_test.go` strips it from its own child and passes with the parent set to `1` or `0`.
 - **`TestWorkflowLevelProbeEnv` replaces the step-level shell model.** This reverses the 2026-10-13 approval of that model. It required every `go test` step to see exactly `1` through `export`, `unset`, prefixes and `env(1)`, in 563 lines of `tests/ci/workflow_supplychain_test.go`. The new rule needs no shell parsing: the entry equals `'1'` in the top-level `env:` of every workflow that runs `go test`, is absent from a workflow that runs none, and the name appears on no other line of any workflow, comments included. Twenty planted violations fail it, among them a step-level override, a job-level env, a shell `export`/`unset`/prefix, a missing workflow env, values other than `'1'`, a duplicate entry and flow style. On the pre-change workflows it reports all 25 step-level copies and the three missing workflow entries. Net: 118 lines added and 530 removed in that file.
 - Not modeled: a Go test reached only through `make` or a script (every workflow that runs one also runs `go test` directly, and the test pins those three), and `env -i`, which clears the variable without naming it.
 
-### Tests
+#### Tests
 - **`hostprobe.Skip` states its contract.** It is only for a condition a quiet CI runner never meets: real host load or noise. It is never for a deterministic platform or runtime property, which needs a fix or a platform gate. `TestSerialCall_LeavesAPForOtherGoroutines` broke it: its idle baseline sat on Go's Linux 1 ms netpoller floor (`epoll_wait(1)`) and fired on every Linux runner until caebc32. The nine call sites were checked against the contract. All nine pass, with no SKIP, on every Linux and macOS lane of Matrix 40070336468 (96ddc24) and 40068268871 (ec86583), with the switch on. Eight compare a probe against a 250 ms to 2.5 s job that ignores cancellation. The ninth (the bystander baseline) has a 100 µs bound against a 0.5-17 µs baseline measured on GitHub runners (run 40058658715). None needed a fix.
 
-## [Unreleased] - 2026-10-23 · Nightly failures report themselves and keep their evidence
+### 2026-10-23 · Nightly failures report themselves and keep their evidence
 
 From `ft-987c804c`. Test and workflow changes only: no export signature, ABI or public Go API change. GitHub Actions has not run this tree. The criteria that need three consecutive green nightlies are open.
 
-### CI
+#### CI
 - **Miri is bounded at 240 minutes (I4).** It had no `timeout-minutes` and was cancelled at GitHub's 6 h default on 2026-10-15..17 and 2026-10-23, before the ring seed sweep ran. `one_cut_evicts_what_line_by_line_eviction_does` took 3 h 30 m of job 117993651499. It now runs 20 rounds under `cfg(miri)` and 2000 elsewhere, as `pool::ring`'s handshake test does. Under Miri on darwin the 20 rounds took 206 s. On 2026-10-19 the rest of the lib suite and the seed sweep took under 2 minutes in CI. Since then every Miri run was cancelled inside this test, and no run has reached the tests added after 10-19. One of those, `pool::tests::open_refuses_a_descriptor_that_is_not_a_pipe_write_end` (924479b), failed under Miri on darwin with `unsupported operation: fcntl ... F_GETFL`. Like its fd-checking neighbours, it is now `#[cfg_attr(miri, ignore)]`.
 - **`ffi_exports` runs as five 60 s processes instead of one 300 s run.** Under ASan, each handle open/close keeps about 78 KB of RSS that is never returned. RSS stays flat at 26 MB without a sanitizer, so this is not a Gusset leak. A 300 s run crossed the 2048 MB limit with a 26 MB live heap, the second cause of the nightly OOM after the 1 GiB lengths. Each 60 s process stays well under the limit, which still catches a real out-of-memory. Total time and corpus are unchanged.
 - **A cancelled or timed-out nightly job files an issue.** A job that hits its timeout concludes `cancelled`, and `failure()` is false for that (run 38710039955: Miri cancelled, report skipped). The report job runs on `always()` when any needed job failed, was cancelled or was skipped. Its body names jobs by result. If every job succeeded, it files nothing.
 - **cargo-fuzz uploads `fuzz/artifacts/` on failure**, with the upload-artifact SHA go-fuzz pins. The `ffi_exports` OOM input from 39930332461 was lost because nothing uploaded it.
 - **`tests/ci/workflow_failure_evidence_test.go` holds these rules.** Every job that runs `cargo fuzz` or Go fuzzing has an on-failure upload covering the tree that fuzzer writes to. The report job's `needs` list every other nightly job. Its `if:` covers `'failure'` and `'cancelled'`, and its body names cancelled jobs. Miri's bound is 1..240. Each rule fails on the pre-change `nightly.yml` and on planted fixtures. It is a new file, so PR #5's edits to `workflow_supplychain_test.go` do not collide with it.
 
-### Harness
+#### Harness
 - **The hammer's abandon oracle no longer reports a correct result as corruption (I4).** `opAbandon` sent `[9, k]` with an empty body 1 time in 6000. Mode 9 echoes the whole input when nothing follows its prefix, so the engine returned `09 0k` and the oracle wanted 0 bytes. That is the `abandon: corrupted result: got 2 bytes, want 0` of nightlies 39575563846 and 39754401724. The body is now 1+ bytes, as the other mode-9 builders' are. `TestHammer_AbandonInputNeverHasAnEmptyBody` pins the echo. It draws from a seed whose fifth draw was empty under the old builder, so it fails there and takes under a second with `-race`. The three recorded seeds replay green for 30 s each on darwin, which has no heap-check leg.
 - **`FuzzDiagnosticEngineNeverAborts` never leaves a closed handle for the next input.** When Close or the reopen failed after a poisoning input, the target Fatalf'd with the closed handle still in place. The minimizer then reported `gusset: handle is closed` for everything (39112666661, GitHub issue #4). The poisoned handle now leaves the slot first and is always closed, and the replacement is opened before any report. A failed Open is retried, and reported as itself, on the next input. A planted Close failure and a planted reopen failure each report their own message; the old ordering reports `handle is closed`.
 - **The 2026-10-18 crash file is committed as recovered, not reconstructed.** `tests/pitfalls/testdata/fuzz/FuzzDiagnosticEngineNeverAborts/582528ddfad69eb5` is the file from artifact 12130769765, byte for byte: `[]byte("0")`. The minimizer produced it against the closed handle, and the artifact did not keep the original 31-byte input, so that first failure's cause is still unknown. The file passes on a fresh handle. On darwin, 4000 poison-and-reopen cycles left descriptors at 5 and OS threads at 11 (from 6), with flat cycle time, and a 240 s local fuzz run never fell below 52 execs/s. Neither supports descriptor or thread exhaustion there. Linux was not measured.
 
-## [Unreleased] - 2026-10-23 · Isolate keeps finished results and drains on progress
+### 2026-10-23 · Isolate keeps finished results and drains on progress
 
 From the 2026-10-23 audit of `gs-isolate-corrupt-frame-hang`, items B-2 to B-6 and the criterion 11 amendment. Everything is in `internal/isolate`, which has no importer outside its package. No runtime, export, ABI or public Go API change, and no hot path, so no benchmark delta is claimed. Run on darwin/arm64 only; GitHub Actions has not run this tree. Each new test fails on 2ed9a29's `proc.go`.
 
-### Isolate
+#### Isolate
 - **A result stored before the worker died is returned by `Wait` (I2, I4).** The reader's exit used to delete every ticket, so `Wait` returned the worker's poison for a job that had already finished. A stored result now stays until `Wait`, `Discard` or `Close` takes it. In-flight tickets and every later `Submit` still get `ErrPoisoned`. `TestProc_StoredResultSurvivesWorkerDeath` fails before the fix.
 - **The drain windows restart on progress (I3).** After the worker exits, the reaper's 200 ms window restarts while frames are still delivered. The reader's 50 ms probe is re-armed after each frame instead of once. Before the fix, frames arriving 50 ms apart after the exit lost 6 of 10, and frames 5 ms apart behind the probe lost 12 or 13 of 20.
 - **`Submit` refuses once the worker has exited (I4).** It used to write to the dead worker's stdin and wait for the reader to latch. That bounds the drain: only tickets in flight at the exit can extend it.
 - **Stale code.** `ProtocolOut` loses a nil check that could not fire. The package comment says responses run on the `ExtraFiles` protocol pipe, not stdout.
 
-### Tests
+#### Tests
 - **`TestProc_CancelSendDoesNotPinTheWriteLock` closes with a 100 ms budget (I4).** The deaf worker ignores stdin, so the public `Close` waited out its 30 s budget before the kill. The test took 33.10 s and now takes 3.14 s.
 - **The grandchild fixture starts its grandchild before hello.** A kill right after `Start` could beat the grandchild to the pipe, and the test then never opened the drain window it was about.
 
-### Decisions
+#### Decisions
 - Four rows dated 2026-10-23 in DECISIONS:
   - stored results survive worker death;
   - a write deadline poisons even when 0 bytes were written (kept fail-closed; a counting writer was rejected);
   - the progress-based drain, with the limits that stay wall-clock;
   - the typed-nil trace-carrier recover duplicated in `readContext`, so the public surface stays at 13 Go entry points.
 
-## [Unreleased] - 2026-10-23 · Main green again: the two Linux test bugs, new benchmarks, masked steps
+### 2026-10-23 · Main green again: the two Linux test bugs, new benchmarks, masked steps
 
 From the 2026-10-23 audit: tracker `ft-97faf4f4`, plus `ft-c689767b`, `gs-isolate-corrupt-frame-hang` and `ft-1f4a1228`. No runtime, export, ABI or public Go API change. Nothing in this set touches a hot path, so no benchmark delta is claimed. 320c56c was pushed directly to main on 2026-10-19 and Matrix 39270656716 was red in 8 jobs; this set fixes all three causes. Linux evidence is from the throwaway branch `probe/w1-linux-evidence` (run 40058658715).
 
-### Tests
+#### Tests
 - **The bystander wake test no longer fails on every Linux host (I4).** Its baseline timed naps in an idle process. On Linux an idle 200 µs nap wakes about 860 µs late, because the netpoller rounds a sub-millisecond wait up to `epoll_wait(1)`. The test skipped as "too noisy", and `GUSSET_REQUIRE_PROBES` made that a failure. The baseline now runs with a goroutine cycling the scheduler, which is the regime of a correct Call: 2–5 µs on Linux runners. On Linux the pre-fix gate wakes 6.3–14 ms late and fails 20 of 20 runs; the fixed build wakes 1.5–5 µs late.
 - **The close-on-exec test no longer mistakes Go's cgroup fd for a leak (I1).** On Linux the Go runtime holds the cgroup `cpu.max` at the fd number exec just freed. The exec probe now compares descriptor identity (`dev:ino` of the protocol pipe) instead of asking whether fd 3 is open. Removing `CloseOnExec` from `ProtocolOut` fails it.
 
-### CI
+#### CI
 - **A benchmark the change adds is a `::notice`, not a failure.** Base-only rows (dropped or renamed benchmarks) still fail, and a rename still fails. Allow-list names match with or without the `-N` suffix.
 - **Independent steps run after an unrelated red.** These steps now carry `if: success() || failure()`, and `tests/ci` pins them:
   - the simd suite;
@@ -65,94 +73,94 @@ From the 2026-10-23 audit: tracker `ft-97faf4f4`, plus `ft-c689767b`, `gs-isolat
   - the allocator interop race and fallback steps;
   - the bench allocation gate.
 
-### Process
+#### Process
 - **`main` is protected.** A PR is required, and the 23 Matrix and adopter checks are required, strict and enforced for admins. See DECISIONS 2026-10-23, which also records keeping `gusset_buf_alloc` uncapped and splitting iceoryx2-go PR #1.
 
-## [Unreleased] - 2026-10-23 · The step-5 check reads the umbrella's own output, and gussetvet takes build tags
+### 2026-10-23 · The step-5 check reads the umbrella's own output, and gussetvet takes build tags
 
 From `ft-0f6a723d` (residuals C-8, C-9 and C-10 of the 2026-10-23 audit). No export signature, ABI or public Go API change. `gussetvet` gains a `-tags` flag. GitHub Actions has not run this tree.
 
-### Adopter
+#### Adopter
 - **"Step 5 snippet compiled" comes from the umbrella's build script only (I4).** The walkthrough grepped every build-script output under the umbrella's `target/release/build`, and gusset's own allocator probe prints the same `cargo::rustc-cfg=gusset_allocator_api` line. With the probe forced on (the nightly `step5-snippet` job), a document `build.rs` that set nothing still printed "compiled", so `GUSSET_REQUIRE_STEP5=1` could not fail. The check reads only the `[package]` named in the document's step-1 block, in both cargo layouts: `build/<package>-<hash>/output` (stable 1.99) and `build/<package>/<hash>/run/stdout` (nightly-2026-10-05). No output, or two, is a failure: the check did not run. A copy of the document whose `build.rs` reads `DEP_GUSSET_ALLOCATOR_API_WRONG` now fails under `GUSSET_REQUIRE_STEP5=1`.
 - **A leftover `internal/ffi/libgusset.a` no longer fails a local run.** The file is ignored, and the walkthrough asserted it did not exist after the installs. A dev checkout that already held one failed with "an install wrote libgusset.a". It now takes the file's state (absent, or its `cksum`) before the installs and fails only if `make install` or `install.sh` creates, rewrites or removes it. CI checkouts are clean, so CI behaviour is unchanged.
 - **The walkthrough also runs the installed `gussetvet` with `-tags gusset_pkgconfig`** on the adopter's shim, the tag Option A builds with.
 
-### gussetvet
+#### gussetvet
 - **`-tags` selects files the way `go build -tags` does, and R1 reads the same files as R5 (I4).** R5 matched files with `build.Default`, with no tags, so a `//go:build gusset_pkgconfig` shim (Option A) was never checked. R1 walked every `.go` file under the directory. A `C.<export>` reference in a `//go:build ignore` file, another GOOS's file or a `_test.go` file therefore counted as a wrapper that no build compiles. Both rules now read one list: the non-test `.go` files that `MatchFile` accepts under the default context plus `-tags` (comma-separated). A tag that is not a build-constraint identifier, such as go build's legacy space-separated form, is a usage error. R4 and the `//export` scan still walk every file in the module whatever its constraints.
 
-## [Unreleased] - 2026-10-23 · The hashed archive is the linked archive
+### 2026-10-23 · The hashed archive is the linked archive
 
 From `ft-1a7e8a99`. No export signature, ABI or public Go API change. `ffi.go`'s LDFLAGS and every workflow are unchanged. GitHub Actions has not run this tree. No benchmark baseline was recorded.
 
-### Build
+#### Build
 - **`make build` refuses a redirected cargo target directory (I6).** With `CARGO_TARGET_DIR=/x`, cargo built `/x/release/libgusset.a`, while cgo linked and `gen.go` hashed `./target/release/libgusset.a`. That was an old archive, linked silently, or no archive and a failed link. `build`, `test`, `bench`, `bench-crossover` and `bench-scaling` now stop before running anything, naming both archives. `ci-local` stops through `build`. The check is a `$(error)`, so `make -n` refuses too. `CARGO_TARGET_DIR=target` and the absolute path of `./target` still pass. `install` still honours the variable, because it does not link Go against the archive. A `build.target-dir` in a cargo config file is not detected: the Makefile reads only the environment, as `install` does.
 - **`go generate ./internal/ffi` fails when there is no archive.** It used to write a placeholder hash over the tracked file and exit 0. It now exits 1 and lists each path it searched, which are the `-L` directories in `ffi.go`, in the same order. It writes nothing. When `CARGO_TARGET_DIR` is set, it says that cargo writes there and that cgo does not link from it. An empty or unreadable archive is also an error. It is not a reason to try the next path, because the linker would stop at that file too. The write is a rename, and an unchanged hash is not rewritten.
 - **The archive hash is untracked.** `gen.go` writes `internal/ffi/zz_archive_hash.go`, which is gitignored. This follows `bench/r14/host/zz_archives.go`. `internal/ffi/archive_hash.go` stays tracked as a stub that declares nothing and that nothing rewrites. The stub is kept because it carries no build tag, which `unsupported.go` relies on, and because the adopter walkthrough checksums it. A checkout without the generated file builds the same. Running `go generate` no longer dirties the tree or needs an "update archive hash" commit. The mechanism chosen is the ignored file with a committed stub. A runtime build identity checked in `init` would widen the ABI and was not added.
 - **AGENTS.md no longer says CI uses `go build -a`.** No workflow does. The row now says that `make build` runs `go generate` and that only some CI jobs do.
 
-### Tests
+#### Tests
 - `internal/ffi/gen_test.go` runs a temp copy of `gen.go`. With no archive, it checks the non-zero exit, that every searched path is named, and that the stub and any previous hash are byte-identical. It checks that release wins over debug, as it does for the linker, and that the hash lands in the ignored file in gofmt form. It checks that an empty archive fails, that the hash file is ignored and untracked, that the stub declares nothing, and that the placeholder string is gone from the tree. The searched paths are compared against the `-L` list parsed from `ffi.go`, so the two cannot drift.
 - `tests/ci/makefile_target_dir_test.go` runs `make -n` for each guarded target with a temporary `CARGO_TARGET_DIR`. It checks that each target refuses, names both archives and prints no command first. It checks that `unset`, `target` and the absolute `./target/` are accepted, and that `install` still takes the redirected archive.
 
-## [Unreleased] - 2026-10-23 · The ffi_exports fuzz target commits at most 1 MiB per buffer
+### 2026-10-23 · The ffi_exports fuzz target commits at most 1 MiB per buffer
 
 From `gs-boundary-defence-in-depth` (audit 2026-10-23, A-4 and B-7). No export signature, ABI, default or public Go API change. Raw `gusset_buf_alloc` stays uncapped, as the owner decided on 2026-10-23. GitHub Actions has not run this tree, so the nightly cargo-fuzz job has not gone green.
 
-### Fuzz
+#### Fuzz
 - **Op 2 of `ffi_exports` never commits more than 1 MiB per allocation (I1, I2).** Its hostile case passed `c.u64() as usize` straight through, so any valid length up to `MAX_BUFFER_BYTES` (1 GiB) was allocated. `BUFFER_ALIGN` is 64, so `alloc_zeroed` writes every byte. A crafted 11-byte input reproduces it: `libFuzzer: out-of-memory (malloc(1073741824))` from `RawBuffer::allocate_with`. The hostile case now draws only from `MAX_BUFFER_BYTES + 1` up to `usize::MAX`, which is refused before the allocator runs. The valid case is at most `MAX_REAL_BUFFER`.
 - **The bound has its own file and tests.** `crates/gusset/tests/ffi_exports_bound.rs` holds `MAX_OPS`, `MAX_REAL_BUFFER`, `MAX_JOB_OUTPUT`, `MAX_LIVE_BYTES` (64 MiB) and `buf_alloc_len`. The fuzz target includes it by path, and `cargo test --workspace` runs its tests. They sweep every selector against the library's own `check_buffer_len` without allocating. Both fail on the old length choice (`selector 3, raw 0x20000000: length 536870912 would be committed`). A `const` assertion fails the build if `MAX_OPS` × (`MAX_REAL_BUFFER` + `MAX_JOB_OUTPUT`) exceeds `MAX_LIVE_BYTES`. While it runs, the target asserts both bounds after every call.
 - **Still red: RSS grows on the handle open/close path under ASan.** A 300 s local run with the nightly flags (nightly-2026-10-05, macOS arm64, `-malloc_limit_mb=2` added) still reached `out-of-memory (used: 2300Mb; limit: 2048Mb)` after about 29k execs, with a live heap of 26 MB. An empty input only opens and closes a two-worker handle. Peak RSS for it rose from 240 MB at 2,000 runs to 1,644 MB at 20,000 under ASan. Rebuilt without a sanitizer (`-s none`), it was 26 MB at both counts. With a one-worker handle it was 1,199 MB at 20,000, so part of the growth scales with worker threads and part does not. That split is inferred from one run each. `quarantine_size_mb=0`, `detect_stack_use_after_return=0` and `malloc_context_size=0` did not remove it. Linux was not measured. The green-gate criterion stays open.
 
-### Boundary docs
+#### Boundary docs
 - **`Handle::open` names the one refusal that changes the caller's descriptor (I1).** On Darwin, if `F_SETNOSIGPIPE` fails and the `F_SETFL` that restores the saved flags also fails, `O_NONBLOCK` stays set. The error names both failures.
 - **`gusset.h` states what `gusset_buf_alloc` commits.** It commits `len` zero-filled bytes per call, for any `len` up to `GUSSET_MAX_BUFFER_BYTES` (1 GiB). It has no lower cap and no cross-call budget (`WithBufferBudget` is Go-only and opt-in), so a C host must cap the length itself. This is a comment only. The default and the allocator are unchanged (DECISIONS 2026-09-24, 2026-09-25, 2026-10-23).
 
-## [Unreleased] - 2026-10-13 · Unsupported targets fail with the named error
+### 2026-10-13 · Unsupported targets fail with the named error
 
 From `ft-9977d2b2`. No export signature, ABI or public Go API change. GitHub Actions has not run this tree. No benchmark baseline was recorded.
 
-### Platform
+#### Platform
 - **A target outside linux and macOS fails in `lib.rs` (I4).** The gate is an allow-list (`target_os` linux or macos), and the rest of the crate is cfg'd out with it, so rustc does not also typecheck `pool::sys`. FreeBSD and illumos stop at the existing `compile_error!` text. They do not fail later with E0425 on `pthread_getattr_np`. OpenBSD's standard library is not published for this host, so that target was not compiled; its `target_os` is outside the allow-list.
 - **A Go build without cgo, and a Windows Go build, fail in `internal/ffi`.** `unsupported.go` is compiled only for `!cgo` or `windows`. The compiler prints `gusset requires cgo on a unix target` and `docs/platforms.md`. A cgo build on darwin still compiles. The cross job asserts both refusals, and a workflow comment that only contains the phrase does not satisfy the test. `docs/platforms.md` states that cgo is required.
 
-## [Unreleased] - 2026-10-13 · Caller fd flags survive a refused Darwin open, and the recorder's lock cannot fail open
+### 2026-10-13 · Caller fd flags survive a refused Darwin open, and the recorder's lock cannot fail open
 
 From `gs-boundary-defence-in-depth`, `ft-0f6a723d` and `ft-568a30e2`. No export signature, ABI or public Go API change. GitHub Actions has not run this tree. No quiet-host benchmark baseline was recorded.
 
-### Boundary
+#### Boundary
 - **A failed `F_SETNOSIGPIPE` restores the caller's status flags (I1).** `set_nonblocking` saved `F_GETFL`, set `O_NONBLOCK`, then on Apple set `F_SETNOSIGPIPE`. If that second call failed, `O_NONBLOCK` stayed on a descriptor `open` had not taken. The flags captured before the call are written back with `F_SETFL`. If the restore itself fails, the error names both failures and `O_NONBLOCK` may remain. Success still sets `O_NONBLOCK` and, on Apple, `NOSIGPIPE`. A pre-set `O_APPEND` is kept.
 - **`gusset.h` says what `CallHeader.reserved` is.** The field name stays (it is ABI). The comment states it is the engine dispatch opcode, with 0 meaning the global handler, and that unknown flag bits are refused. A unit test fails if either sentence disappears. The `ffi_exports` fuzz target sets `reserved` from its input on every submit.
 - **`ffi_exports` stays at 15 of 17 exports.** DECISIONS 2026-10-13: `gusset_init` and `gusset_shutdown` stay out of that target. They are process-global. No lifecycle harness was added.
 
-### Adopter
+#### Adopter
 - **The step-5 snippet is compiled where the compiler has the Allocator API (I4).** On a compiler whose probe is off, the walkthrough emits a GitHub `::warning::` and continues. `GUSSET_REQUIRE_STEP5=1` turns that skip into a failure. Nightly job `step5-snippet` runs the walkthrough with the probe forced on. A copy of the snippet whose output type does not exist fails `cargo check`, and the compiler output must name that type. Nothing broken is left in the tree.
 - **Adopter prose uses the step-1 crate name.** `register_engine`, `BufferAlloc` and `ALLOCATOR_API` say `gusset_core::`. The quoted runtime error still says `gusset::set_engine_handler()`, which is what the library prints.
 - **gussetvet matches the files cgo would compile.** `#cgo noescape` and `#cgo nocallback` are one set for the package, required only for an export a file references as `C.<name>`. A second file whose only `#cgo` line is `LDFLAGS` is not a violation. Directives in a file the default build skips (`//go:build ignore`, another GOOS) do not satisfy a reference in a file the build compiles. Each physical line of a `/* */` preamble is reported at its own line.
 - **`gusset-example` is an rlib.** `crate-type` no longer includes `staticlib`. `libc` is a dev-dependency. No new `extern "C"` export. `docs/adoption.md` describes it that way.
 
-### Bench
+#### Bench
 - **The recorder no longer signals its own process group (I4).** Interrupt and terminate kill the child process group that run started, wait for it, and exit 130. The EXIT trap then removes that run's lock and temporary directory. The lock directory is renamed into place only after `owner` and `pgid` exist. A lock with no pgid is held for 2 seconds instead of being stolen. Variant rounds alternate: odd rounds in listed order, even rounds reversed, and the provenance header records that order.
 - **Dispatch benches use the existing API.** A Rust bench binary compares the diagnostic engine with `set_engine_handler` (opcode 0, which `register_engine` refuses) and with `register_engine(7)`. Go benches cover an already-expired `Call`, `Discard`, and `Stats`. No new C export and no second staticlib. A quiet-host baseline was not recorded.
 
-## [Unreleased] - 2026-10-13 · A required probe fails when it does not run, and a split isolate frame is kept
+### 2026-10-13 · A required probe fails when it does not run, and a split isolate frame is kept
 
 From `ft-1f4a1228` (CI gates) and `gs-isolate-corrupt-frame-hang` (isolate spike), plus the LiveBytes hygiene fix on the same branch (`ft-8a7cd8ef`). No export signature, ABI or public Go API change. `internal/hostprobe` is internal. The isolate work stays in `internal/isolate`. GitHub Actions has not run this tree.
 
-### CI
+#### CI
 - **A host-load skip fails when the workflow requires the probe (I4).** Those skips called `t.Skip`, so a job that set out to measure a live job passed when the probe landed after the job ended. They now go through `internal/hostprobe.Skip`. `GUSSET_REQUIRE_PROBES=1` turns the same message into `t.Fatalf`; any other value still skips. The race step and the `GOGC=1` step set that variable and include `./internal/...`. `tests/shutdown` is not added to those steps. The matrix and nightly fuzz steps set the same variable; `make fuzz` inherits it.
 - **The workflow checker follows the environment the `go test` process sees.** YAML `env` is the initial exported value. `export` sets and exports, and the last assignment on that command wins. A bare `NAME=1` changes the shell value and does not export, so it does not arm the gate. A prefix on `go test` applies only to that process. A step is armed only when every `go test` in it would see exactly `1`. A comment, an `echo` or `printf` of the assignment, and `unset` do not arm it. `gofmt` is `gofmt -l --`, so a tracked file named `-ok.go` is a path. benchgate treats a short sec/op row as a failure and keeps reading the table; `-allow-one-sided` defaults to empty. The shell forms still outside the model (`export -n`, `+=`, short-circuit, `eval`, `env -i`, and the rest named above `TestHostileLaunderDoesNotSetProbe`) are residuals, not covered gates.
 - **LiveBytes hygiene compares a quiesced baseline with `<=` (I1).** A process-wide drop below the snapshot, from an earlier test's `AddCleanup`, made `==` fail a clean run. Two consecutive stable samples are the baseline. A held buffer still fails. The 500 ms and 1 s bounds that could only false-fail are removed; the error and hang assertions stay.
 
-### Isolate
+#### Isolate
 - **A frame the drain deadline split is delivered (I3).** `io.ReadFull` copies a prefix that `detachBufio` cannot see, so the one-shot probe parsed the remainder at the wrong offset and both waiters failed (a mid-header read as an oversize length, a mid-body read as a timeout). An incomplete read is a `frameError` carrying those bytes, prepended after detach. A deadline that consumed nothing still probes once, for 50 ms. Oversize of a complete header, invalid JSON, and an unknown id stay fatal and are not retried.
 - **A deadline between the length write and the body write poisons the process.** The stream is marked poisoned and stdin is closed, so a writer blocked on the permit unblocks. `Wait`'s cancel runs on its own goroutine with a one-second budget. If the context ends while that goroutine is still waiting for the write lock, it returns without poisoning.
 - **One goroutine owns `cmd.Wait` after a successful `Start`.** The handshake-failure path still waits itself, before a `Proc` exists. After the process exits, `waitProc` gives the reader the 200 ms protocol drain, then sets a read deadline so a grandchild holding the write end cannot stall frames that are already readable. `read` does not call `cmd.Wait`.
 
-## [Unreleased] - 2026-10-12 · WaitBuffer no longer writes freed memory; the boundary refuses what it used to trust
+### 2026-10-12 · WaitBuffer no longer writes freed memory; the boundary refuses what it used to trust
 
 From the GitPulse board (`gs-boundary-defence-in-depth`, `ft-3d60ee16`, `ft-1f4a1228`, `ft-415ddf1f`, `ft-0f6a723d`, `ft-86b4ae63`, `gs-isolate-corrupt-frame-hang`, `gs-flaky-isolate-sigabrt-cgocheck2`, `ft-c689767b`) and what verifying them turned up. No export signature or ABI change. One Go behaviour change (`WaitBuffer` under a racing `Close`, below).
 
-### Fixed
+#### Fixed
 - **`WaitBuffer` wrote an inline result into freed memory when `Close` raced it (I1).** It allocated a Rust buffer, took the view with `Bytes` (which drops `cgoMu` on return) and copied with no lock held; a `Close` in that gap freed every buffer of the handle, so up to 4 KiB landed in a freed C-heap chunk. `allocBuffer` now fills the buffer before releasing `cgoMu`. A `Close` that wins now yields a buffer whose `Bytes` is nil, as the large-result path already did, instead of `ErrClosed`. `TestWaitBuffer_CloseCannotFreeTheResultBeingFilled` holds the window open with a test hook and fails every run with the copy outside the lock; under libgmalloc the old code faults at the copy. Plausibly the unidentified writer behind the 2026-09-30 hammer SIGSEGV (a 973-byte `gusset_take` finding a non-canonical tcache pointer in the 992-byte class) — inferred, not reproduced. A read-only sweep of the other 34 sites that view, free or keep alive Rust memory found no second instance.
 - **Concurrent respawns could leave a pool with no workers that still accepted work (I4).** Found in review of the sigaltstack change below before it landed; `respawn_lock` makes the slow path of `ensure_workers` single-flight, and `close` never takes it. `concurrent_respawn_does_not_lose_a_failed_worker` fails without it.
 - **`gusset_handle_open` refuses a completion descriptor that is not the write end of a pipe (I1).** It checked only that the fd was open, then set `O_NONBLOCK` on it and later closed it. Read ends, regular files and sockets are refused; the caller keeps the fd, flags unchanged.
@@ -163,19 +171,19 @@ From the GitPulse board (`gs-boundary-defence-in-depth`, `ft-3d60ee16`, `ft-1f4a
 - **`make install` (and `install.sh`) parse under macOS's make 3.81.** A literal `#` inside `$(shell …)` stopped it with "unterminated call to function 'shell'".
 - **gussetvet scans what Go builds.** It skips a subdirectory only when it has its own `go.mod` (as `./...` does), not because it holds a `.git` — an empty `.git` file would otherwise have hidden an R4 violation that still compiled — and `target`/`vendor` only at the module root.
 
-### CI and supply chain
+#### CI and supply chain
 - staticcheck pinned at v0.8.2 (reads Go 1.27.2 export data); the Go patch pin is gone and the lint log prints both versions.
 - Every cargo invocation in workflows, the Makefile, `tools/ci/lint.sh` and `bench/r14/run.sh` is `--locked`; cargo-fuzz installs at a pinned version and nightly proves `fuzz/Cargo.lock` current. `tests/ci` enforces locked cargo, pinned installs, read-only default permissions, and untrusted expressions reaching a shell only through `env:` — each rule with a planted violation that it catches.
 - The bench job fails when there was no base to compare against, unless the `allow_no_base` dispatch input says that is intended.
 - Soak runs every Soak test on Linux and macOS; memlimit also runs `TestMemLimit` under `GOMEMLIMIT`; nightly takes a `hammer_seed` input and fuzzes the new `ffi_exports` target, which drives 15 of the 17 raw C exports with adversarial arguments.
 - The lint gofmt step checks the files git would commit, not everything on disk.
 
-### Tests
+#### Tests
 - Invariant gaps closed with mutation proofs: the init ABI check is asserted behaviourally (`mustCheckABI` returns the verified report), R6 has `TestR6_SubmitCopiesTheInputBeforeItReturns`, Go's poison latch is asserted at the public surface, isolate frames (oversize, truncated, stalled, duplicate, unknown, out of order) are exercised against a live worker.
 - Load-robust timing: tests that failed on a correct build at load 100-400 now separate "correct" from "broken" by a wide margin (`Discard` instead of a racing deadline, relative-to-baseline scheduling checks, best-of-N, a 1 s engine against a 500 ms detach bound) rather than by a host-speed guess.
 - The adopter walkthrough gives each pkg-config build its own `GOCACHE` (Go caches pkg-config link flags without keying on `PKG_CONFIG_PATH`; `docs/adoption.md` says so) and tests gussetvet's "no export list" refusal for real.
 
-## [Unreleased] - 2026-10-10 · The hammer's seed replays, and a nightly leg watches the heap
+### 2026-10-10 · The hammer's seed replays, and a nightly leg watches the heap
 
 From `ft-94a2f74b` (the 2026-09-30 nightly SIGSEGV in `gusset_take`, run 36702124084, seed 1790763872967289580). No library, ABI or Go API change. Tests and CI only. **The crash is not fixed and its cause is not known.**
 
@@ -184,28 +192,28 @@ From `ft-94a2f74b` (the 2026-09-30 nightly SIGSEGV in `gusset_take`, run 3670212
 - **Replay, bounded (no repro).** 30 runs on the crash seed in an arm64 Linux container (Debian, glibc 2.36, Go 1.27.1, 4 CPUs, 60 s each, `GOGC=1`), all passed: 10 with `GLIBC_TUNABLES=glibc.malloc.tcache_count=0:glibc.malloc.perturb=165 GOTRACEBACK=crash`, 10 with Gusset built `-Zsanitizer=address` (nightly-2026-10-05) in a `go test -asan` binary, and 10 under `-race`. The 2026-10-09 audit ran 125 more, all passing. CI's x86-64 ubuntu-24.04 (glibc 2.39), where the crash happened, has not run either new leg yet.
 - **New nightly job `hammer-heap`.** It runs those two legs for 5 minutes each on ubuntu-latest, where a stray heap write faults at the write rather than in a later allocation on another thread. The ASan leg checks that `gusset_take` in the linked binary calls into ASan. Without that check, a link against the plain archive, or a cached link of it, would pass unexamined. `binutils`' `nm` lists no symbols for rustc's LTO objects, so the check disassembles the function. The job is in `report.needs`, so a failure opens an issue.
 
-## [Unreleased] - 2026-10-10 · gussetseal accepts what Apple's ar writes
+### 2026-10-10 · gussetseal accepts what Apple's ar writes
 
 From the 2026-10-09 audit (`gs-gussetseal-darwin-ar-padding`). No library, ABI or Go API change; `tools/gussetseal` only.
 
 - **A sealed object whose length is not a multiple of 8 is no longer refused on macOS (R14).** `archiveHoldsExactly` compared the archive's member to the verified object with `bytes.Equal`. Apple's `ar` pads a `#1/len` member with `\n` to a multiple of 8 inside the size it declares, so a 529-byte object comes back as a 536-byte member. Every unaligned `ld -r` output was refused and its archive deleted. CI runs 37944107330 and 37855657375 failed with "its member (2346576 bytes) differs from …libengine_a.o (2346575 bytes)", and the `R14 sealed staticlibs (macos-latest)` job had failed on every main push since 97947d0. A BSD member is now accepted when it is exactly the object followed by `\n` up to the next multiple of 8, and nothing else: its length must equal `roundup8(len(obj))`. NUL bytes, any other byte, a shorter or longer tail, or the same tail on a GNU-format member are still refused, and a GNU-format member must still match exactly. `TestArchiveOfAnUnalignedObjectIsAccepted` archives objects 1, 3 and 7 bytes past a multiple of 8 with the host `ar`. It fails on the old code on darwin, and on Linux it passes either way because GNU `ar` pads outside the size. `TestArchiveRefusesWhatIsNotPadding` covers the refusals on hand-built archives. The audit traced why R14 passed locally: the local `ld -r` happened to write 8-aligned output, so the failure depended on the toolchain and showed up only in CI.
 - **A negative BSD name length is refused instead of panicking.** A member named `#1/-5` sliced its data with a negative bound. `TestNegativeBSDNameLengthIsRefused` panicked on the old code.
 
-## [Unreleased] - 2026-10-10 · The log ring keeps its lines under contention
+### 2026-10-10 · The log ring keeps its lines under contention
 
 From the 2026-10-09 audit (`gs-log-ring-quadratic-eviction`). No export signature, ABI or Go API change; `gusset::ffi::log_dropped_total` is a new Rust diagnostic.
 
 - **Two threads logging onto a full ring no longer drop lines (I2, I3, I5).** `log_event` tried the ring lock 16 times, a `spin_loop` hint apart, then dropped the line. One eviction from a full ring outlasts that, and the ring stays full in normal use because Go drains it only on `DrainLogs`. With one thread writing short lines and another writing "completion write failed", "drain budget expired" and "WITHOUT sigaltstack" lines, about 15,000 of 16,200 lines were dropped per run (3 runs on the old code). Every caller now waits for the ring. The hold is bounded: nothing under the ring lock blocks, calls out or logs. The try-lock was there so a panic hook firing inside the critical section could not deadlock. `LOG_OWNER` now records which thread holds the ring (`thread_local!` is ruled out in `ffi/` by R7), and only a call re-entered on that thread drops its line. `log_ring_contention` asserts that no line is dropped and that the last critical line is in the ring. With a backported drop counter it fails 3/3 on the old code. `logging_while_holding_the_ring_drops_instead_of_deadlocking` covers re-entry.
 - **Eviction is one cut and one shift.** `append_line` found one newline per pass and shifted the rest of the ring each time, all under the ring lock. `evict_cut` scans forward once for the cut point, and `append_line` drains up to it once. Release build, best of 5: a 60 KiB line onto 8000 eight-byte lines went from 2,820 µs to 1.5-1.8 µs. Onto three large lines it went from 16.8 µs to 2.0 µs. Instrumented, the old loop shifted the ring 7,489 times for that line. `one_cut_evicts_what_line_by_line_eviction_does` compares `evict_cut` against the line-by-line loop on 2000 seeded rings. `a_long_line_onto_many_short_lines_evicts_in_one_cut` pins the 59,912-byte cut. `log_ring_matches_its_model` now runs that case through `check_log_ring` against the line-by-line model first. The unit tests call `evict_cut`, which does not exist on the old code, so there they fail to compile rather than fail.
 
-## [Unreleased] - 2026-10-10 · Submit sends without a sender mutex
+### 2026-10-10 · Submit sends without a sender mutex
 
 From GP-FEAT-001. No export signature, ABI or Go API change.
 
 - **Parallel submits no longer convoy on one Rust mutex (I3, I4).** `Handle::sender` was a `Mutex<Option<QueueSender>>` held across the cancel-flag lock and the queue's push lock; a native sample of `BenchmarkGussetCallParallel` put 986 of 1116 Rust mutex-wait samples in it. `close` now closes the queue directly and `submit` sends without it: the flag goes in before the send and comes out when the send is refused, and `close` closes the queue before `cancel_all`, so every queued unit's flag is cancelled and a refused submit leaves none. Interleaved A/B over 10 rounds against `23e925b`: CallParallel -6.6% (p=0.012), min 3325 -> 2707 ns; CallNoop unchanged (p=0.90). `submits_racing_close_leave_no_flag_and_none_is_accepted_after` covers the race. A performance change, so no test fails on the old code; the A/B is the evidence.
 - **Benchmarks re-recorded on this tree.** The main suite (`bench/results/darwin-arm64-go1.27.2-rust1.99.0.txt`) and the crossover and thread-pressure files replace the 2026-09-20 recordings, and `make docs` regenerated the README table and charts. The README's CallNoop `3.000 ± 33%` allocs/op was that old data: a memory profile puts today's single allocation at `drain.go:88`, the result bytes `Call` returns (1 alloc/op, 1 B/op). `docs/choosing.md`'s prose now matches the new crossover: about 1.24x raw cgo serial at ~7 µs jobs, 3.1x at ~0.7 µs, and 6x at ~7 µs under 18 goroutines. The 1.5x bar on 1-10 µs jobs is not met; `bench/results/gp-feat-001/README.md` has the profiles naming the contended locks and what comes next.
 
-## [Unreleased] - 2026-10-09 · The quiet handoff leaves a P for everyone else
+### 2026-10-09 · The quiet handoff leaves a P for everyone else
 
 From the 2026-10-09 audit (`gs-perf-quiet-handoff-gomaxprocs2`). No ABI or Go API change.
 
@@ -213,7 +221,7 @@ From the 2026-10-09 audit (`gs-perf-quiet-handoff-gomaxprocs2`). No ABI or Go AP
 - **The first certified record of `a4d4cd8`'s effect** (`bench/results/handoff-gomaxprocs/`): head, `a4d4cd8` reverted and the fix, interleaved over 10 rounds at GOMAXPROCS 2, 3, 4 and 8. At 2 the fix is no different from reverted (p = 0.97 on `GussetCallNoop`; minima within 3%); at 3, 4 and 8 it is no different from head and 37-42% faster than reverted. On this 18-core host head is faster at 2 because the Rust worker has a core of its own; that is given up for the goroutines it starved.
 - **`bench/record.sh` takes `RECORD_VARIANTS` and `RECORD_CPU`.** The first records several builds of the same benchmarks in one recording, interleaved by round and labelled with a `variant:` line for `benchstat -col variant`; the second passes `-cpu`. Both are off by default.
 
-## [Unreleased] - 2026-10-09 · The hygiene tests' baseline waits for the idle thread count
+### 2026-10-09 · The hygiene tests' baseline waits for the idle thread count
 
 No library, ABI or Go API change. Tests only.
 
@@ -221,14 +229,14 @@ No library, ABI or Go API change. Tests only.
 - **One owner for the `/proc/self` readers.** `count_dir`, `maps`, `mapped_bytes`, `Usage`, `baseline` and `settled` live in `tests/common/procfs.rs` (Linux only). Before, `resource_hygiene.rs` and the pool unit tests each had a copy. `drain_logs_boundaries.rs` now uses the log-ring drains in `tests/props/mod.rs` instead of its own `drain`/`drain_all`.
 - **`write_completion_gives_up_on_a_full_pipe_once_the_handle_closes` starts its clock before it spawns the 200 ms closer.** The closer could begin sleeping before `spawn` returned, so a slow spawn measured less than 200 ms even though the writer waited the whole time. The 2026-10-09 audit reports one such failure under TSan; a 150 ms delay injected after the spawn fails the old order and passes the new one.
 
-## [Unreleased] - 2026-10-09 · Buffer ids are unique across handles
+### 2026-10-09 · Buffer ids are unique across handles
 
 From the 2026-10-09 audit. No export signature, ABI or Go API change.
 
 - **An engine can no longer return another handle's buffer as its output (I4).** Buffer ids came from a per-handle counter starting at 1, but the engine registry is one per process, so a Rust host's engine could hold handle A's buffer id and return it while running on handle B. B usually had a buffer under the same number: B claimed its own buffer as the output, B's caller received B's bytes with no error, and A's buffer was never handed back. Buffer ids now come from one process-wide counter (`NEXT_BUFFER_ID`), the same way tickets already did (`NEXT_TICKET`), so a foreign id is unknown on B and the call fails with "no such live buffer". Go hosts could not reach this: their engines never see a `Handle`. `a_foreign_handles_buffer_id_is_refused_as_an_output` fails on the code before it. Allocation now takes one shared atomic, as submission already did for tickets. Nothing was measured.
 - **One ceiling test for both id counters.** `buffer_ids_stop_at_the_ceiling_instead_of_wrapping` pushed the handle's own counter to `1 << 63` and expected a handle's first id to be 1. Neither holds now, and a process-wide counter cannot be pushed to the ceiling while other tests run in parallel. That test and the ticket ceiling test are now `ids_stop_at_the_ceiling_instead_of_wrapping`, which checks `reserve_id` on a local counter. Both counters reserve ids through `reserve_id`.
 
-## [Unreleased] - 2026-10-08 · Every certified benchmark is charted
+### 2026-10-08 · Every certified benchmark is charted
 
 No library, ABI or Go API change. `DECISIONS.md` 2026-10-08 records the rule.
 
@@ -237,14 +245,14 @@ No library, ABI or Go API change. `DECISIONS.md` 2026-10-08 records the rule.
 - **`linux-amd64-vm/transport-after.txt` is not charted, and the check was not loosened.** Its arms disagree by 11% about how long the same Rust loop takes, over the 10% `calibrationTolerance`. The README had quoted ratios from it as hand-typed figures; those bullets are replaced by the charts and a pointer, and the VM README now marks that table as not certified. Re-record with `make bench-crossover` on that host.
 - **`ThreadPressure` bars are single runs** (`-count=1`, because a thread count is only attributable to the first transport sampled in a process). The chart and `docs/benchmarks.md` say a gap of a few threads is not resolved.
 
-## [Unreleased] - 2026-10-08 · Tests and CI that measured nothing now measure
+### 2026-10-08 · Tests and CI that measured nothing now measure
 
 - **`internal/isolate` (new, internal; the Go entry-point count stays 13).** A spike of whether one `Handle` contract can front both the in-process and an out-of-process mode: `Serve` runs a `*gusset.Handle` in a worker process, `Proc` is the host side over length-prefixed JSON frames, and both satisfy one `Caller` interface with parity tests. A worker killed by SIGKILL or SIGABRT fails its in-flight tickets and every later call with an error matching `ErrPoisoned`. The `Buffer` surface is not carried (`ErrBufferUnsupported`). `DECISIONS.md` and `docs/ipc.md` record the finding.
 - **The churn tests count threads and descriptors on darwin.** They read only `/proc`, so on macOS every thread and descriptor comparison was -1 against -1, a pass that measured nothing. `countOSThreads` now uses `ps -M` and `countFDs` falls back to `/dev/fd`; a platform that still cannot count skips instead of passing. A new churn test poisons a handle, closes it and opens a fresh one repeatedly, and requires goroutines, threads, descriptors, the Go heap and Rust live bytes back at a warm baseline.
 - **One set of Rust test helpers (`tests/common/mod.rs`) replaces per-file copies** (eight `make_pipes`, four ticket readers, three `Must` traits). `read_ticket` waits at most five seconds, so a lost ticket fails with a message rather than hanging the binary until CI's job timeout.
 - **CI:** the interleaved benchmark loop's unused counter is named `_` (actionlint SC2034).
 
-## [Unreleased] - 2026-10-08 · Repo tooling checks the tree and the file it was given
+### 2026-10-08 · Repo tooling checks the tree and the file it was given
 
 From the 2026-10-07 audit. Each fix has a test that fails on the code before it. No library, ABI or README change.
 
@@ -253,11 +261,11 @@ From the 2026-10-07 audit. Each fix has a test that fails on the code before it.
 - **benchdoc no longer drops benchmarks.** Rows whose names did not start with `Gusset` or `Channel` were skipped without a word, despite the promise that an unmapped benchmark shows up under its raw name. Only a numeric `-N` suffix is stripped now (`size-large` was cut to `size`), and a section for a custom metric no longer inherits the previous unit and overwrites the allocs/op column. `parseBenchstat` has table tests.
 - **docblock refuses a BEGIN or END marker that appears more than once.** Only the first block was rewritten, leaving a second copy of the numbers stale.
 
-## [Unreleased] - 2026-10-08 · A serial call's handoff no longer wakes a thread
+### 2026-10-08 · A serial call's handoff no longer wakes a thread
 
 - **A lone in-flight call reaches its caller without the scheduler (I4).** The drain reader yielded with `runtime.Gosched` on every poll of the completion ring, and each yield with a P idle and no thread spinning woke a thread with a system call (`pthread_cond_signal` on darwin); the waiter then parked on its channel, and the delivery that readied it paid another. Polled through a job, the wakes grew a serial `Call`'s overhead with the job's length: profiled over 200k serial calls on an M5 Pro, `runtime.wakep` cost 1.5 µs per call at ~0.7 µs jobs and 5.9 µs at ~7 µs jobs, 78% of it from the reader's own yields, while a Rust-only round trip stayed flat at ~3 µs. With at most one call in flight and more than one P, the waiter now polls its buffered result channel for up to 50 µs before parking, and the reader polls without yielding, yielding once after a delivery that readied a goroutine. With one P, or more than one call in flight, both behave as before. `TestSerialCall_HandsOffWithoutScheduling` counts sampled scheduler transitions over 4000 serial calls: 16k–30k before, 0–10 after. Exploratory interleaved min-of-5 on a loaded M5 Pro (not recorded through `bench/record.sh`; the machine was below its 60% idle floor): serial ~0.7 µs jobs −42%, ~7 µs jobs −30% (1.89x → 1.36x raw cgo), `CallNoop` −10% to −20%, `CallParallel` and the parallel crossover unchanged.
 
-## [Unreleased] - 2026-10-08 · R14: a second Rust staticlib is sealed, not forbidden
+### 2026-10-08 · R14: a second Rust staticlib is sealed, not forbidden
 
 No export, Go entry point or ABI change. `DECISIONS.md` 2026-10-08 and `docs/rfc-r14.md` carry the evidence.
 
@@ -266,14 +274,14 @@ No export, Go entry point or ABI change. `DECISIONS.md` 2026-10-08 and `docs/rfc
 - **`bench/r14/` harness, `r14` and `r14-musl` CI jobs.** Two independent engines sealed beside `libgusset.a`, driven concurrently with panics in all three; asserts per-engine panic hooks, allocators and thread-locals, under `-race`, `cgocheck2`, `-asan`, and with Gusset and both engines built `-Zsanitizer=address` (glibc), without LTO and across a 1.97/stable toolchain skew. Covers every supported target: linux x86-64 and arm64 (glibc), linux x86-64 musl, darwin arm64 and x86-64 (Rosetta). `run.sh build|check` splits cargo from the rest for emulated checks, and each link stamps the archives' hash into a generated file so a cached link is never reused. A skipped test or scenario fails the job.
 - **`docs/adoption.md` §1b** covers when to seal instead of joining the umbrella, and what a sealed engine gives up (Gusset's firewall and memory accounting).
 
-## [Unreleased] - 2026-10-08 · Structure, folded duplicates, retired Rust items
+### 2026-10-08 · Structure, folded duplicates, retired Rust items
 
 - **`pool/mod.rs` and `handle.go` are split along their seams; no public path moves.** `pool` keeps the shared types and adds private `worker`, `completion`, `buffers`, `engine`, `diagnostic` and `lifecycle` modules whose public items are re-exported, so rustdoc's item list is unchanged; the tests move to `pool/tests/`. `handle.go` becomes `handle.go`, `options.go`, `submit.go`, `wait.go`, `drain.go`, `ticket_reader.go` and `tickets.go`; `go doc -all .` is byte-identical.
 - **Near-duplicates have one owner.** The two caught-panic arms on a worker, the three buffer registrations, the eleven argument refusals and seven result tails of the handle exports, `queue::lock` (now `lock_recover`), the error-only cgo epilogues (`checkStatus`) and the pipe reader's second record parser (`nextPipe` now uses `parseBuffered`) are each one function. No behaviour changes. Kept, and still reported by `devmap clones`: `Cancel`/`BufFree` and `HandleClose`/`CancelAll` in `internal/ffi/ffi.go`, two-line cgo wrappers that differ only in the export they call (a shared caller moves the status onto the heap, one allocation per large-result `Wait`; the one shape that does not bypasses R5's `#cgo noescape` lines and DevMap still pairs it; see `checkStatus` and `DECISIONS.md` 2026-10-08), and the `cancel`/`buf_free` adapters in `ffi/mod.rs`'s test table, one per export by design.
 - **Removed from the Rust crate's public surface (no C ABI or Go change).** None had a caller outside its own tests, here or in the known adopters; `DECISIONS.md` 2026-10-08 has the evidence. `pool::sys::write_ticket` and `write_ticket_attempt` (a bounded writer production had replaced with `write_completion`; their two tests now test `write_completion`), `pool::sys::RawBuffer::to_vec`, `ffi::guard::ffi_guard` (the `Option` form of `ffi_guard_code`), `alloc::record_alloc` and `record_dealloc` (superseded by `count_buffer_alloc`/`count_buffer_dealloc`), and `JobContext::mark_finished` and `compute_duration` (the finish instant was set after the engine returned, so no reader ever saw it). `JobContext::total_duration` stays and always measures to now, which is what an engine mid-job already saw; it drops one `Instant::now()` per job from the worker. The public surface in the sense of AGENTS.md rule 4 (17 C exports, 13 Go entry points) is unchanged: these are rustdoc items of a 0.0.x crate that is not on crates.io, used by no adopter.
 - **gussetvet's R5 directive check reads the `import "C"` preamble only.** It treated every comment group mentioning `#cgo` as a preamble, so a doc comment naming a directive failed every export, and a preamble with no directives at all passed whenever another comment spelled them out. A directory with no preamble carrying `#cgo` lines is now an error, not a pass.
 
-## [Unreleased] - 2026-10-07 · Errors keep their meaning across the boundary
+### 2026-10-07 · Errors keep their meaning across the boundary
 
 From the 2026-10-07 audit. Each fix has a test that fails on the code before it; no export signature changed, so the ABI version and header signatures are unchanged.
 
@@ -285,27 +293,27 @@ From the 2026-10-07 audit. Each fix has a test that fails on the code before it;
 - **`gusset_cancel` / `gusset_cancel_all` are documented as they behave.** They return `FFI_OK` without reporting whether a ticket was found or how many were cancelled; `gusset.h`, the Rust docs and the Go wrappers now say so.
 - **Two races the new tests exposed.** `install_panic_hook` set its flag before installing the hook, so a concurrent caller (another handle opening, `gusset_init`) could return early and a panic in that window lost its location; it uses `Once` now. In tests only, the fault injector held one armed thread, so parallel tests disarmed each other (for `gusset_shutdown` that would have run a real shutdown); it keeps a set now.
 
-## [Unreleased] - 2026-10-07 · Bounds and validation at the public API
+### 2026-10-07 · Bounds and validation at the public API
 
 - **`Handle.Discard(ticket)` (new, the thirteenth Go entry point; I1, I4).** A result nobody Waits for was kept until `Close`, and since a finished `Submit` returns its permit nothing slowed a fire-and-forget caller down: results over 4 KiB piled up as Rust memory the Go GC cannot see. `Discard` frees a stored result at once and a running job's result when it lands, and the permit still comes back only when the work stops. It does not cancel the work. `Submit`'s doc now states the retention. `TestPitfall_DiscardReleasesUncollectedResults` measures the growth and the release.
 - **`WithPoolSize(0)` and `WithPoolSize(-1)` say what is wrong (I4).** They were refused as "pool_size exceeds maximum 1024"; the error is now "pool_size must be at least 1 (got N)", and an over-ceiling value names itself. A dead `> MaxPoolSize` check in `Open` is gone.
 - **A negative `WithBufferBudget` is refused by `Open`.** It was silently read as 0, which means unlimited.
 - **A refused `Handle::open` leaves the caller's descriptor alone (I4).** It set O_NONBLOCK (NOSIGPIPE on Darwin) before checking the pool size, so a refused open still changed the caller's fd. Arguments are now all checked first and the descriptor's mode changes only once the pool is up. An unreachable `pipe_write_fd < 0` branch is removed.
 
-## [Unreleased] - 2026-10-02 · Docs catch up with Close
+### 2026-10-02 · Docs catch up with Close
 
 - **`Close` is documented as bounded.** README, `docs/adoption.md` and `docs/choosing.md` still said `Close` has no budget. They now describe the 30-second join, the error when a worker outlasts it, and that the Rust pool stays allocated until that worker exits.
 - **`docs/adoption.md` covers engine registration and idle permits.** `register_engine` collisions and opcode 0 are refused; a `Submit` that nobody waits on returns its permit.
 - **`AGENTS.md` notes that GC-backstop closes are limited to four at a time.**
 
-## [Unreleased] - 2026-09-30 · Close, engine registration, and idle permits
+### 2026-09-30 · Close, engine registration, and idle permits
 
 - **`Close` is bounded (I3, I5).** It joins workers for at most 30 seconds. If one is still inside an engine call, `Close` returns an error and a background thread holds the pool until that worker exits, so the caller is not wedged and the pool is not freed under it. A close whose workers do exit still joins them and closes the pipe before returning. `close_returns_while_a_worker_ignores_cancel` fails against an unbounded join.
 - **`register_engine` reports collisions and refuses opcode 0.** A second registration of the same opcode returns an error and leaves the first handler. Opcode 0 is not inserted: dispatch never consults the registry for it. `register_engine_does_not_overwrite_an_opcode` and `register_engine_rejects_opcode_zero` fail against the silent insert.
 - **A `Submit` that nobody waits on returns its permit when the reader stores the result (I4).** The result stays until `Wait` or `Close`. `TestPitfall_SubmitWithoutWaitDoesNotWedgeThePool` fails while the permit stays held.
 - **Engine hooks stay process-global.** A panic poisons the handle and leaves the hook. `clear_engine_handlers` drops it, and the next handle does not run until the adopter registers again. `AdviseMemoryLimit` still does not see Metal or mmap memory; that limit is documented on the function, with no new API. `write_ticket` remains the test helper that gives up after 10s; production completion writes go through `write_completion`, which retries.
 
-## [Unreleased] - 2026-09-28 · Four audits of the Go/Rust boundary
+### 2026-09-28 · Four audits of the Go/Rust boundary
 
 Each fix below has a test that fails on the code before it; each commit names the invariant it protects.
 
@@ -322,7 +330,7 @@ Each fix below has a test that fails on the code before it; each commit names th
 - **A burst of handles dropped to the GC backstop no longer keeps a thread per handle.** Each backstop close joined its workers in cgo on its own goroutine, and Go never returns the Ms those calls used: 48 handles dropped in one GC left 46 threads behind for the life of the process. Backstop closes now take one of four slots first. The cleanup callback still only spawns a goroutine, so Go's single cleanup queue never waits; the goroutine waits, parked, holding no M. Explicit `Close` is unchanged. `TestBackstop_ABurstOfDroppedHandlesRetainsBoundedThreads` fails against the unbounded closer (+46 threads, bound 16).
 - **`cargo deny` checks transitive crates for maintenance too** (`unmaintained = "all"`, was `"workspace"`): gusset is linked into every host, so a dependency's dependency ships in them.
 
-## [Unreleased] - 2026-09-27 · One allocation per Call
+### 2026-09-27 · One allocation per Call
 
 - **Result channels are reused.** Each wait used to create a `chan callResult` with a buffer of one. Because `callResult` holds pointers, that is two allocations, the channel header and its buffer, and they were the only two a `Call` made. A per-handle free list, guarded by the mutex these paths already hold, hands them out again. A channel returns to the list only once it is empty and out of `pending`: every send happens under that mutex and removes the channel first, so no late send can reach a reused one. A channel that still holds a value is dropped rather than reused. The list never exceeds the pool size, because each waiter holds a permit.
   - Allocations: `Call`, `Submit` + `Wait` and a 64 KiB copy go from 2 to 1 per op. The one left is the result slice handed to the caller. The zero-copy path goes from 4 to 3.
@@ -335,7 +343,7 @@ Each fix below has a test that fails on the code before it; each commit names th
     - A 32-goroutine stress with deadlines firing mid-flight gets every caller its own result. Coverage confirms it reaches all three recycle sites.
     - Two mutants (recycling a channel that holds a value, and skipping the recycle on abandon) are each caught.
 
-## [Unreleased] - 2026-09-27 · Ring hardening, and where Gusset fits the other apps
+### 2026-09-27 · Ring hardening, and where Gusset fits the other apps
 
 - **Both completion-record parsers are fuzzed.** `FuzzTicketReaderPipeBytes` feeds arbitrary bytes to the pipe reader. `FuzzRingSlotDecode` puts arbitrary words into a published ring slot. Both run in `make fuzz` and in the CI fuzz job, which grows from about 6 to about 10 minutes (5 targets × 120 s).
 - **Close while the reader is parked on the ring is tested.** `TestCloseWhileReaderIsParkedOnTheRing` runs 40 rounds, idle and with a job in flight. `Close` returns, the waiter gets an answer, and the drain goroutine exits.

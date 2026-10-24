@@ -61,9 +61,9 @@ crate-type = ["staticlib"]
 [dependencies]
 # Renamed, because this crate cannot also be called `gusset`. Gusset is not on
 # crates.io: pin a release tag, or use `path = ".../gusset/crates/gusset"` for a
-# local checkout, as the known adopters do. `Handle.Discard` (step 4) is newer than
-# v0.0.2: until a later tag exists, use `rev = "<commit>"` or `path`.
-gusset_core = { package = "gusset", git = "https://github.com/bharathvbcr/gusset", tag = "v0.0.2" }
+# local checkout, as the known adopters do. `Handle.Discard` (step 4) needs v0.0.3
+# or later.
+gusset_core = { package = "gusset", git = "https://github.com/bharathvbcr/gusset", tag = "v0.0.3" }
 my-engine  = { path = "../my-engine" }
 
 [profile.release]

@@ -25,7 +25,7 @@ cd "${LINT_ROOT:-$here/../..}" || exit 1
 # shellcheck source=tools/ci/versions.env
 . "$here/versions.env"
 
-STEPS="gofmt go-vet gussetvet staticcheck govulncheck forbidden-patterns cargo-clippy cargo-fmt cargo-deny"
+STEPS="gofmt go-vet gussetvet staticcheck govulncheck forbidden-patterns version-parity cargo-clippy cargo-fmt cargo-deny"
 
 gobin=$(go env GOBIN 2>/dev/null)
 [ -n "$gobin" ] || gobin="$(go env GOPATH 2>/dev/null)/bin"
@@ -172,6 +172,59 @@ step_forbidden_patterns() {
 	# //nolint is golangci-lint syntax; staticcheck ignores it, so the
 	# suppression silently does nothing. Use `//lint:ignore <CHECK> <reason>`.
 	check '//nolint' '//nolint is not honored by staticcheck; use //lint:ignore <CHECK> <reason>'
+	return $fail
+}
+
+# The release version is typed once, in Cargo.toml's [workspace.package]; the
+# Makefile reads it through `cargo pkgid`. Four files cannot read it and say it
+# again, so each must agree with Cargo.toml:
+#   CHANGELOG.md      the newest `## [x.y.z]` heading ([Unreleased] ones skipped)
+#   SECURITY.md       the one supported row `vx.y.z` and the `< vx.y.z` row
+#   install.sh        GUSSET_DEFAULT_REF="vx.y.z", the tag a piped install clones
+#   docs/adoption.md  the gusset_core git dependency's tag = "vx.y.z"
+# Each must yield exactly one x.y.z: an input this cannot read is a FAIL, not a
+# match nobody checked.
+#
+# vp_check <what> <values>: <values> is what the input said, one per line.
+vp_check() {
+	vp_n=$(printf '%s' "$2" | grep -c '')
+	if [ "$vp_n" -ne 1 ]; then
+		echo "::error::version-parity: $1: found $vp_n values, want exactly one: $(printf '%s' "$2" | tr '\n' ' ')"
+		return 1
+	fi
+	if ! printf '%s\n' "$2" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+		echo "::error::version-parity: $1: '$2' is not x.y.z"
+		return 1
+	fi
+	if [ -n "$vp_want" ] && [ "$2" != "$vp_want" ]; then
+		echo "::error::version-parity: $1 says $2, Cargo.toml says $vp_want"
+		return 1
+	fi
+	echo "  $1: $2"
+}
+
+step_version_parity() {
+	for f in Cargo.toml CHANGELOG.md SECURITY.md install.sh docs/adoption.md; do
+		if [ ! -f "$f" ]; then
+			echo "::error::version-parity: $f is missing; the check did not run"
+			return 1
+		fi
+	done
+	vp_want=""
+	vp_cargo=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml)
+	vp_check "Cargo.toml [workspace.package] version" "$vp_cargo" || return 1
+	vp_want=$vp_cargo
+	fail=0
+	vp_check "CHANGELOG.md newest release heading" \
+		"$(grep -E '^## \[[0-9]' CHANGELOG.md | head -n 1 | sed 's/^## \[\([^]]*\)\].*/\1/')" || fail=1
+	vp_check "SECURITY.md supported row" \
+		"$(sed -n 's/^| *`v\([^`]*\)` *| *:white_check_mark: *|.*/\1/p' SECURITY.md)" || fail=1
+	vp_check "SECURITY.md unsupported row" \
+		"$(sed -n 's/^| *`< *v\([^`]*\)` *| *:x: *|.*/\1/p' SECURITY.md)" || fail=1
+	vp_check "install.sh GUSSET_DEFAULT_REF" \
+		"$(sed -n 's/^GUSSET_DEFAULT_REF="v\([^"]*\)"$/\1/p' install.sh)" || fail=1
+	vp_check "docs/adoption.md gusset_core tag" \
+		"$(sed -n 's/^gusset_core = {.* git = .*tag = "v\([^"]*\)".*/\1/p' docs/adoption.md)" || fail=1
 	return $fail
 }
 

@@ -373,9 +373,10 @@ at 3am".*
 and a named owner who reads the Rust. What is missing is not engineering care —
 it is mileage:
 
-- **v0.0.2, one adopter outside this repository.** The most recent audit found a
-  bug that made context deadlines decorative for any engine that does not
-  cooperate, in a tree that already had 100+ tests and a detailed audit trail.
+- **v0.0.3, one adopter outside this repository.** Audits keep finding real
+  defects: one made context deadlines decorative for any engine that does not
+  cooperate, and v0.0.2 shipped a `WaitBuffer` write-after-free that v0.0.3
+  fixes, in a tree that already had 100+ tests and a detailed audit trail.
   That is a healthy audit and an immature codebase at the same time: the defects
   still being found are ones only real use surfaces. You would be early.
 - **Unix only.** Windows is a `compile_error!`, not a gap. Completions travel
