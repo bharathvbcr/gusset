@@ -102,6 +102,42 @@ func TestHammerSeed_ReplaysTheRecordedSeed(t *testing.T) {
 	}
 }
 
+// The abandon oracle wants the body back. Mode 9 returns the body only when
+// something follows its two-byte prefix; with nothing after it the engine
+// echoes the prefix itself. Both halves are pinned here: the engine's echo of
+// an empty remainder, and a builder that never asks for one. The draws are
+// seeded; at 1 in 6000 an empty body is certain within them.
+func TestHammer_AbandonInputNeverHasAnEmptyBody(t *testing.T) {
+	r := rand.New(rand.NewPCG(1792574500396995391, 7))
+	for i := range 60_000 {
+		in, body := abandonInput(r)
+		if len(body) == 0 {
+			t.Fatalf("draw %d: empty body; mode 9 echoes % x and the oracle would want 0 bytes", i, in)
+		}
+		if in[0] != 9 || in[1] < 1 || in[1] > 4 || !bytes.Equal(in[2:], body) || body[0] != 0 {
+			t.Fatalf("draw %d: in % x is not [9, 1..4] followed by an echo body % x", i, in[:min(len(in), 8)], body[:min(len(body), 8)])
+		}
+	}
+
+	h, err := Open(WithPoolSize(1), WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, c := range []struct{ in, want []byte }{
+		{[]byte{9, 1}, []byte{9, 1}}, // empty remainder: the whole input
+		{[]byte{9, 1, 0}, []byte{0}},
+		{[]byte{9, 2, 0, 0xAB}, []byte{0, 0xAB}},
+	} {
+		out, err := h.Call(ctx, c.in)
+		if err != nil || !bytes.Equal(out, c.want) {
+			t.Errorf("Call(% x) = % x, %v; want % x", c.in, out, err, c.want)
+		}
+	}
+}
+
 // hammerSlot is one lane of handles: the live one, replaced when it is
 // poisoned or closed, and every state it ever held for the final checks.
 type hammerSlot struct {
@@ -246,6 +282,21 @@ func payload(r *rand.Rand, n int) []byte {
 		b[0] = 0 // diagnostic mode 0: echo
 	}
 	return b
+}
+
+// abandonInput builds opAbandon's job: diagnostic mode 9 (a delay of k ten-ms
+// units that never checks its context), then an echo body. The body is the
+// expected result, so it is at least one byte, as the other mode-9 builders'
+// are: mode 9 with nothing after its prefix echoes the whole input, prefix
+// included, and an empty body made the oracle want 0 bytes where the engine
+// correctly returned `09 0k` (nightly 39575563846 and 39754401724).
+func abandonInput(r *rand.Rand) (in, body []byte) {
+	body = payload(r, 1+r.IntN(6000))
+	if len(body) > inlineResultBytes-3 {
+		body = body[:inlineResultBytes-3]
+	}
+	in = append([]byte{9, byte(1 + r.IntN(4))}, body...)
+	return in, body
 }
 
 func (hm *hammer) ctx(r *rand.Rand) (context.Context, context.CancelFunc, bool) {
@@ -448,11 +499,7 @@ func (hm *hammer) step(s *hammerSlot, r *rand.Rand) {
 		hm.verify(op, out, want)
 
 	case opAbandon: // a non-cooperative job the caller walks away from
-		body := payload(r, r.IntN(6000))
-		if len(body) > inlineResultBytes-3 {
-			body = body[:inlineResultBytes-3]
-		}
-		in := append([]byte{9, byte(1 + r.IntN(4))}, body...)
+		in, body := abandonInput(r)
 		short := true
 		actx, acancel := context.WithTimeout(ctx, time.Duration(r.IntN(8000))*time.Microsecond)
 		out, err := h.Call(actx, in)
