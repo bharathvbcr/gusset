@@ -15,7 +15,8 @@
 #   GUSSET_REPO_URL   repository to clone (default: the upstream GitHub repository)
 #   GUSSET_PREFIX     install prefix (also PREFIX); GUSSET_LIBDIR, GUSSET_INCLUDEDIR,
 #                     GUSSET_BINDIR override the sub-directories
-#   DESTDIR           staging root, as for `make install`
+#   DESTDIR           staging root, as for `make install`. A tree whose make install
+#                     ignores DESTDIR (v0.0.2 and earlier) is refused before building
 #   CARGO_TARGET_DIR  where cargo builds; honoured
 #
 # The script builds the directory it lives in only when it was run from a file
@@ -24,7 +25,7 @@
 
 set -euo pipefail
 
-GUSSET_DEFAULT_REF="v0.0.2"
+GUSSET_DEFAULT_REF="v0.0.3"
 GUSSET_UPSTREAM_URL="https://github.com/bharathvbcr/gusset.git"
 
 BOLD=$'\033[1m'
@@ -84,6 +85,26 @@ if [ -z "$SRC" ]; then
 	if [ -n "${GUSSET_COMMIT:-}" ] && [ "$head" != "$GUSSET_COMMIT" ]; then
 		error "$REF resolves to $head, not the GUSSET_COMMIT $GUSSET_COMMIT; nothing was built"
 	fi
+fi
+
+# The tree's `make install` must honour DESTDIR. Step 4 hands it DESTDIR, LIBDIR
+# and PKGCONFIGDIR, and step 5 runs gussetvet from $DESTDIR$BINDIR. The install
+# recipe of v0.0.2 and earlier never reads DESTDIR: it copies into the prefix
+# itself, so a staged install writes into the real prefix and then fails to find
+# gussetvet under DESTDIR. This reads that tree's Makefile, before anything is
+# built: the recipe lines (tab-indented) of the `install:` rule must name
+# $(DESTDIR) or ${DESTDIR}. A missing Makefile or rule fails the same way.
+install_recipe_uses_destdir() { # makefile
+	awk '
+		/^install:/ { inr = 1; next }
+		inr && /^\t/ { if (index($0, "$(DESTDIR)") || index($0, "${DESTDIR}")) found = 1; next }
+		inr && (/^[ \t]*$/ || /^#/) { next }
+		inr { inr = 0 }
+		END { exit !found }
+	' "$1"
+}
+if [ ! -f "$SRC/Makefile" ] || ! install_recipe_uses_destdir "$SRC/Makefile"; then
+	error "the Makefile at ${REF:-$SRC} does not honour DESTDIR: its install recipe never uses \$(DESTDIR), so \`make install\` would write into the prefix itself (Gusset v0.0.2 and earlier). Nothing was built. Install $GUSSET_DEFAULT_REF or a later release tag."
 fi
 
 # 3. Prefix
