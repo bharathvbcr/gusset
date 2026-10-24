@@ -1,4 +1,4 @@
-.PHONY: all build test bench bench-crossover bench-scaling lint alloc-gate ci-local docs docs-check cross fuzz clean install install-build uninstall
+.PHONY: all linked-target-dir build test bench bench-crossover bench-scaling lint alloc-gate ci-local docs docs-check cross fuzz clean install install-build uninstall
 
 export PATH := $(PATH):$(shell go env GOPATH)/bin
 
@@ -31,14 +31,36 @@ GUSSET_VERSION = $(shell cargo pkgid -p gusset 2>/dev/null | sed 's/.*[$(HASH)@]
 
 all: build
 
-build:
+# The directory cgo links from. internal/ffi/ffi.go names
+# ${SRCDIR}/../../target/release and then target/debug in its default LDFLAGS,
+# and internal/ffi/gen.go hashes the first libgusset.a it finds there, in the
+# same order. A target that runs `cargo build` and then links Go against the
+# result is only honest when cargo wrote into this directory: with
+# CARGO_TARGET_DIR=/x, cargo builds /x/release/libgusset.a, cgo links whatever
+# ./target still holds (an old archive, or nothing), and the hash describes
+# that old archive. Those targets refuse instead, naming both archives.
+# `install` honours CARGO_TARGET_DIR (ARCHIVE above) and does not link Go
+# against the archive, so it does not take this check.
+LINKED_TARGET_DIR := $(CURDIR)/target
+TARGET_DIR_REFUSAL = cargo builds $(abspath $(TARGET_DIR))/release/libgusset.a \
+	but internal/ffi links and gen.go hashes $(LINKED_TARGET_DIR)/release/libgusset.a \
+	(CARGO_TARGET_DIR=$(CARGO_TARGET_DIR)). Unset CARGO_TARGET_DIR for this target \
+	or set it to $(LINKED_TARGET_DIR)
+
+# $(error) rather than a shell test, so `make -n build` refuses too: a dry run
+# that prints a plan which would link the wrong archive is the same lie.
+linked-target-dir:
+	$(if $(filter-out $(LINKED_TARGET_DIR),$(abspath $(TARGET_DIR))),$(error $(TARGET_DIR_REFUSAL)))
+
+build: linked-target-dir
 	cargo build --locked --release
 	go generate ./internal/ffi
 	go build ./...
 
-# Installing builds the archive and gussetvet only. `build` is not a dependency:
-# its `go generate` rewrites the tracked internal/ffi/archive_hash.go, and an
-# install must leave the source tree exactly as it found it.
+# Installing builds the archive and gussetvet only. `build` is not a
+# dependency: an install needs the archive, not a Go tree linked against it,
+# and it honours a CARGO_TARGET_DIR that `build` refuses. It also runs no
+# `go generate`, so it writes nothing into the source tree.
 install-build:
 	cargo build --locked --release
 
@@ -78,7 +100,7 @@ uninstall:
 	@rm -f $(call shq,$(DESTDIR)$(BINDIR))/gussetvet
 	@echo Gusset uninstalled from $(call shq,$(DESTDIR)$(PREFIX))
 
-test:
+test: linked-target-dir
 	cargo test --locked --workspace
 	go test -v ./...
 
@@ -109,7 +131,7 @@ SCALING_COUNT ?= 6
 # being careful.
 BENCH_RESULTS ?= bench/results/$(shell go env GOOS)-$(shell go env GOARCH)-go$(shell go env GOVERSION | sed 's/^go//')-rust$(shell rustc --version | cut -d' ' -f2).txt
 
-bench:
+bench: linked-target-dir
 	cargo build --locked --release
 	RECORD_DIR=. RECORD_PKG=./bench/... bench/record.sh $(BENCH_RESULTS) 1s $(BENCH_COUNT) .
 
@@ -127,7 +149,7 @@ bench:
 # budget: each iteration dispatches 512 concurrent calls, so a 1s budget would
 # take minutes to no extra effect.
 CROSS_SUFFIX ?= $(shell go env GOOS)-$(shell go env GOARCH)-go$(shell go env GOVERSION | sed 's/^go//')-rust$(shell rustc --version | cut -d' ' -f2).txt
-bench-crossover:
+bench-crossover: linked-target-dir
 	cargo build --locked --release
 	cargo build --locked --release --manifest-path bench/seed/rs/Cargo.toml
 	@# Each (shape, transport) arm in its own process.
@@ -173,7 +195,7 @@ bench-crossover:
 # draws two identical flat lines, which reads as "cgo is fine". The benchmark
 # withholds its absolute peak once it sees a second transport in the process, so
 # a contaminated run now fails benchplot rather than charting a false result.
-bench-scaling:
+bench-scaling: linked-target-dir
 	cargo build --locked --release
 	cargo build --locked --release --manifest-path bench/seed/rs/Cargo.toml
 	@# Repeated, unlike the thread-pressure target's -count=1.
