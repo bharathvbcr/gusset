@@ -32,13 +32,16 @@ use gusset::{AllocStats, Handle};
 use libfuzzer_sys::fuzz_target;
 use std::ptr;
 
-/// Calls per input. Bounds the work and keeps the completion pipe (at least
-/// 64 KiB on every supported OS) from filling: each call completes at most one
-/// record of 64 bytes.
-const MAX_OPS: usize = 48;
-/// Largest buffer the sequence really allocates: a hostile length is tried
-/// separately, and a valid one stays small enough for libFuzzer's RSS limit.
-const MAX_REAL_BUFFER: usize = 1 << 20;
+/// MAX_OPS calls per input, and the memory bound: one input never commits more
+/// than MAX_REAL_BUFFER (1 MiB) per allocation nor more than MAX_LIVE_BYTES
+/// (64 MiB) live in total. A hostile buffer length is drawn only from above
+/// MAX_BUFFER_BYTES, where it is refused before anything is allocated; a valid
+/// one is at most MAX_REAL_BUFFER. The unit tests that pin it run with the
+/// gusset crate's tests.
+#[path = "../../crates/gusset/tests/ffi_exports_bound.rs"]
+mod bound;
+use bound::{buf_alloc_len, MAX_JOB_OUTPUT, MAX_LIVE_BYTES, MAX_OPS, MAX_REAL_BUFFER};
+
 const TAKE_OWNED_FLAG: u64 = 1 << 63;
 
 /// Reads the input as a stream of bytes, yielding zero once it runs out so a
@@ -215,7 +218,7 @@ impl Rig {
                     // (echo, panic, trace echo, stack size, bounded generated
                     // output, a short cooperative sleep).
                     input[0] = [0u8, 1, 7, 8, 16, 5][(c.u8() % 6) as usize];
-                    input[1..5].copy_from_slice(&(c.u32() % (1 << 16)).to_le_bytes());
+                    input[1..5].copy_from_slice(&(c.u32() % MAX_JOB_OUTPUT).to_le_bytes());
                     if input[0] == 5 {
                         input[1] %= 3;
                     }
@@ -279,18 +282,17 @@ impl Rig {
                     self.tickets.retain(|t| *t != ticket || code != FFI_OK);
                 }
                 2 => {
-                    let len = match c.u8() % 6 {
-                        0 => 0,
-                        1 => usize::MAX,
-                        2 => isize::MAX as usize,
-                        3 => c.u64() as usize,
-                        _ => c.u32() as usize % (MAX_REAL_BUFFER + 1),
-                    };
+                    let selector = c.u8();
+                    let len = buf_alloc_len(selector, c.u64());
                     let (mut id, mut p) = (0u64, ptr::null_mut::<u8>());
                     let code = with_status(null_status, |st| {
                         gusset_buf_alloc(self.handle, len, &mut id, &mut p, st)
                     });
                     if code == FFI_OK {
+                        assert!(
+                            len <= MAX_REAL_BUFFER,
+                            "committed a {len}-byte buffer, above MAX_REAL_BUFFER"
+                        );
                         if len > 0 {
                             // Writable for the whole length it was given.
                             ptr::write(p, 1);
@@ -494,7 +496,7 @@ fuzz_target!(|data: &[u8]| {
     // Buffer memory is counted by Gusset itself, so a sequence that leaves any
     // behind after every handle it opened is closed is a leak in the exports.
     let live_before = gusset::get_alloc_stats().live_bytes;
-    run(&mut c, data);
+    run(&mut c, data, live_before);
     let live_after = gusset::get_alloc_stats().live_bytes;
     assert_eq!(
         live_after, live_before,
@@ -502,7 +504,7 @@ fuzz_target!(|data: &[u8]| {
     );
 });
 
-fn run(c: &mut Cursor, data: &[u8]) {
+fn run(c: &mut Cursor, data: &[u8], live_before: usize) {
     let Some(mut rig) = Rig::open() else {
         return;
     };
@@ -513,6 +515,13 @@ fn run(c: &mut Cursor, data: &[u8]) {
         let payload_at = c.at.min(data.len());
         let payload = &data[payload_at..(payload_at + 8).min(data.len())];
         rig.step(c, payload);
+        let live = gusset::get_alloc_stats()
+            .live_bytes
+            .saturating_sub(live_before);
+        assert!(
+            live <= MAX_LIVE_BYTES,
+            "one input holds {live} buffer bytes live, above MAX_LIVE_BYTES"
+        );
         // SAFETY: the handle is live until `close`.
         if unsafe { &*rig.handle }.is_poisoned() {
             // A poisoned handle refuses new work (that is I2); start over so
