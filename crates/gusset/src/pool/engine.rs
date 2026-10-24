@@ -12,7 +12,25 @@ pub type EngineFn =
 static GLOBAL_ENGINE: RwLock<Option<EngineFn>> = RwLock::new(None);
 static ENGINE_REGISTRY: RwLock<Option<IdMap<u32, EngineFn>>> = RwLock::new(None);
 
-/// Sets the global engine execution handler.
+/// Sets the global engine execution handler: the one engine opcode 0 runs.
+///
+/// **This replaces the slot.** The global handler has one occupant, so a second
+/// call drops the first handler and the last install wins, with no error and no
+/// signal to the caller (`DECISIONS.md`, 2026-09-30, "`register_engine` refuses
+/// opcode 0 and a collision"). Two crates linked into one umbrella that each
+/// call `set_engine_handler` from their own init cannot both be opcode 0: only
+/// whichever init ran last serves it. Give each engine its own nonzero opcode
+/// with [`register_engine`] instead; that call refuses a duplicate.
+///
+/// The handler serves opcode 0 only. A job whose `ctx.opcode()` is nonzero is
+/// looked up in the opcode registry and never reaches this handler; with no
+/// entry there it is refused (see [`default_dispatch`]).
+///
+/// The handler is process-global, shared by every handle. A panic in it poisons
+/// the handle that ran it and leaves it installed, so a handle opened after
+/// recovery runs the same closure with whatever state the panic tore. Recovery
+/// is `Close`, [`clear_engine_handlers`], reinstall, `Open`; `docs/adoption.md`
+/// has the recipe.
 ///
 /// Lock poisoning is recovered from rather than swallowed: a previous panic while
 /// the registry was held must not leave the process permanently unable to register
@@ -29,6 +47,9 @@ where
 /// Registers an engine execution handler for a specific opcode (R9).
 ///
 /// Dispatches calls matching `ctx.opcode() == opcode` directly to this handler.
+/// A handle's opcode comes from `WithOpcode`, or from `ContextWithOpcode` for one
+/// call. The global handler never serves a nonzero opcode, so every opcode a
+/// handle uses needs its own registration.
 ///
 /// Opcode 0 is refused. Dispatch never consults the registry for it: that
 /// opcode is the global handler installed by [`set_engine_handler`], then the
@@ -37,7 +58,9 @@ where
 ///
 /// A second registration of the same opcode is refused and the first handler
 /// stays. Call [`clear_engine_handlers`] before replacing one. The registry
-/// is process-global, shared by every handle.
+/// is process-global, shared by every handle, and a panic in a handler leaves
+/// its entry in place: reinstalling after a poison without clearing first is
+/// refused as a duplicate and the torn handler keeps running.
 pub fn register_engine<F, R>(opcode: u32, f: F) -> Result<(), String>
 where
     F: Fn(&JobContext, &[u8]) -> Result<R, String> + Send + Sync + 'static,
@@ -65,7 +88,14 @@ where
     Ok(())
 }
 
-/// Clears all registered engine handlers (global and opcode-specific). Diagnostic/test use.
+/// Clears all registered engine handlers: the global one and every opcode entry.
+///
+/// This is the first step of recovering from a poisoned handle whose engine
+/// state was torn by the panic. It is not atomic with the reinstall that must
+/// follow: a job another handle submits in between is refused with `no engine
+/// handler registered` (an error result, not a crash). It clears every opcode,
+/// not the one that panicked, so the adopter reinstalls all of them. Tests use
+/// it too.
 pub fn clear_engine_handlers() {
     let mut g = GLOBAL_ENGINE.write().unwrap_or_else(|e| e.into_inner());
     *g = None;
@@ -91,15 +121,25 @@ pub fn has_engine_handler() -> bool {
 
 /// Dispatches one work unit (R9).
 ///
-/// Resolution order, and why it is this order:
+/// Resolution order, and why it is this order. It depends on `ctx.opcode()`.
 ///
-/// 1. An opcode-specific registered engine handler matching `ctx.opcode()` wins.
-/// 2. A registered adopter global engine wins next. `GUSSET_FLAG_DIAGNOSTIC_ENGINE`
-///    cannot displace it, so a stray flag can never silently swap a production
-///    engine for the diagnostic one.
-/// 3. Otherwise, if the *caller* set `GUSSET_FLAG_DIAGNOSTIC_ENGINE`, run the
-///    built-in diagnostic engine. Only Gusset's own tests set that bit.
-/// 4. Otherwise fail closed. Running an implicit echo-or-panic engine because
+/// A nonzero opcode:
+///
+/// 1. The opcode registry entry for exactly that opcode runs.
+/// 2. With no entry the job is refused with `no engine handler registered for
+///    opcode N`. It never falls through to the global handler or to the
+///    diagnostic engine, even when `GUSSET_FLAG_DIAGNOSTIC_ENGINE` is set: a
+///    handle configured for opcode 100 must not run an engine installed for
+///    opcode 0 because the registration of 100 was forgotten.
+///
+/// Opcode 0 never consults the registry:
+///
+/// 1. A global handler installed with [`set_engine_handler`] runs.
+///    `GUSSET_FLAG_DIAGNOSTIC_ENGINE` cannot displace it, so a stray flag can
+///    never silently swap a production engine for the diagnostic one.
+/// 2. Otherwise, if the *caller* set `GUSSET_FLAG_DIAGNOSTIC_ENGINE`, the
+///    built-in diagnostic engine runs. Only Gusset's own tests set that bit.
+/// 3. Otherwise fail closed. Running an implicit echo-or-panic engine because
 ///    registration was forgotten, or lost a startup race, is how a payload's
 ///    first byte comes to select `panic!` in a production process.
 pub fn default_dispatch(ctx: &JobContext, input: &[u8]) -> Result<JobOutput, String> {
