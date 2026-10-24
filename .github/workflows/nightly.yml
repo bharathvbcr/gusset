@@ -365,6 +365,15 @@ jobs:
             cargo "+$RUST_NIGHTLY" fuzz run -O "$t" -- -max_total_time=300 -max_len=4096 -rss_limit_mb=2048
           done
 
+      # libFuzzer writes crash-, oom- and timeout- inputs to fuzz/artifacts/<target>/,
+      # which went with the runner: the ffi_exports OOM input was lost every night.
+      - name: Keep crashers
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cargo-fuzz-artifacts
+          path: fuzz/artifacts/
+
   # The per-push matrix fuzzes each Go target for 45 s; this gives each one
   # four minutes, where the timing-dependent reader targets find more.
   go-fuzz:

@@ -1,16 +1,23 @@
 package ci_test
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 )
 
-// A red nightly is worth something only when it leaves evidence: an issue that
-// names the job. A job cancelled at its timeout opened no issue: Miri,
-// 2026-10-15..17. As in workflow_supplychain_test.go, each rule is a pure
-// function over lines, run over the real workflows and over a planted
-// violation.
+// A red nightly is worth something only when it leaves evidence: the input that
+// broke a fuzz target, and an issue that names the job. Both were missing.
+// cargo-fuzz kept no crash input, so the ffi_exports OOM input was lost every
+// night. A job cancelled at its timeout opened no issue: Miri, 2026-10-15..17.
+// As in workflow_supplychain_test.go, each rule is a pure function over lines,
+// run over the real workflows and over a planted violation.
+
+var (
+	cargoFuzzRun = regexp.MustCompile(`\bcargo\b.*\bfuzz run\b`)
+	goFuzzRun    = regexp.MustCompile(`\bmake fuzz\b|\bgo test\b.*\s-fuzz[= ]`)
+)
 
 func jobName(job []string) string { return strings.TrimSuffix(strings.TrimSpace(job[0]), ":") }
 
@@ -40,6 +47,126 @@ func jobKey(job []string, key string) (string, bool) {
 		return strings.Join(parts, " "), true
 	}
 	return "", false
+}
+
+// fuzzArtifactViolations reports every job that fuzzes without an upload-artifact
+// step that runs on failure and covers where the fuzzer writes its inputs:
+// fuzz/artifacts/ for cargo-fuzz, a testdata/ tree for Go's fuzzer.
+func fuzzArtifactViolations(name string, lines []string) []string {
+	var out []string
+	for _, job := range splitJobs(lines) {
+		jl := strings.Split(job, "\n")
+		var cargo, gofuzz bool
+		var uploads []string
+		for _, st := range workflowSteps(jl) {
+			for _, l := range strings.Split(stepRunBody(st), "\n") {
+				l = stripShellComment(l)
+				cargo = cargo || cargoFuzzRun.MatchString(l)
+				gofuzz = gofuzz || goFuzzRun.MatchString(l)
+			}
+			text := strings.Join(st, "\n")
+			if !strings.Contains(text, "actions/upload-artifact@") {
+				continue
+			}
+			if guard, ok := stepIfGuard(st); ok && (strings.Contains(guard, "failure()") || strings.Contains(guard, "always()")) {
+				uploads = append(uploads, text)
+			}
+		}
+		check := func(fuzzer, dir string) {
+			for _, u := range uploads {
+				if strings.Contains(u, dir) {
+					return
+				}
+			}
+			out = append(out, name+" "+jobName(jl)+": runs "+fuzzer+" with no on-failure upload-artifact step covering "+dir)
+		}
+		if cargo {
+			check("cargo fuzz", "fuzz/artifacts/")
+		}
+		if gofuzz {
+			check("Go fuzzing", "testdata/")
+		}
+	}
+	return out
+}
+
+func TestEveryFuzzJobUploadsItsInputsOnFailure(t *testing.T) {
+	jobs := 0
+	for name, lines := range workflows(t) {
+		for _, v := range fuzzArtifactViolations(name, lines) {
+			t.Error(v)
+		}
+		for _, job := range splitJobs(lines) {
+			if cargoFuzzRun.MatchString(job) || goFuzzRun.MatchString(job) {
+				jobs++
+			}
+		}
+	}
+	// matrix fuzz, nightly cargo-fuzz and go-fuzz. Fewer means the detector
+	// stopped seeing a job, which would make this test pass on nothing.
+	if jobs < 3 {
+		t.Fatalf("found %d fuzz jobs across the workflows; want at least 3", jobs)
+	}
+}
+
+const fuzzJobHead = `jobs:
+  cargo-fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fuzz each target
+        working-directory: fuzz
+        run: |
+          for t in a b; do
+            cargo "+$RUST_NIGHTLY" fuzz run -O "$t" -- -max_total_time=300
+          done
+`
+
+func TestPlantedFuzzJobWithoutAnArtifactIsCaught(t *testing.T) {
+	cases := []struct {
+		name, tail string
+		bad        bool
+	}{
+		{"no upload (nightly before 2026-10-23)", "", true},
+		{"upload with no if", `
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: fuzz/artifacts/
+`, true},
+		{"upload only on success", `
+      - if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: fuzz/artifacts/
+`, true},
+		{"upload of the wrong tree", `
+      - name: Keep crashers
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: testdata/fuzz/
+`, true},
+		{"on-failure upload of fuzz/artifacts/", `
+      - name: Keep crashers
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: fuzz/artifacts/
+`, false},
+	}
+	for _, c := range cases {
+		got := fuzzArtifactViolations("planted.yml", strings.Split(fuzzJobHead+c.tail, "\n"))
+		if c.bad && len(got) == 0 {
+			t.Errorf("%s: not caught", c.name)
+		}
+		if !c.bad && len(got) != 0 {
+			t.Errorf("%s: reported %v", c.name, got)
+		}
+	}
+	// A Go fuzz job is held to the same rule.
+	goJob := "jobs:\n  fuzz:\n    steps:\n      - name: Fuzz\n        run: make fuzz FUZZTIME=45s\n"
+	if got := fuzzArtifactViolations("planted.yml", strings.Split(goJob, "\n")); len(got) != 1 {
+		t.Errorf("go fuzz job with no upload: got %v, want one violation", got)
+	}
 }
 
 // nightlyReportViolations checks the job that files the nightly issue. It must
