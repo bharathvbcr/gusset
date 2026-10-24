@@ -133,3 +133,65 @@ fn constants_agree_across_rust_c_and_go() {
         "ids are capped below the take-owned bit"
     );
 }
+
+/// A completion record is a ticket word, a length word, then the result bytes.
+/// `INLINE_RECORD_MAX - INLINE_RESULT_MAX` is therefore where an inline payload
+/// starts, and the Go reader (`ticket_reader.go`) derives its parse offsets from
+/// that difference rather than from a literal.
+///
+/// `constants_agree_across_rust_c_and_go` checks each maximum on its own, which
+/// cannot see a header that grew in Rust and `gusset.h` together: both agree,
+/// and a reader that kept a typed 16 would slice every payload from the wrong
+/// byte. This pins the difference to the two documented words, and the Go
+/// reader to the expression.
+#[test]
+fn inline_record_header_is_the_two_words_the_go_reader_derives() {
+    use gusset::pool::{INLINE_RECORD_MAX, INLINE_RESULT_MAX};
+
+    let header = 2 * std::mem::size_of::<u64>();
+    assert_eq!(
+        INLINE_RECORD_MAX - INLINE_RESULT_MAX,
+        header,
+        "Rust record header is no longer the ticket word plus the length word"
+    );
+    let h = read_repo_file("internal/ffi/gusset.h");
+    assert_eq!(
+        c_define(&h, "GUSSET_INLINE_RECORD_MAX") - c_define(&h, "GUSSET_INLINE_RESULT_MAX"),
+        header as u64,
+        "gusset.h record header is no longer the ticket word plus the length word"
+    );
+    assert_eq!(
+        INLINE_RESULT_MAX % 8,
+        0,
+        "payloads are padded to whole words, so the maximum must be one"
+    );
+
+    let reader = read_repo_file("ticket_reader.go");
+    let decl = reader
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("const inlineHeaderBytes ="))
+        .expect("ticket_reader.go no longer declares `const inlineHeaderBytes`");
+    assert_eq!(
+        decl.split("//").next().unwrap_or(decl).trim(),
+        "ffi.InlineRecordMax - ffi.InlineResultMax",
+        "inlineHeaderBytes must be the record maximum less the result maximum"
+    );
+    let literal = header.to_string();
+    let typed: Vec<String> = reader
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            l.split("//")
+                .next()
+                .unwrap_or(l)
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .any(|t| t == literal)
+        })
+        .map(|(i, l)| format!("ticket_reader.go:{}: {}", i + 1, l.trim()))
+        .collect();
+    assert!(
+        typed.is_empty(),
+        "the record header size is typed as a literal again; use inlineHeaderBytes:\n{}",
+        typed.join("\n")
+    );
+}
