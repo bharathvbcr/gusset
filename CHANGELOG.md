@@ -68,6 +68,18 @@ From the 2026-10-23 audit: tracker `ft-97faf4f4`, plus `ft-c689767b`, `gs-isolat
 ### Process
 - **`main` is protected.** A PR is required, and the 23 Matrix and adopter checks are required, strict and enforced for admins. See DECISIONS 2026-10-23, which also records keeping `gusset_buf_alloc` uncapped and splitting iceoryx2-go PR #1.
 
+## [Unreleased] - 2026-10-23 · The step-5 check reads the umbrella's own output, and gussetvet takes build tags
+
+From `ft-0f6a723d` (residuals C-8, C-9 and C-10 of the 2026-10-23 audit). No export signature, ABI or public Go API change. `gussetvet` gains a `-tags` flag. GitHub Actions has not run this tree.
+
+### Adopter
+- **"Step 5 snippet compiled" comes from the umbrella's build script only (I4).** The walkthrough grepped every build-script output under the umbrella's `target/release/build`, and gusset's own allocator probe prints the same `cargo::rustc-cfg=gusset_allocator_api` line. With the probe forced on (the nightly `step5-snippet` job), a document `build.rs` that set nothing still printed "compiled", so `GUSSET_REQUIRE_STEP5=1` could not fail. The check reads only the `[package]` named in the document's step-1 block, in both cargo layouts: `build/<package>-<hash>/output` (stable 1.99) and `build/<package>/<hash>/run/stdout` (nightly-2026-10-05). No output, or two, is a failure: the check did not run. A copy of the document whose `build.rs` reads `DEP_GUSSET_ALLOCATOR_API_WRONG` now fails under `GUSSET_REQUIRE_STEP5=1`.
+- **A leftover `internal/ffi/libgusset.a` no longer fails a local run.** The file is ignored, and the walkthrough asserted it did not exist after the installs. A dev checkout that already held one failed with "an install wrote libgusset.a". It now takes the file's state (absent, or its `cksum`) before the installs and fails only if `make install` or `install.sh` creates, rewrites or removes it. CI checkouts are clean, so CI behaviour is unchanged.
+- **The walkthrough also runs the installed `gussetvet` with `-tags gusset_pkgconfig`** on the adopter's shim, the tag Option A builds with.
+
+### gussetvet
+- **`-tags` selects files the way `go build -tags` does, and R1 reads the same files as R5 (I4).** R5 matched files with `build.Default`, with no tags, so a `//go:build gusset_pkgconfig` shim (Option A) was never checked. R1 walked every `.go` file under the directory. A `C.<export>` reference in a `//go:build ignore` file, another GOOS's file or a `_test.go` file therefore counted as a wrapper that no build compiles. Both rules now read one list: the non-test `.go` files that `MatchFile` accepts under the default context plus `-tags` (comma-separated). A tag that is not a build-constraint identifier, such as go build's legacy space-separated form, is a usage error. R4 and the `//export` scan still walk every file in the module whatever its constraints.
+
 ## [Unreleased] - 2026-10-23 · The hashed archive is the linked archive
 
 From `ft-1a7e8a99`. No export signature, ABI or public Go API change. `ffi.go`'s LDFLAGS and every workflow are unchanged. GitHub Actions has not run this tree. No benchmark baseline was recorded.

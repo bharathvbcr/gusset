@@ -23,16 +23,19 @@ func main() {
 	os.Exit(realMain(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-const usage = `Usage: gussetvet [-exports file] [dir]
+const usage = `Usage: gussetvet [-exports file] [-tags list] [dir]
 
 Checks the cgo shim in dir (default internal/ffi) against the Gusset rules:
 R5 (every referenced export carries #cgo noescape and #cgo nocallback,
 package-wide; no //export), R4 (no C.free on Rust memory) and R1 (every export
-has a Go wrapper). R4 and the
-//export scan walk the Go module that contains dir.
+has a Go wrapper). R5's directive check and R1 read the files of dir that
+go build compiles; R4 and the //export scan walk every file of the Go module
+that contains dir, whatever its build constraints.
 
   -exports file   list of exported C symbols, one per line, '#' comments allowed
                   (default dir/exports.txt). An adopter names its own list here.
+  -tags list      comma-separated build tags, as for go build -tags. Run once per
+                  tag set you build with: -tags gusset_pkgconfig for Option A.
 
 An empty or unreadable export list is an error: no export was checked.
 `
@@ -43,6 +46,7 @@ func realMain(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("gussetvet", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	exports := fs.String("exports", "", "")
+	tagList := fs.String("tags", "", "")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(stdout, usage)
@@ -61,21 +65,57 @@ func realMain(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gussetvet: -exports needs a file\n\n%s", usage)
 		return 2
 	}
+	tags, err := parseTags(*tagList)
+	if err != nil {
+		fmt.Fprintf(stderr, "gussetvet: -tags: %v\n\n%s", err, usage)
+		return 2
+	}
 	targetDir := "internal/ffi"
 	if fs.NArg() == 1 {
 		targetDir = fs.Arg(0)
 	}
-	return runWith(targetDir, *exports, stdout, stderr)
+	return runWith(targetDir, *exports, tags, stdout, stderr)
 }
 
-// run checks targetDir against its own exports.txt and returns the exit status.
+// buildTag is what a //go:build expression accepts as a tag.
+var buildTag = regexp.MustCompile(`^[A-Za-z0-9_.]+$`)
+
+// parseTags splits a -tags value on commas, as go build does, dropping empty
+// entries. Anything that is not a tag is a usage error: go build's legacy
+// space-separated form, or a stray quote, would otherwise become one tag no
+// file names, and the run would check the default build while the caller
+// believed it checked theirs.
+func parseTags(s string) ([]string, error) {
+	var tags []string
+	for _, t := range strings.Split(s, ",") {
+		if t == "" {
+			continue
+		}
+		if !buildTag.MatchString(t) {
+			return nil, fmt.Errorf("%q is not a build tag; separate tags with commas", t)
+		}
+		tags = append(tags, t)
+	}
+	return tags, nil
+}
+
+// buildContext is go/build's default context (GOOS, GOARCH, cgo, release
+// tags) with tags added: the file set `go build -tags` would compile.
+func buildContext(tags []string) *build.Context {
+	ctx := build.Default
+	ctx.BuildTags = append(append([]string(nil), build.Default.BuildTags...), tags...)
+	return &ctx
+}
+
+// run checks targetDir against its own exports.txt with no build tags and
+// returns the exit status.
 func run(targetDir string, stdout, stderr io.Writer) int {
-	return runWith(targetDir, "", stdout, stderr)
+	return runWith(targetDir, "", nil, stdout, stderr)
 }
 
 // runWith checks targetDir against exportsFile (targetDir/exports.txt when
-// empty) and returns the process exit status.
-func runWith(targetDir, exportsFile string, stdout, stderr io.Writer) int {
+// empty), building with tags, and returns the process exit status.
+func runWith(targetDir, exportsFile string, tags []string, stdout, stderr io.Writer) int {
 	if exportsFile == "" {
 		exportsFile = filepath.Join(targetDir, "exports.txt")
 	}
@@ -84,8 +124,9 @@ func runWith(targetDir, exportsFile string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gussetvet: %v\n", err)
 		return 1
 	}
+	ctx := buildContext(tags)
 
-	violations, err := checkDirectives(targetDir, exports)
+	violations, err := checkDirectives(ctx, targetDir, exports)
 	if err != nil {
 		fmt.Fprintf(stderr, "gussetvet: %v; R5 was not checked\n", err)
 		return 1
@@ -111,7 +152,7 @@ func runWith(targetDir, exportsFile string, stdout, stderr io.Writer) int {
 	}
 	violations = append(violations, callbacks...)
 
-	wrappers, err := checkWrappers(targetDir, exports)
+	wrappers, err := checkWrappers(ctx, targetDir, exports)
 	if err != nil {
 		fmt.Fprintf(stderr, "gussetvet: R1 wrapper scan failed: %v\n", err)
 		return 1
@@ -141,12 +182,12 @@ func runWith(targetDir, exportsFile string, stdout, stderr io.Writer) int {
 // line is LDFLAGS is not a violation when the directives live on the file that
 // references the export, or on any other file in that build.
 //
-// Which files those are is go/build.Default.MatchFile: //go:build lines and
-// GOOS/GOARCH filename suffixes, not every non-test .go file in the directory.
-// A //go:build ignore file or a windows file on darwin is not part of the
-// build, and its directives must not satisfy a reference in a file that is.
-// _test.go stays out: the library build does not merge it. A MatchFile error
-// is a failed check, not a file skipped — skipping it would hide the reference.
+// Which files those are is packageFiles: //go:build lines, GOOS/GOARCH
+// filename suffixes and the -tags the caller builds with, not every non-test
+// .go file in the directory. A //go:build ignore file or a windows file on
+// darwin is not part of the build, and its directives must not satisfy a
+// reference in a file that is. A //go:build gusset_pkgconfig shim is part of
+// the build only under -tags gusset_pkgconfig, and is checked then.
 //
 // Only the comment attached to `import "C"` is a preamble. This used to treat
 // every comment group containing "#cgo" as one, so a doc comment that merely
@@ -170,10 +211,10 @@ func runWith(targetDir, exportsFile string, stdout, stderr io.Writer) int {
 // A directory with no preamble carrying `#cgo` lines is an error, not a pass:
 // "R5 checks passed" having inspected no preamble is the failure mode this
 // audit exists to prevent.
-func checkDirectives(dir string, exports []string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
+func checkDirectives(ctx *build.Context, dir string, exports []string) ([]string, error) {
+	filenames, err := packageFiles(ctx, dir)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read %s: %w", dir, err)
+		return nil, err
 	}
 	exportSet := make(map[string]bool)
 	for _, fn := range exports {
@@ -191,19 +232,7 @@ func checkDirectives(dir string, exports []string) ([]string, error) {
 	packageDirectives := make(map[string]bool)
 	var files []cgoFile
 	sawCgo := false
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		filename := filepath.Join(dir, name)
-		match, err := build.Default.MatchFile(dir, name)
-		if err != nil {
-			return nil, fmt.Errorf("build constraints for %s: %w", filename, err)
-		}
-		if !match {
-			continue
-		}
+	for _, filename := range filenames {
 		file, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
 		if err != nil {
 			return nil, fmt.Errorf("parse error in %s: %w", filename, err)
@@ -247,6 +276,38 @@ func checkDirectives(dir string, exports []string) ([]string, error) {
 		}
 	}
 	return violations, nil
+}
+
+// packageFiles returns the files of dir that the build compiles into the
+// package under ctx: non-test .go files whose //go:build line and GOOS/GOARCH
+// filename suffix ctx.MatchFile accepts. R5's directive check and R1's wrapper
+// scan both read exactly this list, so the two rules judge one file set. R1
+// used to walk every .go file under dir, so a reference in a //go:build ignore
+// file, another GOOS's file or a _test.go file (cgo refuses import "C" in
+// tests) counted as a wrapper that no build compiles.
+//
+// _test.go stays out: the library build does not merge it. A MatchFile error is
+// a failed check, not a file skipped: skipping it would hide its references.
+func packageFiles(ctx *build.Context, dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %w", dir, err)
+	}
+	var files []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		match, err := ctx.MatchFile(dir, name)
+		if err != nil {
+			return nil, fmt.Errorf("build constraints for %s: %w", filepath.Join(dir, name), err)
+		}
+		if match {
+			files = append(files, filepath.Join(dir, name))
+		}
+	}
+	return files, nil
 }
 
 // moduleRoot returns the directory of the nearest go.mod at or above dir: the
@@ -354,9 +415,19 @@ func checkNoCallbacks(root string) ([]string, error) {
 // checkWrappers requires a Go reference to every export in exports.txt from the
 // ffi package. An export with no wrapper is ABI surface nothing exercises or
 // verifies from Go; exports_match proves the symbol exists, not that it is used.
-func checkWrappers(dir string, exports []string) ([]string, error) {
+// Only packageFiles count, the same set R5 checks.
+func checkWrappers(ctx *build.Context, dir string, exports []string) ([]string, error) {
+	filenames, err := packageFiles(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	fset := token.NewFileSet()
 	used := map[string]bool{}
-	err := walkGo(dir, func(rel string, fset *token.FileSet, file *ast.File) {
+	for _, filename := range filenames {
+		file, err := parser.ParseFile(fset, filename, nil, 0)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", filename, err)
+		}
 		ast.Inspect(file, func(n ast.Node) bool {
 			if sel, ok := n.(*ast.SelectorExpr); ok {
 				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "C" {
@@ -365,9 +436,6 @@ func checkWrappers(dir string, exports []string) ([]string, error) {
 			}
 			return true
 		})
-	})
-	if err != nil {
-		return nil, err
 	}
 	var violations []string
 	for _, fn := range exports {
@@ -445,6 +513,9 @@ func preambleLines(file *ast.File) []preambleLine {
 // directory belongs to the module, so `touch hidden/.git` hides nothing.
 //
 // Test files count: a cross-free in a test corrupts the heap just as well.
+// Build constraints and -tags are not applied, unlike packageFiles: R4 and the
+// //export scan judge every file whatever it builds under, so a C.free in a
+// linux-only file fails a run on darwin too.
 func walkGo(root string, visit func(rel string, fset *token.FileSet, file *ast.File)) error {
 	fset := token.NewFileSet()
 	replaced, err := replacedDirs(root)
