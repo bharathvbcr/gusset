@@ -40,14 +40,14 @@ const MaxPoolSize = 1024
 // Values above MaxPoolSize are not silently clamped: Open returns an error, because
 // a caller who asked for 10,000 workers and quietly received 1024 would keep the
 // wrong capacity model. Values below 1 are refused too, with an error that says
-// so: 0 is not "use the default".
+// so: 0 is not "use the default". Both refusals match [ErrBadArg].
 func WithPoolSize(n int) Option {
 	return func(c *handleConfig) {
 		switch {
 		case n < 1:
-			c.poolSizeErr = fmt.Errorf("gusset: pool_size must be at least 1 (got %d)", n)
+			c.poolSizeErr = &Error{Code: ErrBadArg.Code, Msg: fmt.Sprintf("pool_size must be at least 1 (got %d)", n)}
 		case n > MaxPoolSize:
-			c.poolSizeErr = fmt.Errorf("gusset: pool_size %d exceeds maximum %d (each worker is an OS thread with an 8 MiB stack)", n, MaxPoolSize)
+			c.poolSizeErr = &Error{Code: ErrBadArg.Code, Msg: fmt.Sprintf("pool_size %d exceeds maximum %d (each worker is an OS thread with an 8 MiB stack)", n, MaxPoolSize)}
 		default:
 			c.poolSizeErr = nil
 			c.poolSize = uint32(n)
@@ -76,9 +76,9 @@ func WithDiagnosticEngine() Option {
 
 // WithBufferBudget caps the bytes of live buffers allocated with NewBuffer on
 // this handle; NewBuffer beyond it returns ErrBufferBudget. 0 (the default)
-// means unlimited. A negative budget is refused by Open rather than read as
-// unlimited: a caller who asked for a cap and got the sign wrong would
-// otherwise get no cap at all, silently.
+// means unlimited. A negative budget is refused by Open, with an error matching
+// [ErrBadArg], rather than read as unlimited: a caller who asked for a cap and
+// got the sign wrong would otherwise get no cap at all, silently.
 //
 // Rust memory is invisible to Go's GC pacer and each *Buffer is a tiny Go
 // object, so a caller that loops on NewBuffer without Free can reach an OOM
