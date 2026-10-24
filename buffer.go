@@ -53,6 +53,9 @@ type bufferCleanupInfo struct {
 
 // NewBuffer allocates a 64-byte aligned buffer in Rust-owned memory (R16).
 // Suitable for inputs larger than 4 KiB to avoid double copying across FFI.
+//
+// A length of zero or less, or over [MaxBufferBytes], is refused with an error
+// matching [ErrBadArg].
 func (h *Handle) NewBuffer(n int) (*Buffer, error) {
 	if h == nil || h.state == nil {
 		return nil, ErrNilHandle
@@ -101,10 +104,10 @@ func (s *handleState) releaseBudget(n int64) {
 // return) could land after Close and write freed allocator memory.
 func (s *handleState) allocBuffer(n int, budgeted bool, fill []byte) (*Buffer, error) {
 	if n <= 0 {
-		return nil, errors.New("gusset: buffer size must be greater than zero")
+		return nil, &Error{Code: ErrBadArg.Code, Msg: "buffer size must be greater than zero"}
 	}
 	if n > MaxBufferBytes {
-		return nil, fmt.Errorf("gusset: buffer size exceeds maximum %d bytes", MaxBufferBytes)
+		return nil, &Error{Code: ErrBadArg.Code, Msg: fmt.Sprintf("buffer size exceeds maximum %d bytes", MaxBufferBytes)}
 	}
 	if s.closed.Load() {
 		return nil, ErrClosed
