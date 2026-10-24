@@ -421,7 +421,9 @@ var OpcodeContextKey = opcodeContextKey{}
 type opcodeContextKey struct{}
 
 // ContextWithOpcode attaches an engine dispatch opcode to the context.
-// Overrides the default opcode configured on the Handle.
+// Overrides the default opcode configured on the Handle for the calls made with
+// that context. The routing rule is WithOpcode's: opcode 0 is the global
+// engine, a nonzero opcode needs an engine registered for exactly that opcode.
 func ContextWithOpcode(ctx context.Context, opcode uint32) context.Context {
 	return context.WithValue(ctx, OpcodeContextKey, opcode)
 }
