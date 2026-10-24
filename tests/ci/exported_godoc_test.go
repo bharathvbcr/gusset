@@ -41,6 +41,17 @@ func undocumentedExports(t *testing.T, fset *token.FileSet, files map[string]*as
 						if s.Name.IsExported() && s.Doc == nil && (d.Lparen.IsValid() || d.Doc == nil) {
 							out = append(out, fset.Position(s.Pos()).String()+": type "+s.Name.Name)
 						}
+						if it, ok := s.Type.(*ast.InterfaceType); ok && s.Name.IsExported() {
+							for _, m := range it.Methods.List {
+								// Embedded interfaces have no Names; their methods are
+								// documented where they are declared.
+								for _, n := range m.Names {
+									if n.IsExported() && m.Doc == nil && m.Comment == nil {
+										out = append(out, fset.Position(n.Pos()).String()+": method "+s.Name.Name+"."+n.Name)
+									}
+								}
+							}
+						}
 					case *ast.ValueSpec:
 						if s.Doc != nil || s.Comment != nil || (!d.Lparen.IsValid() && d.Doc != nil) {
 							continue
@@ -136,6 +147,19 @@ const (
 
 // F is a single documented value.
 const F = 1
+
+// Carrier is documented, but only one of its methods is.
+type Carrier interface {
+	// Documented has a comment.
+	Documented() int
+	Bare() int
+	Trailing() int // Trailing is documented by a trailing comment.
+	private() int
+}
+
+type hiddenCarrier interface {
+	Exported() int
+}
 `
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "p.go", src, parser.ParseComments)
@@ -147,7 +171,7 @@ const F = 1
 	for _, g := range got {
 		names = append(names, g[strings.LastIndex(g, " ")+1:])
 	}
-	if want := "Bare,Method,Shown,B,D,E"; !sameSet(names, strings.Split(want, ",")) {
+	if want := "Bare,Method,Shown,B,D,E,Carrier.Bare"; !sameSet(names, strings.Split(want, ",")) {
 		t.Fatalf("flagged %v; want exactly %s", names, want)
 	}
 }

@@ -403,7 +403,11 @@ type spanContextKey struct{}
 
 // TraceCarrier is the shape Gusset reads trace correlation from (R9).
 type TraceCarrier interface {
+	// TraceID returns the 16-byte trace id copied into the call header's
+	// trace_id field.
 	TraceID() [16]byte
+	// SpanID returns the 8-byte span id copied into the call header's span_id
+	// field.
 	SpanID() [8]byte
 }
 
