@@ -17,6 +17,20 @@ Changes since v0.0.3. The C ABI layout is unchanged (17 exports, ABI layout vers
 - A second test catches a handle that reads its completion descriptor instead of taking it (`ft-3d60ee16`, criterion 11). Replacing the `swap(-1)` in `release_pipe_with` with a `load` was caught by one test, the close-count test. `a_second_release_cannot_close_the_descriptor_it_gave_up` finds it through the effect: the first release hands back the number without closing it, the second runs the real `close(2)`, and the descriptor must still carry a write to the read end. It never frees and re-acquires a number, so it cannot race the module's parallel tests. A second `libc::close` inside `close_fd` stays uncaught, by design (`sys.rs`, `close_fd`). Test-only; no production change.
 - `TestPitfall_OpenNilOptionIsRefusedNotPanicked`, `TestFFI_ArgumentRefusalsAreBadArg` and the Rust `argument_refusal_tests` pin the two changes above, and that the refusals outside the list stay `FFI_ERR`.
 
+### 2026-10-24 · Poisoned-handle recovery and the engine registry's semantics (card ft-8a827cf5)
+
+Documentation, godoc, rustdoc and tests; no runtime, export, ABI or public-surface change (17 exports, 13 Go entry points).
+
+#### Documentation
+- **Recovery from a poisoned handle is `Close` plus `Open`, with no in-library supervisor** (`DECISIONS.md`, 2026-10-24). The entry-point budget is untouched.
+- **`docs/adoption.md` step 2 gains the recovery recipe and the routing table.** A panic leaves the process-global registry as it found it, so a handle opened after `Close` runs the same engine closure with its torn state (a `Mutex` the panic poisoned poisons the new handle on its first job). When state may be torn the adopter calls `clear_engine_handlers` from an export of its own and installs every engine again. The section also says what the docs left out: `set_engine_handler` replaces the global slot (the last init wins), `register_engine` refuses a duplicate opcode, and the global engine serves opcode 0 only.
+- **The `default_dispatch` rustdoc no longer contradicts the code.** It listed "opcode-specific wins, then the global engine" for every opcode. A nonzero opcode with no registry entry is refused with `no engine handler registered for opcode N`; only opcode 0 reaches the global handler or the diagnostic engine. `set_engine_handler`, `register_engine` and `clear_engine_handlers` document what they replace, refuse and clear.
+- **`WithOpcode` and `ContextWithOpcode` state the routing rule** in their godoc.
+
+#### Tests
+- `crates/gusset/tests/engine_registry_recovery.rs`, its own binary because it installs a global handler. `a_recovered_handle_runs_the_torn_engine_until_the_adopter_clears_and_reinstalls` shows what a recovered handle runs: the torn closure, on the global slot and on an opcode entry, until the registry is cleared and installed again. A reinstall without the clear is refused for an opcode entry.
+- `set_engine_handler_replaces_the_global_slot_and_the_last_install_wins` and `a_nonzero_opcode_with_only_a_global_handler_is_refused` (also with `GUSSET_FLAG_DIAGNOSTIC_ENGINE` set) pin the install and routing rules above.
+
 ### 2026-10-24 · Documentation drift: the docs say what the code does (card ft-86b4ae63)
 
 Documentation, one comment-only Go change and two `compile_error!` text changes; no runtime, export, ABI or public-surface change. Where a document and the code disagreed, the document changed.

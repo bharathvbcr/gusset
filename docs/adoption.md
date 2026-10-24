@@ -211,6 +211,132 @@ sequenceDiagram
     end
 ```
 
+### Which engine answers: one global slot, and one entry per opcode
+
+The registry is **process-global**, shared by every handle in the process. It has
+two parts, and an opcode picks between them (`WithOpcode` on `Open`, or
+`ContextWithOpcode` for one call):
+
+| Opcode | Served by | Installed with | A second install |
+| --- | --- | --- | --- |
+| `0` (the default) | the one global engine | `set_engine_handler` | **replaces** the first, with no error: the last init wins |
+| nonzero `N` | the engine registered for exactly `N` | `register_engine(N, f)` | **refused** with `Err`; the first handler stays |
+
+- **`set_engine_handler` replaces the slot.** The call is the install, and the slot
+  has one occupant. Two crates in one umbrella that each call it from their own
+  init do not coexist: whichever init ran last serves opcode 0 and the other
+  engine is unreachable, silently. Give each engine its own nonzero opcode and
+  register it with `register_engine`. The call is deliberately infallible
+  (`DECISIONS.md`, 2026-09-30).
+- **`register_engine` refuses a duplicate opcode, and opcode 0.** Check the
+  `Result` at startup. To swap a handler, call `clear_engine_handlers` first.
+- **The global engine serves opcode 0 only.** A handle opened with
+  `WithOpcode(100)` never reaches it. Opcode 100 with no `register_engine(100, _)`
+  is refused with `gusset: no engine handler registered for opcode 100 (submission
+  refused)`, and the handle is not poisoned. The diagnostic engine is opcode 0
+  only as well, so `WithDiagnosticEngine` does not change this. Every opcode your
+  handles use needs its own registration.
+
+### After a poisoned handle: clear, reinstall, reopen
+
+Poison is per handle. A caught panic poisons the handle that ran the job and
+nothing else, and it **leaves the process-global registry exactly as the panic
+left it**. Gusset's recovery is `Close` the poisoned handle and `Open` a new one:
+there is no supervisor in the library and no Go entry point for one
+(`DECISIONS.md`, 2026-10-24).
+
+What the new handle runs is the same engine closure. Whether that is enough
+depends on what the panic left in the closure's captured state:
+
+- **Stateless engine, or state the panic cannot corrupt.** `Close` and `Open` is
+  all you need.
+- **State behind a `std::sync::Mutex`, or anything torn halfway through an
+  update.** A panic while the guard is held poisons the mutex, and
+  `lock().unwrap()` (or any other use of the poisoned guard) then panics on every
+  later job, on every handle. The recovered handle runs the torn engine and is
+  poisoned by its first job.
+  Reopening cannot fix that. The adopter must **clear the registry and install
+  fresh engines.**
+
+`clear_engine_handlers` is a Rust function, so the umbrella exports the reset, as
+it exports its init (step 2 above). Have the init and the reset share one
+function that installs every engine:
+
+```rust
+use gusset_core::{clear_engine_handlers, register_engine, set_engine_handler};
+
+fn install_engines() -> Result<(), String> {
+    // Fresh state for every engine, built here and not shared across calls.
+    set_engine_handler(global_engine(State::new()));            // opcode 0
+    register_engine(OP_SEARCH, search_engine(State::new()))     // refused if already registered
+}
+
+/// Call after Close on a poisoned handle and before the next Open.
+#[no_mangle]
+pub extern "C" fn myservice_reset_engines() -> i32 {
+    clear_engine_handlers(); // the global engine AND every opcode entry
+    if install_engines().is_ok() { 0 } else { 1 }
+}
+```
+
+```go
+package main
+
+/*
+#cgo noescape myservice_reset_engines
+#cgo nocallback myservice_reset_engines
+int myservice_reset_engines(void);
+*/
+import "C"
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/bharathvbcr/gusset"
+)
+
+// recoverHandle replaces a handle that returned gusset.ErrPoisoned.
+func recoverHandle(bad *gusset.Handle, opts ...gusset.Option) (*gusset.Handle, error) {
+	if err := bad.Close(); err != nil {
+		// A worker never returned within Close's 30s budget, so the Rust pool is
+		// still allocated until it exits. The engine's memory is not freed: stop
+		// here, and retry the recovery later rather than resetting around it.
+		return nil, fmt.Errorf("close poisoned handle: %w", err)
+	}
+	if C.myservice_reset_engines() != 0 {
+		return nil, errors.New("engine reset failed")
+	}
+	return gusset.Open(opts...)
+}
+```
+
+Like every Rust export your shim imports, the reset carries `#cgo noescape` and
+`#cgo nocallback` (R5, checked by `gussetvet`, below). `Close` can fail, and a
+failed `Close` is not a released pool (see step 4, "`Handle.Close` waits at most
+30 seconds"), so the recipe reports the error and does not go on to reset or reopen.
+
+Four things about the reset:
+
+- **Reinstalling without clearing does not work for an opcode.** `register_engine`
+  refuses the duplicate and the torn handler keeps running. Clear first. (Only
+  opcode 0, whose `set_engine_handler` replaces, would take the new engine.)
+- **It clears every opcode, not the one that panicked.** Reinstall all of them,
+  as `install_engines` does.
+- **It is not atomic.** A job another handle submits between the clear and the
+  reinstall is refused with `no engine handler registered`: an error result, not a
+  crash. Run the reset from one goroutine at a time, and when several handles
+  poison together, reset once. A second reset would clear the fresh engines too.
+- **The order against `Open` does not matter.** The engine is looked up for each
+  job, not when the handle opens, so a handle opened before the reinstall runs the
+  new engines. What matters is that the reinstall finishes before work resumes.
+
+`TestChurn_PoisonedHandlesRecreateLeavingNothingBehind` shows that recovering by
+`Close` and `Open` leaks nothing, over 200 poisoned handles (the default cycle count). The Rust test
+`a_recovered_handle_runs_the_torn_engine_until_the_adopter_clears_and_reinstalls`
+shows the case above end to end: the recovered handle runs the torn engine until
+the registry is cleared and reinstalled.
+
 ## 3. Link the archive
 
 The default `#cgo LDFLAGS` point into `target/release` **inside a Gusset source
@@ -336,7 +462,8 @@ Things worth knowing before you hit them:
   capacity model.
 - **A caught panic poisons the handle**, permanently. Every later call returns
   `ErrPoisoned`. `Close` and reopen is the only way out; that is the bulkhead, not
-  a bug.
+  a bug. The process-global engine registry is not reset by a poison; step 2,
+  "After a poisoned handle", says when the adopter must clear and reinstall.
 - **A deadline bounds the caller, not the work.** `Call` and `Wait` return
   `ctx.Err()` when your context expires, whatever the engine is doing. The pool
   permit stays with the still-running job until it actually stops, so a caller
@@ -407,8 +534,9 @@ Things worth knowing before you hit them:
 - **Registering an engine can fail.** `gusset_core::register_engine` returns an
   error when the opcode is already registered (the first handler stays) and
   refuses opcode 0, which dispatch never looks up. Check the result at startup.
-  Handlers are process-global: a panic poisons the handle but leaves the hook,
-  and `clear_engine_handlers` removes it.
+  `set_engine_handler` is the opposite: it replaces the global engine, so the last
+  init wins. Handlers are process-global: a panic poisons the handle but leaves the
+  hook, and `clear_engine_handlers` removes it (the recipe is in step 2).
 - **A `Submit` nobody waits on does not hold a permit.** The permit returns when
   the reader stores the result; the result stays until `Wait`, `Discard` or
   `Close`. Nothing bounds how many pile up, and one over 4 KiB is Rust memory

@@ -93,6 +93,22 @@ func WithBufferBudget(bytes int64) Option {
 
 // WithOpcode sets the default engine dispatch opcode for this handle (R9).
 // Dispatches to an engine registered with that opcode in Rust without payload byte mangling.
+//
+// The opcode picks the engine, by this rule:
+//
+//   - Opcode 0, the default, runs the one global engine that Rust installed
+//     with set_engine_handler. Without one, the call is refused rather than
+//     run against a built-in engine (see WithDiagnosticEngine).
+//   - A nonzero opcode runs only the engine registered for exactly that opcode
+//     with register_engine. The global engine never serves it, and neither does
+//     the diagnostic engine. With no registration the call fails with
+//     "no engine handler registered for opcode N"; the handle is not poisoned.
+//
+// So every opcode a handle (or a ContextWithOpcode call) uses needs its own
+// registration in Rust. The registry is process-global, shared by every handle,
+// and set_engine_handler replaces the global engine instead of refusing a
+// second install, so with several engines in one process give each a nonzero
+// opcode. docs/adoption.md covers re-registering engines after a poisoned handle.
 func WithOpcode(opcode uint32) Option {
 	return func(c *handleConfig) {
 		c.defaultOpcode = opcode
