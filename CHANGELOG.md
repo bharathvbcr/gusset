@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased] - 2026-10-24 · One probe switch per workflow, and the Skip contract written down
+
+From the 2026-10-23 audit of `ft-1f4a1228`, the hostprobe contract criterion and A-9 (approved as a fenced follow-up once main was green). Workflow and test changes only: no runtime, export, ABI or public Go API change, and no hot path, so no benchmark delta is claimed. GitHub Actions has not run this tree; the step and job names are unchanged, so the required checks are too.
+
+### CI
+- **`GUSSET_REQUIRE_PROBES: '1'` is set once, in the top-level `env:` of `matrix.yml`, `nightly.yml` and `tip.yml` (I4).** The 25 step-level copies are gone. `adopter.yml` runs no `go test` and does not carry it. No step needs the switch absent: `internal/hostprobe/probe_test.go` strips it from its own child and passes with the parent set to `1` or `0`.
+- **`TestWorkflowLevelProbeEnv` replaces the step-level shell model.** This reverses the 2026-10-13 approval of that model. It required every `go test` step to see exactly `1` through `export`, `unset`, prefixes and `env(1)`, in 563 lines of `tests/ci/workflow_supplychain_test.go`. The new rule needs no shell parsing: the entry equals `'1'` in the top-level `env:` of every workflow that runs `go test`, is absent from a workflow that runs none, and the name appears on no other line of any workflow, comments included. Twenty planted violations fail it, among them a step-level override, a job-level env, a shell `export`/`unset`/prefix, a missing workflow env, values other than `'1'`, a duplicate entry and flow style. On the pre-change workflows it reports all 25 step-level copies and the three missing workflow entries. Net: 118 lines added and 530 removed in that file.
+- Not modeled: a Go test reached only through `make` or a script (every workflow that runs one also runs `go test` directly, and the test pins those three), and `env -i`, which clears the variable without naming it.
+
+### Tests
+- **`hostprobe.Skip` states its contract.** It is only for a condition a quiet CI runner never meets: real host load or noise. It is never for a deterministic platform or runtime property, which needs a fix or a platform gate. `TestSerialCall_LeavesAPForOtherGoroutines` broke it: its idle baseline sat on Go's Linux 1 ms netpoller floor (`epoll_wait(1)`) and fired on every Linux runner until caebc32. The nine call sites were checked against the contract. All nine pass, with no SKIP, on every Linux and macOS lane of Matrix 40070336468 (96ddc24) and 40068268871 (ec86583), with the switch on. Eight compare a probe against a 250 ms to 2.5 s job that ignores cancellation. The ninth (the bystander baseline) has a 100 µs bound against a 0.5-17 µs baseline measured on GitHub runners (run 40058658715). None needed a fix.
+
 ## [Unreleased] - 2026-10-23 · Nightly failures report themselves and keep their evidence
 
 From `ft-987c804c`. Test and workflow changes only: no export signature, ABI or public Go API change. GitHub Actions has not run this tree. The criteria that need three consecutive green nightlies are open.
