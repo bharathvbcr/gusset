@@ -624,7 +624,7 @@ func TestRaceAndGOGCCoverInternal(t *testing.T) {
 // Go test a workflow runs has to see it. Set above every job, it reaches every
 // step, and no step needs it absent: internal/hostprobe/probe_test.go strips it
 // from the child process it runs. So the rule needs no model of a step's shell
-// (it had one, 2026-10-13 to 2026-10-24, about 670 lines): a workflow that runs
+// (it had one, 2026-10-13 to 2026-10-24, 563 lines): a workflow that runs
 // go test carries `GUSSET_REQUIRE_PROBES: '1'` in its top-level env:, a
 // workflow that runs none does not carry it, and the name is on no other line
 // of any workflow, comments included. A step, a job or a shell line that sets,
