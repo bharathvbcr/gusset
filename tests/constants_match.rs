@@ -167,31 +167,59 @@ fn inline_record_header_is_the_two_words_the_go_reader_derives() {
     );
 
     let reader = read_repo_file("ticket_reader.go");
-    let decl = reader
+    let Some(decl) = reader
         .lines()
         .find_map(|l| l.trim().strip_prefix("const inlineHeaderBytes ="))
-        .expect("ticket_reader.go no longer declares `const inlineHeaderBytes`");
+    else {
+        panic!("ticket_reader.go no longer declares `const inlineHeaderBytes`");
+    };
     assert_eq!(
         decl.split("//").next().unwrap_or(decl).trim(),
         "ffi.InlineRecordMax - ffi.InlineResultMax",
         "inlineHeaderBytes must be the record maximum less the result maximum"
     );
+    // Only the two functions that parse a record are held to it: a 16 anywhere
+    // else in the file (a buffer size, a shift) is not about the header.
     let literal = header.to_string();
-    let typed: Vec<String> = reader
-        .lines()
-        .enumerate()
-        .filter(|(_, l)| {
-            l.split("//")
-                .next()
-                .unwrap_or(l)
+    let mut typed = Vec::new();
+    for name in ["popRing", "parseBuffered"] {
+        for (line_no, line) in go_func_body(&reader, name) {
+            let code = line.split("//").next().unwrap_or(line);
+            if code
                 .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                 .any(|t| t == literal)
-        })
-        .map(|(i, l)| format!("ticket_reader.go:{}: {}", i + 1, l.trim()))
-        .collect();
+            {
+                typed.push(format!(
+                    "ticket_reader.go:{line_no} ({name}): {}",
+                    line.trim()
+                ));
+            }
+        }
+    }
     assert!(
         typed.is_empty(),
-        "the record header size is typed as a literal again; use inlineHeaderBytes:\n{}",
+        "the record header size is typed as a literal where a record is parsed; use inlineHeaderBytes:\n{}",
         typed.join("\n")
     );
+}
+
+/// The lines of the method `name` (1-based line numbers), from its `func` line to
+/// the closing brace in column 0. Panics when it is not found, so a rename fails
+/// the test instead of leaving the scan with nothing to look at.
+fn go_func_body<'a>(src: &'a str, name: &str) -> Vec<(usize, &'a str)> {
+    let needle = format!(") {name}(");
+    let mut body = Vec::new();
+    let mut inside = false;
+    for (i, line) in src.lines().enumerate() {
+        if !inside && line.starts_with("func (") && line.contains(&needle) {
+            inside = true;
+        }
+        if inside {
+            body.push((i + 1, line));
+            if line == "}" {
+                return body;
+            }
+        }
+    }
+    panic!("ticket_reader.go has no complete method {name}")
 }
