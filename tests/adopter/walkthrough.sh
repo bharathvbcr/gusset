@@ -315,21 +315,32 @@ grep -E "library 'gusset' not found|cannot find -lgusset|library not found for -
 EXPECT_VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p;}' "$CHECKOUT/Cargo.toml")"
 [ -n "$EXPECT_VERSION" ] || fail "could not read the version from Cargo.toml"
 HASH_BEFORE="$(cksum <"$CHECKOUT/internal/ffi/archive_hash.go")"
-# internal/ffi/libgusset.a is ignored, so a dev checkout may already hold a
-# leftover one. The installs must leave it as they found it: absent, or the
-# same bytes. Asserting it is absent failed a local run nothing had written to.
-LIBGUSSET="$CHECKOUT/internal/ffi/libgusset.a"
+# Two ignored files in internal/ffi that a dev checkout may already hold, so
+# the installs must leave each as they found it: absent, or the same bytes.
+# Asserting libgusset.a was absent failed a local run nothing had written to.
+#   libgusset.a          a leftover archive
+#   zz_archive_hash.go   what `go generate ./internal/ffi` writes once
+#                        archive_hash.go is a committed stub; new or changed
+#                        means an install ran go generate. On a tree whose
+#                        gen.go still rewrites archive_hash.go it stays absent,
+#                        and the archive_hash.go cksum above catches that.
+FFI="$CHECKOUT/internal/ffi"
 file_state() { if [ -e "$1" ]; then cksum <"$1"; else echo absent; fi; }
-LIBGUSSET_BEFORE="$(file_state "$LIBGUSSET")"
-check_libgusset() { # who
+LIBGUSSET_BEFORE="$(file_state "$FFI/libgusset.a")"
+ZZHASH_BEFORE="$(file_state "$FFI/zz_archive_hash.go")"
+check_untouched() { # who name state-before [why]
 	local now
-	now="$(file_state "$LIBGUSSET")"
-	[ "$now" = "$LIBGUSSET_BEFORE" ] && return 0
-	case "$LIBGUSSET_BEFORE:$now" in
-	absent:*) fail "$1 wrote libgusset.a into internal/ffi" ;;
-	*:absent) fail "$1 removed the libgusset.a internal/ffi held before the installs" ;;
-	*) fail "$1 rewrote the libgusset.a internal/ffi held before the installs" ;;
+	now="$(file_state "$FFI/$2")"
+	[ "$now" = "$3" ] && return 0
+	case "$3:$now" in
+	absent:*) fail "$1 wrote $2 into internal/ffi${4:-}" ;;
+	*:absent) fail "$1 removed the $2 internal/ffi held before the installs${4:-}" ;;
+	*) fail "$1 rewrote the $2 internal/ffi held before the installs${4:-}" ;;
 	esac
+}
+check_ffi_untouched() { # who
+	check_untouched "$1" libgusset.a "$LIBGUSSET_BEFORE"
+	check_untouched "$1" zz_archive_hash.go "$ZZHASH_BEFORE" "; it ran go generate"
 }
 
 fileset() { (cd "$1" && find . -type f | LC_ALL=C sort); }
@@ -347,7 +358,7 @@ make -C "$CHECKOUT" install PREFIX="$PM" >/dev/null
 [ "$(PKG_CONFIG_PATH="$PM/lib/pkgconfig" pkg-config --variable=libdir gusset)" = "$PM/lib" ] || fail "gusset.pc libdir is not $PM/lib"
 PKG_CONFIG_PATH="$PM/lib/pkgconfig" pkg-config --cflags gusset | grep -F -- "-I$PM/include" >/dev/null || fail "gusset.pc cflags do not name $PM/include"
 [ "$(cksum <"$CHECKOUT/internal/ffi/archive_hash.go")" = "$HASH_BEFORE" ] || fail "make install rewrote the tracked internal/ffi/archive_hash.go"
-check_libgusset "an install"
+check_ffi_untouched "an install"
 
 step "make install honours LIBDIR/INCLUDEDIR overrides in the .pc"
 PL="$W/prefix-libdir"
@@ -408,7 +419,7 @@ PS="$W/prefix-script"
 [ "$(PKG_CONFIG_PATH="$PS/lib/pkgconfig" pkg-config --modversion gusset)" = "$EXPECT_VERSION" ] || fail "install.sh's .pc version is not Cargo.toml's"
 cmp "$PM/include/gusset.h" "$PS/include/gusset.h" || fail "headers differ"
 [ "$(cksum <"$CHECKOUT/internal/ffi/archive_hash.go")" = "$HASH_BEFORE" ] || fail "install.sh rewrote the tracked internal/ffi/archive_hash.go"
-check_libgusset "install.sh"
+check_ffi_untouched "install.sh"
 
 step "install.sh with a |, & and \\ in the prefix"
 PO="$W/p|q&r"
