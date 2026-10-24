@@ -132,7 +132,7 @@ func Open(opts ...Option) (*Handle, error) {
 	cfg := handleConfig{poolSize: 4}
 	for _, opt := range opts {
 		if opt == nil {
-			return nil, &Error{Code: ErrBadArg.Code, Msg: "gusset: nil Option passed to Open"}
+			return nil, &Error{Code: ErrBadArg.Code, Msg: "nil Option passed to Open"}
 		}
 		opt(&cfg)
 	}
