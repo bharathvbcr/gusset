@@ -71,18 +71,17 @@ image or audio transform, a search-index probe or a large parse, you are almost
 certainly in the "few percent" band. If you are embedding it to add two numbers,
 you are in the "don't" band and no amount of tuning fixes that.
 
-**Where raw cgo wins, and where Go does.** Raw cgo is faster than Gusset on a
-single call at every work size measured, serial and under parallel load: the
-crossover table under "The measured numbers" has no arm in which Gusset comes
-out ahead, and it is generated from the committed recording, so that sentence
-stays true or `make docs-check` says otherwise. What changes with work size is
-how much faster. The same table gives the size from which Gusset is within 2x
-and within 1.1x of raw cgo, serial and with 18 goroutines; above that size the
-overhead is a rounding error on the call, below it the call is mostly overhead.
-Under parallel load the lines sit at larger work sizes than serial, because
-the coordination caps Gusset's throughput while blocking cgo runs the calls side
-by side. The arms are the table's rows and nothing is interpolated between them,
-so a workload between two rows is somewhere between their answers.
+**Where raw cgo wins, and where Go does.** On a single call raw cgo wins by
+construction (see the top of this page); what the measurement adds is by how
+much, and from what size it stops mattering. The crossover table under "The
+measured numbers" gives, serial and with 18 goroutines, the work size from which
+Gusset is within 2x and within 1.1x of raw cgo, and lists any arm in which
+Gusset comes out ahead. It is generated from the committed recording, so read
+the answer there, not here. Under parallel load the lines sit at larger work
+sizes than serial, because the coordination caps Gusset's throughput while
+blocking cgo runs the calls side by side. The arms are the table's rows and
+nothing is interpolated between them, so a workload between two rows is
+somewhere between their answers.
 
 For work no longer than a bare cgo call (the noop row's raw-cgo column), plain
 Go is cheaper than either, because it has no boundary to cross. The recording
