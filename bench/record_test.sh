@@ -51,6 +51,12 @@ cleanup() {
 	for p in $PIDS $CANARY; do
 		wait "$p" 2>/dev/null || true
 	done
+	# The stub go's grandchildren, for a case that failed before it reaped its own.
+	for f in "$WORK"/*/gc.pid; do
+		if [ -s "$f" ]; then
+			kill "$(cat "$f")" 2>/dev/null || true
+		fi
+	done
 	rm -rf "$WORK"
 	rmdir "$PROBE" 2>/dev/null || true
 	exit $status
@@ -829,7 +835,7 @@ foreign_case() {
 			cat "$D/stderr" >&2
 			fail "foreign benchmark ($desc): exit $REC_RC, want a refusal"
 		}
-		grep -q "another benchmark is running" "$D/stderr" || fail "foreign benchmark ($desc): no refusal message"
+		grep -q "another .*benchmark is running" "$D/stderr" || fail "foreign benchmark ($desc): no refusal message"
 		assert_sentinel "$D/out.txt" "foreign benchmark ($desc)"
 	}
 	allows() {
