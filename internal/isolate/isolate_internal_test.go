@@ -145,6 +145,16 @@ func workerMain() int {
 // misbehave announces itself and then fails the protocol one way, staying
 // alive so only the host can end it.
 func misbehave(mode string, out *os.File) int {
+	if mode == "grandchild" {
+		// A grandchild holding every pipe the worker has outlives it. It is
+		// started before hello, so it already holds them when Start returns:
+		// a kill right after Start cannot beat it to the pipe.
+		gc := exec.Command("sleep", "4")
+		gc.Stdout, gc.Stderr = out, os.Stderr
+		if err := gc.Start(); err != nil {
+			return 1
+		}
+	}
 	if err := writeFrame(out, &response{Op: opHello, Version: protocolVersion, PoolSize: workerPool}, maxResponseFrame); err != nil {
 		return 1
 	}
@@ -169,13 +179,6 @@ func misbehave(mode string, out *os.File) int {
 		_, _ = out.Write(append(hdr[:], "0123456789"...))
 	case "dup", "reorder", "unknown":
 		return scripted(mode, out)
-	case "grandchild":
-		// A grandchild holding every pipe the worker has outlives it.
-		gc := exec.Command("sleep", "4")
-		gc.Stdout, gc.Stderr = out, os.Stderr
-		if err := gc.Start(); err != nil {
-			return 1
-		}
 	case "answer-hold":
 		return answerThenHold(out)
 	case "cloexec":
@@ -1257,8 +1260,10 @@ func TestProc_CancelSendDoesNotPinTheWriteLock(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if err := p.Close(); err != nil && !strings.Contains(err.Error(), "killed") {
-		t.Fatalf("Close = %v", err)
+	// The deaf worker ignores the closed stdin, so any budget ends in a kill;
+	// the public Close's 30s would only be waited out.
+	if err := p.close(100 * time.Millisecond); err != nil && !strings.Contains(err.Error(), "killed") {
+		t.Fatalf("close = %v", err)
 	}
 }
 
@@ -1277,6 +1282,106 @@ func TestProc_QueuedResultSurvivesGrandchild(t *testing.T) {
 	}
 	if !bytes.Equal(out, in) {
 		t.Fatalf("Wait = %v; want %v", out, in)
+	}
+}
+
+// waitStored polls until the reader has stored ticket's result: delivered,
+// with nobody waiting on it yet.
+func waitStored(t *testing.T, p *Proc, ticket uint64) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		p.mu.Lock()
+		stored := false
+		if tk := p.tickets[ticket]; tk != nil {
+			stored = tk.res != nil
+		}
+		p.mu.Unlock()
+		if stored {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ticket %d's result was never stored", ticket)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A result the reader stored before the worker died is finished work. Wait
+// returns it, as the in-process handle delivers a result that exists when it
+// is poisoned (DECISIONS 2026-09-22); only new work is refused. The reader
+// used to delete every ticket on exit, so this Wait returned the poison.
+func TestProc_StoredResultSurvivesWorkerDeath(t *testing.T) {
+	p := startWorker(t)
+	in := []byte{0, 0xB2}
+	ticket, err := p.Submit(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := p.Submit(context.Background(), []byte{0, 0xB3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitStored(t, p, ticket)
+	waitStored(t, p, kept)
+	if err := syscall.Kill(p.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.readerDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the reader did not latch the worker dead within 3s of SIGKILL")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	out, err := p.Wait(ctx, ticket)
+	if err != nil || !bytes.Equal(out, in) {
+		t.Fatalf("Wait after the worker died = %x, %v; want the stored %x", out, err, in)
+	}
+	if _, err := p.Wait(ctx, ticket); !errors.Is(err, gusset.ErrPoisoned) {
+		t.Fatalf("second Wait = %v; want ErrPoisoned: the ticket is spent and the worker is dead", err)
+	}
+	if _, err := p.Submit(ctx, []byte{0}); !errors.Is(err, gusset.ErrPoisoned) {
+		t.Fatalf("Submit after the worker died = %v; want ErrPoisoned", err)
+	}
+	if n := len(p.sem); n != 0 {
+		t.Fatalf("%d permits held after both results were stored", n)
+	}
+	// Close drops the result nobody collected.
+	if err := p.close(time.Second); err != nil {
+		t.Fatalf("close = %v", err)
+	}
+	p.mu.Lock()
+	left := len(p.tickets)
+	p.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("%d tickets still held after Close", left)
+	}
+}
+
+// Once the worker has exited, a new submission is refused at once: no ticket
+// is registered that only a descendant still holding the pipes could answer.
+// It used to be written to the dead worker's stdin and to wait for the reader
+// to latch, which the drain window delays.
+func TestProc_SubmitAfterExitIsRefusedBeforeTheDrainEnds(t *testing.T) {
+	p := startWorkerMode(t, "grandchild") // the grandchild holds the protocol write end
+	if err := syscall.Kill(p.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.procExited:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the worker was not reaped within 3s of SIGKILL")
+	}
+	_, err := p.Submit(context.Background(), []byte{0})
+	select {
+	case <-p.readerDone:
+		t.Fatalf("Submit = %v returned only after the reader latched; want an immediate refusal", err)
+	default:
+	}
+	if !errors.Is(err, gusset.ErrPoisoned) {
+		t.Fatalf("Submit after the worker exited = %v; want ErrPoisoned", err)
 	}
 }
 
@@ -1369,6 +1474,115 @@ func TestRead_PastDeadlineWithNothingConsumedStillProbes(t *testing.T) {
 	default:
 		t.Fatal("waiter received nothing")
 	}
+}
+
+// writeFramesSteadily writes one echo frame per payload, ids 1..n, gap apart,
+// then closes pw. A write error ends it: the reader closed its end, which the
+// test reports through the frames it did not receive.
+func writeFramesSteadily(pw *os.File, payloads [][]byte, gap time.Duration) {
+	defer func() { _ = pw.Close() }()
+	for i, payload := range payloads {
+		time.Sleep(gap)
+		if err := writeFrame(pw, &response{ID: uint64(i + 1), Out: payload}, maxResponseFrame); err != nil {
+			return
+		}
+	}
+}
+
+// The reaper's wake has already put the reader into its probe, and frames then
+// keep arriving 5ms apart: each far inside queuedFrameProbe, all of them
+// together twice past it. The probe used to be armed once, so every frame
+// after its first 50ms got the poison instead.
+func TestRead_SteadyFramesAfterTheProbeAreAllDelivered(t *testing.T) {
+	const gap = 5 * time.Millisecond
+	payloads := make([][]byte, 20)
+	for i := range payloads {
+		payloads[i] = []byte{0x40, byte(i)}
+	}
+	if time.Duration(len(payloads))*gap < 2*queuedFrameProbe {
+		t.Fatal("the frames must outlast the probe window, or this test proves nothing")
+	}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	})
+	if err := pr.SetReadDeadline(time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	go writeFramesSteadily(pw, payloads, gap)
+	got, dead := readQueuedFrames(t, pr, bufio.NewReader(pr), payloads)
+	assertQueuedPayloads(t, payloads, dead, got)
+}
+
+// A worker that has exited while a descendant still writes its answers, one
+// every 50ms: each far inside protocolDrain, all of them together twice past
+// protocolDrain plus the probe. The reaper's window used to be wall-clock from
+// the exit, so the later frames were lost.
+func TestDrain_SteadyFramesAfterTheWorkerExitsAreAllDelivered(t *testing.T) {
+	const gap = 50 * time.Millisecond
+	payloads := make([][]byte, 10)
+	for i := range payloads {
+		payloads[i] = []byte{0x50, byte(i)}
+	}
+	if time.Duration(len(payloads))*gap < 2*(protocolDrain+queuedFrameProbe) {
+		t.Fatal("the frames must outlast both drain windows, or this test proves nothing")
+	}
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	})
+	p := &Proc{
+		cmd:        cmd,
+		rd:         pr,
+		sem:        make(chan struct{}, len(payloads)),
+		tickets:    make(map[uint64]*ticketState, len(payloads)),
+		readerDone: make(chan struct{}),
+		procExited: make(chan struct{}),
+	}
+	waiters := make([]chan result, len(payloads))
+	for i := range payloads {
+		ch := make(chan result, 1)
+		waiters[i] = ch
+		p.tickets[uint64(i+1)] = &ticketState{waiter: ch}
+		p.sem <- struct{}{}
+	}
+	go p.waitProc()
+	go p.read(bufio.NewReader(pr))
+	select {
+	case <-p.procExited:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the worker was not reaped")
+	}
+	go writeFramesSteadily(pw, payloads, gap)
+	select {
+	case <-p.readerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("read did not finish")
+	}
+	p.mu.Lock()
+	dead := p.dead
+	p.mu.Unlock()
+	got := make([]result, len(payloads))
+	for i, ch := range waiters {
+		select {
+		case got[i] = <-ch:
+		default:
+			t.Fatalf("ticket %d waiter received nothing; reader dead=%v", i+1, dead)
+		}
+	}
+	assertQueuedPayloads(t, payloads, dead, got)
 }
 
 // Two complete frames are queued. The first two header bytes have already

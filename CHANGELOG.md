@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased] - 2026-10-23 · Isolate keeps finished results and drains on progress
+
+From the 2026-10-23 audit of `gs-isolate-corrupt-frame-hang`, items B-2 to B-6 and the criterion 11 amendment. Everything is in `internal/isolate`, which has no importer outside its package. No runtime, export, ABI or public Go API change, and no hot path, so no benchmark delta is claimed. Run on darwin/arm64 only; GitHub Actions has not run this tree. Each new test fails on 2ed9a29's `proc.go`.
+
+### Isolate
+- **A result stored before the worker died is returned by `Wait` (I2, I4).** The reader's exit used to delete every ticket, so `Wait` returned the worker's poison for a job that had already finished. A stored result now stays until `Wait`, `Discard` or `Close` takes it. In-flight tickets and every later `Submit` still get `ErrPoisoned`. `TestProc_StoredResultSurvivesWorkerDeath` fails before the fix.
+- **The drain windows restart on progress (I3).** After the worker exits, the reaper's 200 ms window restarts while frames are still delivered. The reader's 50 ms probe is re-armed after each frame instead of once. Before the fix, frames arriving 50 ms apart after the exit lost 6 of 10, and frames 5 ms apart behind the probe lost 12 or 13 of 20.
+- **`Submit` refuses once the worker has exited (I4).** It used to write to the dead worker's stdin and wait for the reader to latch. That bounds the drain: only tickets in flight at the exit can extend it.
+- **Stale code.** `ProtocolOut` loses a nil check that could not fire. The package comment says responses run on the `ExtraFiles` protocol pipe, not stdout.
+
+### Tests
+- **`TestProc_CancelSendDoesNotPinTheWriteLock` closes with a 100 ms budget (I4).** The deaf worker ignores stdin, so the public `Close` waited out its 30 s budget before the kill. The test took 33.10 s and now takes 3.14 s.
+- **The grandchild fixture starts its grandchild before hello.** A kill right after `Start` could beat the grandchild to the pipe, and the test then never opened the drain window it was about.
+
+### Decisions
+- Four rows dated 2026-10-23 in DECISIONS:
+  - stored results survive worker death;
+  - a write deadline poisons even when 0 bytes were written (kept fail-closed; a counting writer was rejected);
+  - the progress-based drain, with the limits that stay wall-clock;
+  - the typed-nil trace-carrier recover duplicated in `readContext`, so the public surface stays at 13 Go entry points.
+
 ## [Unreleased] - 2026-10-23 · Main green again: the two Linux test bugs, new benchmarks, masked steps
 
 From the 2026-10-23 audit: tracker `ft-97faf4f4`, plus `ft-c689767b`, `gs-isolate-corrupt-frame-hang` and `ft-1f4a1228`. No runtime, export, ABI or public Go API change. Nothing in this set touches a hot path, so no benchmark delta is claimed. 320c56c was pushed directly to main on 2026-10-19 and Matrix 39270656716 was red in 8 jobs; this set fixes all three causes. Linux evidence is from the throwaway branch `probe/w1-linux-evidence` (run 40058658715).
