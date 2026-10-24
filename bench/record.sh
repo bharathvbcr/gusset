@@ -520,7 +520,8 @@ lock_field() {
 #
 # The owner pid decides. `ps -p` rather than `kill -0`: kill reports EPERM for a
 # live process of another user exactly as it reports ESRCH, which would read as
-# "dead" and steal a live recorder's lock. The group is a second key only
+# "dead" and steal a live recorder's lock. A zombie (state Z) is gone, though
+# `ps -p` still lists it. The group is a second key only
 # against pid reuse: a live process of the right pid in a different group is
 # somebody else's, so the lock is stale. A group that is still alive proves
 # nothing on its own. It is the group of whatever launched the dead recorder
@@ -530,6 +531,14 @@ lock_holder_alive() {
 	if [ -z "$1" ] || ! ps -p "$1" > /dev/null 2>&1; then
 		return 1
 	fi
+	# `ps -p` lists a zombie too: a holder that was SIGKILLed and not yet reaped by
+	# its parent is gone, and its lock or claim would otherwise never be cleared.
+	# Z is in the state of a zombie on procps and on BSD ps (modifier letters never
+	# include Z); any other state is alive, so a live holder is never judged dead.
+	holder_state=$(ps -o stat= -p "$1" 2>/dev/null || true)
+	case $holder_state in
+	*Z*) return 1 ;;
+	esac
 	now=$(ps -o pgid= -p "$1" 2>/dev/null | tr -d ' ' || true)
 	if [ -n "$now" ] && [ -n "$2" ] && [ "$now" != "$2" ]; then
 		return 1
