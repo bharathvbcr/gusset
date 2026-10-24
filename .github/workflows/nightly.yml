@@ -26,6 +26,12 @@ jobs:
   miri:
     name: Miri Undefined Behavior Check
     runs-on: ubuntu-latest
+    # Without a bound the job ran into GitHub's 6 h default and was cancelled
+    # (2026-10-15, 2026-10-23) before the seed sweep below ever ran. Passing runs
+    # took 3.5 to 5 h, 3 h 30 m of it in one_cut_evicts_what_line_by_line_eviction_does,
+    # which now runs 20 rounds under Miri. A run that still needs 4 h has
+    # regressed, and the report job names it as cancelled.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -404,10 +410,17 @@ jobs:
   # nightly did not, and on 2026-09-30 the chaos hammer took the test process
   # down with a SIGSEGV inside gusset_take that nobody was told about. Only on
   # main: a dispatch on a branch is someone already watching the run.
+  #
+  # Any result other than success is reported. A job that hits its timeout
+  # concludes `cancelled`, and `failure()` is false for that, so the Miri job's
+  # 6 h cancels on 2026-10-15..17 opened no issue (run 38710039955: miri
+  # cancelled, this job skipped).
   report:
     name: Open an issue on failure
     needs: [miri, sanitizer, hammer, hammer-heap, step5-snippet, cargo-fuzz, go-fuzz]
-    if: failure() && github.ref == 'refs/heads/main'
+    if: >-
+      always() && github.ref == 'refs/heads/main' &&
+      (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped'))
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -416,11 +429,20 @@ jobs:
         with:
           script: |
             const prefix = 'Nightly sanity failed';
-            const failed = Object.entries(${{ toJSON(needs) }})
-              .filter(([, job]) => job.result === 'failure')
-              .map(([name]) => name);
+            const byResult = {};
+            for (const [name, job] of Object.entries(${{ toJSON(needs) }})) {
+              if (job.result !== 'success') {
+                (byResult[job.result] ??= []).push(name);
+              }
+            }
+            if (Object.keys(byResult).length === 0) {
+              return;
+            }
+            const label = { failure: 'Failed', cancelled: 'Cancelled or timed out', skipped: 'Skipped' };
+            const lines = Object.entries(byResult)
+              .map(([result, names]) => `${label[result] ?? `Result ${result}`} jobs: ${names.join(', ')}`);
             const body = [
-              `Failed jobs: ${failed.join(', ')}`,
+              ...lines,
               '',
               `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               `Commit: ${context.sha}`,
