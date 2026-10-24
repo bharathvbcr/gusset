@@ -23,8 +23,9 @@ import (
 // crate that has no Cargo.lock by design, so --locked would always fail there.
 var scriptExempt = map[string]string{
 	"tests/adopter/walkthrough.sh": "builds a generated adopter crate with no lockfile",
+	"bench/record_test.sh":         "runs bench/record.sh against stub go and cargo; its cargo lines are fake ps output and a logging stub, never a build",
 }
-var buildFiles = []string{"../../Makefile", "../../tools/ci/lint.sh", "../../bench/r14/run.sh"}
+var buildFiles = []string{"../../Makefile", "../../tools/ci/lint.sh", "../../bench/r14/run.sh", "../../bench/record.sh"}
 
 func readLines(t *testing.T, path string) []string {
 	t.Helper()
