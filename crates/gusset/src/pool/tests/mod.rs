@@ -168,6 +168,52 @@ fn the_completion_descriptor_is_closed_by_exactly_one_close() {
     unsafe { libc::close(r) };
 }
 
+/// A release after the first reaches the real `close(2)` with -1, never with
+/// the number the handle gave up: the descriptor is *taken* (`swap(-1)`), not
+/// merely read.
+///
+/// The count test above sees a load in place of the swap through its closure.
+/// This one sees it through the effect, with the real close. The first release
+/// is given a close that does nothing, which stands in for "the number now
+/// belongs to someone else": `w` stays open and is the only file at that
+/// number. A second release that still held the number would close it, and the
+/// write below would fail with EBADF.
+///
+/// The number is never freed and re-acquired (no `dup2` onto a released
+/// number): `cargo test` runs the other tests of this module on parallel
+/// threads, and one of them could be handed the freed number in between, so
+/// the `dup2` would close that thread's file. A second `libc::close` inside
+/// `close_fd` itself is out of scope here, as in the count test: it is accepted
+/// by design (see `sys::close_fd`).
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_second_release_cannot_close_the_descriptor_it_gave_up() {
+    let (r, w) = make_pipe();
+    let handle = Handle::open(1, w).must("open");
+
+    let mut handed_back = Vec::new();
+    handle.release_pipe_with(|fd| handed_back.push(fd));
+    assert_eq!(
+        handed_back,
+        vec![w],
+        "the first release must hand back the descriptor the handle owned"
+    );
+
+    handle.release_pipe_with(sys::close_fd);
+    assert!(
+        still_the_same_pipe(w, r),
+        "a second release closed the descriptor the first one gave up: the handle \
+         must swap the number out for -1, not read it"
+    );
+
+    // SAFETY: `w` was never closed by the handle, so this test still owns it,
+    // as it does the read end.
+    unsafe {
+        libc::close(w);
+        libc::close(r);
+    }
+}
+
 /// Fails if `fd` carries O_NONBLOCK, or (on Darwin) F_SETNOSIGPIPE: the two
 /// flags `open` sets on a descriptor it takes ownership of.
 fn assert_fd_flags_untouched(fd: i32, what: &str) {
