@@ -86,7 +86,10 @@ jobs:
       # Adopters may build with Go 1.27's SIMD experiment for their own
       # kernels; Gusset must keep working under it. Also checks that the SIMD
       # benchmark kernel agrees with the scalar Go and the Rust kernels.
+      # Independent of the step above, so a red there must not skip it
+      # (320c56c never ran this suite on Linux for that reason).
       - name: Go suite under GOEXPERIMENT=simd
+        if: success() || failure()
         env:
           GOEXPERIMENT: simd
           GUSSET_REQUIRE_PROBES: '1'
@@ -231,6 +234,7 @@ jobs:
         run: go test -timeout 15m ./...
 
       - name: Go interop stress under the race detector
+        if: success() || failure()
         env:
           GUSSET_REQUIRE_PROBES: '1'
         run: go test -race -run 'TestInterop' -count=3 -timeout 15m ./tests/pitfalls/
@@ -239,6 +243,7 @@ jobs:
       # force it here on the same compiler: every cfg(not(gusset_allocator_api))
       # branch keeps building and passing.
       - name: Fallback path on the same compiler (GUSSET_ALLOCATOR_API=0)
+        if: success() || failure()
         env:
           GUSSET_ALLOCATOR_API: '0'
           GUSSET_EXPECT_ALLOCATOR_API: '0'
@@ -439,6 +444,7 @@ jobs:
       # GOGC=1 marks far more aggressively, which is what shakes out a Buffer or
       # Handle being collected while Rust still holds the memory.
       - name: Aggressive GC Test
+        if: success() || failure()
         env:
           GUSSET_REQUIRE_PROBES: '1'
         run: GOGC=1 go test -v -count=5 -timeout 20m . ./tests/panic_zoo/... ./tests/pitfalls/... ./internal/...
@@ -829,7 +835,12 @@ jobs:
       # number. The bounds live in the Makefile (ALLOC_BOUNDS) so `make
       # ci-local` enforces the same ones: ChannelHop (pure Go control) at 0, the
       # cgo call path at its measured 1. A benchmark absent from new.txt fails.
+      # It reads new.txt only, so a failed regression comparison must not skip
+      # it: on 320c56c it never ran because the compare step failed. If new.txt
+      # was never written, the gate fails ("a gate that did not run is not a
+      # pass"), which is the right result.
       - name: Allocation gate (ChannelHop 0, cgo path bounded)
+        if: success() || failure()
         run: make alloc-gate ALLOC_FILE=new.txt
 
       # After the allocation gate so both results are reported; fails the job
