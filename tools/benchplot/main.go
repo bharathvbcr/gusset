@@ -821,6 +821,9 @@ func renderDocTables(tm, rm, gm map[string][]benchfile.Sample, works []workPoint
 			fmtDur(pr), fmtDur(pg), tableRatio(pg/pr)))
 	}
 
+	repLo, repHi := repetitions(tm, works)
+	b.WriteString(renderCrossover(crossoverArms(tm, works), repLo, repHi))
+
 	b.WriteString("\n**Cost of concurrency.** Medians over the committed sweep, each transport in its own process.\n\n")
 	b.WriteString("| in-flight calls | peak threads, cgo | peak threads, Gusset | peak RSS, cgo | peak RSS, Gusset | wall clock, cgo | wall clock, Gusset |\n")
 	b.WriteString("| ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n")

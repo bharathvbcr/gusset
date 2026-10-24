@@ -71,6 +71,26 @@ image or audio transform, a search-index probe or a large parse, you are almost
 certainly in the "few percent" band. If you are embedding it to add two numbers,
 you are in the "don't" band and no amount of tuning fixes that.
 
+**Where raw cgo wins, and where Go does.** Raw cgo is faster than Gusset on a
+single call at every work size measured, serial and under parallel load: the
+crossover table under "The measured numbers" has no arm in which Gusset comes
+out ahead, and it is generated from the committed recording, so that sentence
+stays true or `make docs-check` says otherwise. What changes with work size is
+how much faster. The same table gives the size from which Gusset is within 2x
+and within 1.1x of raw cgo, serial and with 18 goroutines; above that size the
+overhead is a rounding error on the call, below it the call is mostly overhead.
+Under parallel load the lines sit at larger work sizes than serial, because
+the coordination caps Gusset's throughput while blocking cgo runs the calls side
+by side. The arms are the table's rows and nothing is interpolated between them,
+so a workload between two rows is somewhere between their answers.
+
+For work no longer than a bare cgo call (the noop row's raw-cgo column), plain
+Go is cheaper than either, because it has no boundary to cross. The recording
+has no pure-Go arm, so that is an inference from the noop row, not a measured
+line. Gusset sets no target ratio to raw cgo on small calls: it caps overhead
+rather than removing it, and this page reports where the measured line falls
+instead of claiming it clears a bar.
+
 ### 2. How many calls are in flight at once?
 
 ![Peak OS threads against concurrent in-flight calls](img/threads.svg)
@@ -112,6 +132,15 @@ counts three recordings out of date.
 | 7 µs | 7.29 µs | 9.04 µs | 1.24× | 495.15 ns | 3.00 µs | 6.06× |
 | 72 µs | 75.24 µs | 79.53 µs | 1.06× | 4.49 µs | 5.18 µs | 1.15× |
 | 720 µs | 724.30 µs | 738.11 µs | 1.02× | 45.90 µs | 47.18 µs | 1.03× |
+
+**Where the crossover is.** The ratio is Gusset's median over raw cgo's median on the same work, the ratio column above. A limit holds *from* an arm when that arm and every larger one is within it, so one lucky size does not count as a crossover.
+
+| | within 2× of raw cgo | within 1.1× of raw cgo | Gusset ahead of raw cgo |
+| --- | --- | --- | --- |
+| serial | from 7 µs (1.24×); not at 718 ns (3.09×) | from 72 µs (1.06×); not at 7 µs (1.24×) | none of the 5 arms |
+| 18 goroutines | from 72 µs (1.15×); not at 7 µs (6.06×) | from 720 µs (1.03×); not at 72 µs (1.15×) | none of the 5 arms |
+
+The arms recorded are noop, 718 ns, 7 µs, 72 µs and 720 µs, 10 repetitions each. A crossover is bracketed by those arms, not interpolated between them.
 
 **Cost of concurrency.** Medians over the committed sweep, each transport in its own process.
 
