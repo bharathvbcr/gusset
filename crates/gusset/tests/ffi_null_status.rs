@@ -14,7 +14,7 @@
 
 #![allow(unsafe_code)]
 
-use gusset::ffi::status::{FfiStatus, FFI_ERR, FFI_OK, FFI_PANIC};
+use gusset::ffi::status::{FfiStatus, FFI_BAD_ARG, FFI_ERR, FFI_OK, FFI_PANIC};
 use gusset::ffi::{
     gusset_handle_close, gusset_handle_open, gusset_status_free, gusset_submit, gusset_take,
 };
@@ -87,7 +87,14 @@ fn handle_open_failure_reports_the_same_code_without_a_status() {
         // A negative fd is refused by Handle::open, after the null checks.
         unsafe { gusset_handle_open(1, -1, &mut h, st) }
     });
-    assert_eq!(with, FFI_ERR, "control: the status path reports FFI_ERR");
+    // FFI_BAD_ARG since DECISIONS.md 2026-10-24 (owner decision 2026-10-13): a
+    // refused argument was FFI_ERR. The property under test is unchanged, that
+    // a NULL status reports the same code as a status; the engine-failure code
+    // is still pinned by the take test below.
+    assert_eq!(
+        with, FFI_BAD_ARG,
+        "control: the status path reports FFI_BAD_ARG"
+    );
     assert_eq!(
         without, with,
         "gusset_handle_open with a NULL status returned {without}, with a status {with}"

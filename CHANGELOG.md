@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+Changes since v0.0.3. The C ABI layout is unchanged (17 exports, ABI layout version 2): the status-code change below is a change of value, not of layout, so an installed v0.0.3 library and a rebuilt Go package still agree on every struct.
+
+### Changed
+
+- **C hosts: argument refusals now return `FFI_BAD_ARG`, not `FFI_ERR` (`ft-3d60ee16`, DECISIONS.md 2026-10-24).** `gusset_handle_open` returns `FFI_BAD_ARG` for a `pool_size` over `GUSSET_MAX_POOL_SIZE`, a negative `pipe_write_fd`, and a descriptor that is not the write end of an open pipe. `gusset_submit` returns it for unknown `CallHeader` flag bits (after the poisoned, closed and shutting-down checks, so those still report themselves). `gusset_buf_alloc` returns it for a `len` of 0 or over `GUSSET_MAX_BUFFER_BYTES`. A host that tested for `FFI_ERR` on any of these must test for `FFI_BAD_ARG`; `gusset.h` now lists every refusal that returns it. Every other refusal keeps its code. Go callers are unaffected: `errors.Is(err, ErrBadArg)` is the documented check and Go validates the pool size and buffer length before it calls in. Rust callers of `Handle::open`, `submit` and `buf_alloc_published` see no change; their `Err(String)` signatures are as before.
+- **`Open` returns an error for a nil `Option` instead of panicking.** `Open(nil)` and `Open(WithPoolSize(2), nil)` return an error matching `ErrBadArg` before anything is allocated. `Option` is a func type, so nil compiles; `Open` called it unchecked and panicked with a nil dereference. No new exported identifier: the error is a `*Error` with code `FFI_BAD_ARG`. The `Option` godoc says so.
+
+### Tests
+
+- `ErrShutdownIncomplete` is exercised end to end. `tests/rust_shutdown.rs` submits a non-cooperative diagnostic job (mode 17), waits for the engine's own gauge to show it running, calls `shutdown(10ms)`, asserts work remains and `gusset_shutdown` returns `FFI_ERR`, then re-arms. `tests/shutdown_incomplete` asserts `Shutdown` returns `ErrShutdownIncomplete` for the same work, and that a negative budget is zero and a budget past `MaxDrain` is capped rather than wrapped, each with work in flight. A `Shutdown` that returned nil with undrained work passed every earlier test.
+- The two cancel messages Go maps to `ErrShutdown` and `context.Canceled`, `cancelled: Shutdown` and `cancelled: Explicit`, are pinned in `tests/rust_shutdown.rs` beside the pinned `cancelled: DeadlineExceeded`.
+- `TestPitfall_OpenNilOptionIsRefusedNotPanicked`, `TestFFI_ArgumentRefusalsAreBadArg` and the Rust `argument_refusal_tests` pin the two changes above, and that the refusals outside the list stay `FFI_ERR`.
+
 ### 2026-10-24 · Documentation drift: the docs say what the code does (card ft-86b4ae63)
 
 Documentation, one comment-only Go change and two `compile_error!` text changes; no runtime, export, ABI or public-surface change. Where a document and the code disagreed, the document changed.

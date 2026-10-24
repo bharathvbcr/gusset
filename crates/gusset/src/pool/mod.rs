@@ -40,6 +40,38 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use sys::RawBuffer;
 
+/// Why a pool call refused, classified for the C ABI's status code.
+///
+/// The public methods return `Err(String)` and keep doing so. The
+/// `*_classified` forms the exports call say which refusals are the caller's
+/// argument (the pool size, the completion descriptor, unknown flag bits, a
+/// buffer length): those cross the boundary as `FFI_BAD_ARG`, so a C host can
+/// tell "you called me wrong" from "the engine or the runtime failed"
+/// (`DECISIONS.md` 2026-10-24).
+#[derive(Debug)]
+pub(crate) enum PoolError {
+    /// A caller-supplied argument was refused: `FFI_BAD_ARG`.
+    BadArg(String),
+    /// Anything else, including a state refusal (poisoned, closed, shutting
+    /// down) and an unknown buffer id: `FFI_ERR`.
+    Failed(String),
+}
+
+impl From<String> for PoolError {
+    fn from(msg: String) -> Self {
+        Self::Failed(msg)
+    }
+}
+
+impl PoolError {
+    /// The message alone, which is all the `String`-returning forms report.
+    fn into_message(self) -> String {
+        match self {
+            Self::BadArg(msg) | Self::Failed(msg) => msg,
+        }
+    }
+}
+
 /// Hasher for ids Gusset assigns itself (tickets, buffer ids, opcodes).
 ///
 /// std's default SipHash-1-3 exists to resist HashDoS, and it cost ~470
@@ -316,6 +348,16 @@ impl Handle {
     /// failures (`sys::set_nonblocking`). On success Gusset owns it and has made
     /// it non-blocking (and NOSIGPIPE on Darwin).
     pub fn open(pool_size: u32, pipe_write_fd: i32) -> Result<Arc<Self>, String> {
+        Self::open_classified(pool_size, pipe_write_fd).map_err(PoolError::into_message)
+    }
+
+    /// [`Handle::open`] with the refusal classified: a pool size over the
+    /// ceiling, a negative descriptor and a descriptor that is not the write
+    /// end of a pipe are [`PoolError::BadArg`].
+    pub(crate) fn open_classified(
+        pool_size: u32,
+        pipe_write_fd: i32,
+    ) -> Result<Arc<Self>, PoolError> {
         install_panic_hook();
 
         let pool_size = if pool_size == 0 {
@@ -330,19 +372,21 @@ impl Handle {
         // refused for its pool size still left the caller's pipe O_NONBLOCK
         // (and NOSIGPIPE on Darwin).
         if pipe_write_fd < 0 {
-            return Err("pipe_write_fd must be non-negative".to_string());
-        }
-        if pool_size > MAX_POOL_SIZE {
-            return Err(format!(
-                "pool_size {} exceeds maximum {} (each worker is an OS thread with an 8 MiB stack)",
-                pool_size, MAX_POOL_SIZE
+            return Err(PoolError::BadArg(
+                "pipe_write_fd must be non-negative".to_string(),
             ));
         }
+        if pool_size > MAX_POOL_SIZE {
+            return Err(PoolError::BadArg(format!(
+                "pool_size {} exceeds maximum {} (each worker is an OS thread with an 8 MiB stack)",
+                pool_size, MAX_POOL_SIZE
+            )));
+        }
         sys::check_pipe_write_end(pipe_write_fd).map_err(|e| {
-            format!(
+            PoolError::BadArg(format!(
                 "pipe write fd {} is not the write end of an open pipe: {}",
                 pipe_write_fd, e
-            )
+            ))
         })?;
         // I4 keeps unread tickets at or under pool_size, which is only a
         // "the pipe never fills" guarantee if the pipe holds that many. Linux
@@ -433,24 +477,37 @@ impl Handle {
 
     /// Submits a task to the pool (R16 zero-copy for buffers).
     pub fn submit(&self, header: CallHeader, input: &[u8], buffer_id: u64) -> Result<u64, String> {
+        self.submit_classified(header, input, buffer_id)
+            .map_err(PoolError::into_message)
+    }
+
+    /// [`Handle::submit`] with the refusal classified: unknown flag bits are
+    /// [`PoolError::BadArg`]. The state refusals still come first, so a call on
+    /// a poisoned, closed or shutting-down handle reports that, not its flags.
+    pub(crate) fn submit_classified(
+        &self,
+        header: CallHeader,
+        input: &[u8],
+        buffer_id: u64,
+    ) -> Result<u64, PoolError> {
         if self.poisoned.load(Ordering::Acquire) {
-            return Err("handle is poisoned".to_string());
+            return Err("handle is poisoned".to_string().into());
         }
         if self.closed.load(Ordering::Acquire) {
-            return Err("handle is closed".to_string());
+            return Err("handle is closed".to_string().into());
         }
         if is_shutting_down() {
-            return Err("gusset runtime is shutting down".to_string());
+            return Err("gusset runtime is shutting down".to_string().into());
         }
 
         // Reject unknown flag bits instead of ignoring them, so a caller built
         // against a newer header cannot believe a flag took effect here.
         let unknown = header.flags & !GUSSET_FLAGS_KNOWN;
         if unknown != 0 {
-            return Err(format!(
+            return Err(PoolError::BadArg(format!(
                 "unknown CallHeader flag bits set: {:#010x} (known mask {:#010x})",
                 unknown, GUSSET_FLAGS_KNOWN
-            ));
+            )));
         }
 
         // Auto-respawn replacement workers if any died (I5)
@@ -469,7 +526,8 @@ impl Handle {
                 "inline input {} bytes exceeds {}-byte copy limit; use a Buffer",
                 input.len(),
                 MAX_INLINE_INPUT
-            ));
+            )
+            .into());
         } else {
             if input.len() <= SMALL_INPUT {
                 let mut bytes = [0u8; SMALL_INPUT];
@@ -517,7 +575,8 @@ impl Handle {
             return Err(match err {
                 PushError::Full(_) => "submission queue is full".to_string(),
                 PushError::Closed(_) => "handle is closed".to_string(),
-            });
+            }
+            .into());
         }
 
         Ok(ticket)
