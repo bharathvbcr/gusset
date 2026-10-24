@@ -360,9 +360,19 @@ jobs:
         working-directory: fuzz
         run: |
           set -euo pipefail
-          for t in log_ring truncate_payload ring_records call_header ffi_exports; do
+          for t in log_ring truncate_payload ring_records call_header; do
             echo "== $t"
             cargo "+$RUST_NIGHTLY" fuzz run -O "$t" -- -max_total_time=300 -max_len=4096 -rss_limit_mb=2048
+          done
+          # ffi_exports opens and closes a handle per input, and under ASan
+          # each open/close keeps ~78 KB of RSS that is never returned (flat
+          # 26 MB without a sanitizer, so not a Gusset leak): one 300 s run
+          # crossed 2048 MB with a 26 MB live heap. Five 60 s processes keep
+          # the same time and the same corpus, each well under the limit, and
+          # the limit still catches a real out-of-memory.
+          for i in 1 2 3 4 5; do
+            echo "== ffi_exports ($i/5)"
+            cargo "+$RUST_NIGHTLY" fuzz run -O ffi_exports -- -max_total_time=60 -max_len=4096 -rss_limit_mb=2048
           done
 
       # libFuzzer writes crash-, oom- and timeout- inputs to fuzz/artifacts/<target>/,
