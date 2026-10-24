@@ -105,11 +105,12 @@ func TestHammerSeed_ReplaysTheRecordedSeed(t *testing.T) {
 // The abandon oracle wants the body back. Mode 9 returns the body only when
 // something follows its two-byte prefix; with nothing after it the engine
 // echoes the prefix itself. Both halves are pinned here: the engine's echo of
-// an empty remainder, and a builder that never asks for one. The draws are
-// seeded; at 1 in 6000 an empty body is certain within them.
+// an empty remainder, and a builder that never asks for one. The seed is one
+// whose draw 5 was an empty body under the old r.IntN(6000) builder, so the
+// check is cheap under -race and still fails on that builder.
 func TestHammer_AbandonInputNeverHasAnEmptyBody(t *testing.T) {
-	r := rand.New(rand.NewPCG(1792574500396995391, 7))
-	for i := range 60_000 {
+	r := rand.New(rand.NewPCG(2470, 7))
+	for i := range 200 {
 		in, body := abandonInput(r)
 		if len(body) == 0 {
 			t.Fatalf("draw %d: empty body; mode 9 echoes % x and the oracle would want 0 bytes", i, in)
