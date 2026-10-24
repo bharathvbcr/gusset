@@ -145,6 +145,16 @@ func workerMain() int {
 // misbehave announces itself and then fails the protocol one way, staying
 // alive so only the host can end it.
 func misbehave(mode string, out *os.File) int {
+	if mode == "grandchild" {
+		// A grandchild holding every pipe the worker has outlives it. It is
+		// started before hello, so it already holds them when Start returns:
+		// a kill right after Start cannot beat it to the pipe.
+		gc := exec.Command("sleep", "4")
+		gc.Stdout, gc.Stderr = out, os.Stderr
+		if err := gc.Start(); err != nil {
+			return 1
+		}
+	}
 	if err := writeFrame(out, &response{Op: opHello, Version: protocolVersion, PoolSize: workerPool}, maxResponseFrame); err != nil {
 		return 1
 	}
@@ -169,13 +179,6 @@ func misbehave(mode string, out *os.File) int {
 		_, _ = out.Write(append(hdr[:], "0123456789"...))
 	case "dup", "reorder", "unknown":
 		return scripted(mode, out)
-	case "grandchild":
-		// A grandchild holding every pipe the worker has outlives it.
-		gc := exec.Command("sleep", "4")
-		gc.Stdout, gc.Stderr = out, os.Stderr
-		if err := gc.Start(); err != nil {
-			return 1
-		}
 	case "answer-hold":
 		return answerThenHold(out)
 	case "cloexec":
