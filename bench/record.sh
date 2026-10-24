@@ -23,13 +23,18 @@
 #
 # The guards, in the order they run:
 #
-#   1. A lock, so a second recording refuses instead of interleaving. Owner and
-#      process group are written in a private directory and renamed into place,
-#      so the lock is not visible until both exist. A lock with no pgid is held
-#      for a grace period rather than stolen. An abandoned run is reported with
-#      the exact pgid to kill.
-#   2. A preflight and a between-arms check for any other Go benchmark process
-#      on the machine — ours or somebody else's.
+#   1. A lock, so a second recording refuses instead of interleaving. Owner pid
+#      and process group are written in a private directory and renamed into
+#      place, so the lock is not visible until both exist. A lock missing either
+#      is held for a grace period rather than stolen. Liveness keys on the
+#      owner pid (and, against pid reuse, that the pid is still in the recorded
+#      process group), never on the group alone: a recorder SIGKILLed inside a
+#      long-lived parent's group would otherwise block every later run for as
+#      long as that parent lived. Taking over an abandoned lock is serialized by
+#      a claim (see take_over), so two recorders cannot both clear it and both
+#      publish.
+#   2. A preflight and a between-arms check for any other Go or cargo benchmark
+#      process on the machine — ours or somebody else's.
 #   3. CPU idle sampled before and after. Load average is useless here: macOS
 #      reported 62.9 on an 18-core machine that was 80% idle.
 #   4. Per-arm temporary files, assembled at the end. Nothing appends to the
@@ -42,11 +47,13 @@
 # The signal trap is defence in depth rather than a response to a diagnosed
 # fault: whether an interrupted run here ever orphaned its arm loop was never
 # established, but a recording that leaves a benchmark running behind it is a
-# recording that poisons the next one. INT and TERM kill only the child
-# process group this script started (never this script's own group), wait for
-# it, then the EXIT trap removes the lock and the temporary directory and the
-# script exits 130. Signalling group 0 killed the script before that cleanup
-# and left the lock held, status 143.
+# recording that poisons the next one. INT, TERM, HUP and QUIT kill only the
+# child process group this script started (never this script's own group), wait
+# for it, then the EXIT trap removes the lock, any lock staging directory and
+# the temporary directory and the script exits 130. HUP and QUIT are trapped
+# because the children are setsid'd: a closed terminal would otherwise end this
+# script and leave them running. Signalling group 0 killed the script before
+# that cleanup and left the lock held, status 143.
 #
 # A run that fails any guard writes no output at all. The previous file is left
 # untouched, because a stale honest measurement beats a fresh contaminated one.
@@ -57,7 +64,18 @@
 #   OUT        published results path, written only on success
 #   BENCHTIME  passed to -benchtime (e.g. 1s, 5x)
 #   COUNT      passed to -count
-#   ARM...     one -bench regex per arm; each runs in its own process
+#   ARM...     one -bench regex per arm; each runs in its own process. An arm
+#              written cargo:PACKAGE/BENCH is a `cargo bench -p PACKAGE --bench
+#              BENCH` run instead: BENCHTIME does not apply to it (the bench
+#              owns its iteration count) and COUNT becomes its --rounds.
+#              RECORD_DIR must then be the Cargo workspace root (make
+#              bench-dispatch does this). Its stdout is the recorded output;
+#              cargo's own stderr is shown only when the arm fails.
+#
+#   COUNT must be a positive integer, and every arm must produce at least one
+#   Benchmark row: an arm that exits 0 with no rows (a -bench regex that matches
+#   nothing) would otherwise be assembled as an empty section behind a header
+#   that says it ran.
 #
 # Two optional environment variables, both off by default:
 #
@@ -95,12 +113,31 @@ RECORD_PKG=${RECORD_PKG:-.}
 RECORD_CPU=${RECORD_CPU:-}
 RECORD_VARIANTS=${RECORD_VARIANTS:-}
 
+# Checked before the lock is taken, so a typo costs nothing and the previous
+# results file is never at risk. A COUNT of 0 or a non-number used to skip the
+# variant loop entirely and move a header-only file over the last good one.
+if ! printf '%s\n' "$COUNT" | grep -Eq '^[1-9][0-9]*$'; then
+	echo "record: COUNT '$COUNT' is not a positive integer" >&2
+	exit 2
+fi
+for a in "$@"; do
+	case $a in
+	cargo:*)
+		if ! printf '%s\n' "${a#cargo:}" | grep -Eq '^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$'; then
+			echo "record: arm '$a' is not cargo:PACKAGE/BENCH" >&2
+			exit 2
+		fi
+		;;
+	esac
+done
+
 # Checked before the lock is taken, so a typo costs nothing. A variant whose
 # directory is missing would otherwise fail in its first round, after the other
 # variants had already spent their time.
 WARM_DIR=$RECORD_DIR
 if [ -n "$RECORD_VARIANTS" ]; then
 	WARM_DIR=
+	seen_names=
 	for v in $RECORD_VARIANTS; do
 		name=${v%%=*}
 		dir=${v#*=}
@@ -108,6 +145,15 @@ if [ -n "$RECORD_VARIANTS" ]; then
 			echo "record: RECORD_VARIANTS entry '$v' is not NAME=DIR with a lower-case NAME" >&2
 			exit 2
 		fi
+		# A repeated name shares one vindex file and one `variant:` label, so
+		# its arm was listed twice and its rows silently doubled.
+		case " $seen_names " in
+		*" $name "*)
+			echo "record: RECORD_VARIANTS names '$name' twice" >&2
+			exit 2
+			;;
+		esac
+		seen_names="$seen_names $name"
 		if [ ! -d "$dir" ]; then
 			echo "record: variant $name: no directory $dir" >&2
 			exit 2
@@ -124,8 +170,15 @@ fi
 
 LOCK=bench/results/.record.lock
 TMP=
+# Directories this process created beside the lock: the private directory a
+# lock is built in, and the claim a takeover of a dead recorder's lock is
+# serialized by. Both are removed on every exit path; a SIGKILL can still strand
+# one, which .gitignore covers.
+STAGE=
+CLAIM=
+CLAIM_WAITS=0
 
-# A published lock has both owner and pgid. A directory with no pgid (a crash
+# A published lock has both owner and pgid. A directory missing either (a crash
 # before the rename, or the old mkdir-then-write window) is not treated as
 # abandoned until this many seconds have passed.
 LOCK_GRACE_SECONDS=2
@@ -154,6 +207,12 @@ cleanup_exit() {
 	if [ -n "$TMP" ]; then
 		rm -rf "$TMP"
 	fi
+	if [ -n "$STAGE" ]; then
+		rm -rf "$STAGE"
+	fi
+	if [ -n "$CLAIM" ]; then
+		rm -rf "$CLAIM"
+	fi
 	# Only release the lock if this process is the one holding it. A run that
 	# refused because somebody else held the lock must not delete their lock.
 	if [ -f "$LOCK/pgid" ] && [ -f "$LOCK/owner" ]; then
@@ -171,6 +230,16 @@ stop_active_child() {
 	pgid=$ACTIVE_CHILD_PGID
 	if [ -z "$pid" ]; then
 		return 0
+	fi
+	# A signal can land between start_isolated and confirm_pgid recording the
+	# group. Without the lookup the pid alone was killed and a grandchild of the
+	# child (go test's compiled benchmark) kept running behind a recording that
+	# had reported itself interrupted.
+	if [ -z "$pgid" ]; then
+		g=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+		if [ -n "$g" ] && [ "$g" != "$SELF_PGID" ]; then
+			pgid=$g
+		fi
 	fi
 	if [ -n "$pgid" ] && [ "$pgid" != "$SELF_PGID" ]; then
 		kill -TERM "-$pgid" 2>/dev/null || true
@@ -201,7 +270,7 @@ stop_active_child() {
 cleanup_signal() {
 	# Disarm before stopping children so a second signal cannot re-enter, and
 	# so the child's death cannot be mistaken for a new interrupt.
-	trap - INT TERM
+	trap - INT TERM HUP QUIT
 	echo "" >&2
 	echo "record: interrupted — stopping this recording's child processes so no arm" >&2
 	echo "        is left running to contaminate the next run" >&2
@@ -211,7 +280,7 @@ cleanup_signal() {
 }
 
 trap cleanup_exit EXIT
-trap cleanup_signal INT TERM
+trap cleanup_signal INT TERM HUP QUIT
 
 # start_isolated runs "$@" in a new process group and records its pid.
 # setsid(1) is not on macOS; perl and python3 are the fallbacks. The child
@@ -270,6 +339,12 @@ record_sleep() {
 	spawn_group sleep "$1" || true
 }
 
+# Where the Linux branch of cpu_idle reads the kernel's counters. Only
+# record_test.sh moves it, to feed that branch a counter it controls on a host
+# whose real load it cannot (the Darwin branch is steered the same way, by a
+# `top` stub on PATH). The threshold is not configurable.
+PROC_STAT=${RECORD_PROC_STAT:-/proc/stat}
+
 # cpu_idle prints the CPU idle percentage, or nothing at all if it cannot
 # measure it. Printing nothing is deliberate: an unmeasured machine must not be
 # recorded as a quiet one.
@@ -282,10 +357,10 @@ cpu_idle() {
 		;;
 	Linux)
 		awk '/^cpu /{i1=$5; t1=0; for(j=2;j<=NF;j++) t1+=$j}
-		     END{print i1"\t"t1}' /proc/stat > "$TMP/stat1"
+		     END{print i1"\t"t1}' "$PROC_STAT" > "$TMP/stat1"
 		record_sleep 1
 		awk '/^cpu /{i2=$5; t2=0; for(j=2;j<=NF;j++) t2+=$j}
-		     END{print i2"\t"t2}' /proc/stat > "$TMP/stat2"
+		     END{print i2"\t"t2}' "$PROC_STAT" > "$TMP/stat2"
 		awk 'NR==1{i1=$1;t1=$2} NR==2{i2=$1;t2=$2}
 		     END{ if (t2>t1) printf "%.2f\n", 100*(i2-i1)/(t2-t1) }' \
 			"$TMP/stat1" "$TMP/stat2"
@@ -293,14 +368,19 @@ cpu_idle() {
 	esac
 }
 
-# foreign_benchmarks lists Go benchmark processes running on this machine.
+# foreign_benchmarks lists benchmark processes running on this machine.
 #
-# Matches any compiled test binary invoked with -test.bench, which is what a
-# `go test -bench` run looks like no matter which module started it. Somebody
-# else's benchmark competes for the same cores as effectively as our own.
+# Matches any compiled Go test binary invoked with -test.bench, which is what a
+# `go test -bench` run looks like no matter which module started it, and a
+# cargo bench: the bench binary cargo runs (target/.../deps/NAME-HASH, which it
+# hands --bench) and `cargo bench` itself while it builds. Somebody else's
+# benchmark competes for the same cores as effectively as our own, and a cargo
+# arm of this very script is one of them whenever two recordings overlap.
 foreign_benchmarks() {
 	ps -Ao pid,command |
-		grep -E '\.test( |$).*-test\.bench' |
+		grep -E -e '\.test( |$).*-test\.bench' \
+			-e '/deps/[^ /]+-[0-9a-f]{8,}( |$).*--bench( |$)' \
+			-e '(^|[ /])cargo( +\+[^ ]+)? +bench( |$)' |
 		grep -v grep || true
 }
 
@@ -308,7 +388,7 @@ require_exclusive() {
 	when=$1
 	foreign_benchmarks > "$TMP/foreign"
 	if [ -s "$TMP/foreign" ]; then
-		echo "record: refusing to record — another Go benchmark is running ($when):" >&2
+		echo "record: refusing to record — another benchmark is running ($when):" >&2
 		cut -c1-140 < "$TMP/foreign" >&2
 		echo "record: wait for it, or kill its process group, then re-run." >&2
 		exit 1
@@ -378,7 +458,14 @@ if [ -z "$SELF_PGID" ]; then
 fi
 
 publish_lock() {
-	stage=$(mktemp -d "${LOCK}.stage.XXXXXX")
+	# Named by this process, and recorded before the directory exists, so that
+	# cleanup_exit can remove it whenever a signal lands: with mktemp the name was
+	# only known after the command substitution finished, and an interrupt in
+	# that window left the directory behind.
+	stage=${LOCK}.stage.$$
+	STAGE=$stage
+	rm -rf "$stage"
+	mkdir "$stage"
 	echo "$$" > "$stage/owner"
 	printf '%s\n' "$SELF_PGID" > "$stage/pgid"
 	if [ ! -s "$stage/owner" ] || [ ! -s "$stage/pgid" ]; then
@@ -409,18 +496,95 @@ publish_lock() {
 	return 1
 }
 
-lock_pgid() {
-	held_pgid=
-	if [ -s "$LOCK/pgid" ]; then
-		held_pgid=$(cat "$LOCK/pgid" 2>/dev/null || true)
+# lock_field prints one field of the published lock, or nothing.
+lock_field() {
+	value=
+	if [ -s "$LOCK/$1" ]; then
+		value=$(cat "$LOCK/$1" 2>/dev/null || true)
 	fi
-	printf '%s\n' "$held_pgid"
+	printf '%s\n' "$value"
+}
+
+# lock_holder_alive OWNER PGID: whether the recorder that wrote a lock is still
+# running.
+#
+# The owner pid decides. `ps -p` rather than `kill -0`: kill reports EPERM for a
+# live process of another user exactly as it reports ESRCH, which would read as
+# "dead" and steal a live recorder's lock. The group is a second key only
+# against pid reuse: a live process of the right pid in a different group is
+# somebody else's, so the lock is stale. A group that is still alive proves
+# nothing on its own. It is the group of whatever launched the dead recorder
+# (an agent harness, a CI step shell), and treating it as the recorder was how a
+# SIGKILLed run blocked every later one for as long as its parent lived.
+lock_holder_alive() {
+	if [ -z "$1" ] || ! ps -p "$1" > /dev/null 2>&1; then
+		return 1
+	fi
+	now=$(ps -o pgid= -p "$1" 2>/dev/null | tr -d ' ' || true)
+	if [ -n "$now" ] && [ -n "$2" ] && [ "$now" != "$2" ]; then
+		return 1
+	fi
+	return 0
 }
 
 refuse_live_lock() {
-	echo "record: another recording is in progress (process group $1)." >&2
-	echo "record: wait for it, or stop it with:  kill -TERM -$1" >&2
+	echo "record: another recording is in progress (pid $1)." >&2
+	echo "record: wait for it. If it is yours and wedged, stop it with:  kill -TERM $1" >&2
+	echo "record: if pid $1 is not a recorder (the pid was reused), remove $LOCK" >&2
 	exit 1
+}
+
+# take_over removes the lock a dead recorder left. Serialized, not raced.
+#
+# Clearing a lock and publishing a new one are separate steps, so two recorders
+# that both judged the same lock stale could each clear it and each publish: the
+# second one's removal deletes the first one's fresh lock, and both record at
+# once. Renaming the stale lock away does not close that. A taker that judged the
+# lock stale a moment ago renames whatever is there now, which can be a live
+# recorder's lock that replaced it, and putting that back leaves a gap in which a
+# third recorder publishes (an 8-way race against a dead lock hit exactly this).
+#
+# So takers first take a claim, a directory made with mkdir, which has one
+# winner. The winner re-reads the lock under the claim and removes it only if its
+# owner is still the one judged stale. That is sound because nobody can replace a
+# lock that exists: a publisher needs it gone, and the only thing that removes a
+# dead recorder's lock is a claim holder. The claim is held for milliseconds. One
+# whose holder was killed inside them is cleared once its holder is gone, or after
+# a wait if it never got an owner; two recorders clearing the same abandoned claim
+# at once is the one case left, and needs a SIGKILL inside that window first.
+take_over() {
+	judged_owner=$1
+	judged_pgid=$2
+	claim=$LOCK.claim
+	if mkdir "$claim" 2> /dev/null; then
+		CLAIM=$claim
+		echo "$$" > "$claim/owner"
+		CLAIM_WAITS=0
+		now_owner=
+		if [ -s "$LOCK/owner" ]; then
+			now_owner=$(cat "$LOCK/owner" 2>/dev/null || true)
+		fi
+		if [ -e "$LOCK" ] && [ "$now_owner" = "$judged_owner" ]; then
+			echo "record: clearing a lock left by an abandoned run (pid ${judged_owner:-unknown}, process group ${judged_pgid:-unknown})" >&2
+			rm -rf "$LOCK"
+		fi
+		rm -rf "$claim"
+		CLAIM=
+		return 0
+	fi
+	# Another recorder is taking over; let it finish and look again.
+	claim_owner=$(cat "$claim/owner" 2>/dev/null || true)
+	if [ -n "$claim_owner" ]; then
+		if ! lock_holder_alive "$claim_owner" ""; then
+			echo "record: clearing a takeover claim left by pid $claim_owner, which is gone" >&2
+			rm -rf "$claim"
+		fi
+	elif [ "$CLAIM_WAITS" -ge 30 ]; then
+		echo "record: clearing a takeover claim that never got an owner" >&2
+		rm -rf "$claim"
+	fi
+	CLAIM_WAITS=$((CLAIM_WAITS + 1))
+	sleep 0.1
 }
 
 acquire_lock() {
@@ -429,29 +593,32 @@ acquire_lock() {
 		if publish_lock; then
 			return 0
 		fi
-		held_pgid=$(lock_pgid)
-		if [ -n "$held_pgid" ] && kill -0 "-$held_pgid" 2>/dev/null; then
-			refuse_live_lock "$held_pgid"
+		held_owner=$(lock_field owner)
+		held_pgid=$(lock_field pgid)
+		if [ ! -e "$LOCK" ]; then
+			# Taken over and cleared since publish_lock looked; publish again.
+			continue
 		fi
-		if [ -z "$held_pgid" ]; then
-			echo "record: lock has no pgid — not stealing it for ${LOCK_GRACE_SECONDS}s" >&2
+		if [ -z "$held_owner" ] || [ -z "$held_pgid" ]; then
+			echo "record: lock has no pgid or owner — not stealing it for ${LOCK_GRACE_SECONDS}s" >&2
 			waited=0
-			while [ "$waited" -lt "$LOCK_GRACE_SECONDS" ]; do
+			while [ "$waited" -lt "$LOCK_GRACE_SECONDS" ] && [ -e "$LOCK" ]; do
 				record_sleep 1
 				waited=$((waited + 1))
-				held_pgid=$(lock_pgid)
-				if [ -n "$held_pgid" ]; then
+				held_owner=$(lock_field owner)
+				held_pgid=$(lock_field pgid)
+				if [ -n "$held_owner" ] && [ -n "$held_pgid" ]; then
 					break
 				fi
 			done
-			if [ -n "$held_pgid" ] && kill -0 "-$held_pgid" 2>/dev/null; then
-				refuse_live_lock "$held_pgid"
-			fi
 		fi
-		echo "record: clearing a lock left by an abandoned run (process group ${held_pgid:-unknown})" >&2
-		rm -rf "$LOCK"
+		if lock_holder_alive "$held_owner" "$held_pgid"; then
+			refuse_live_lock "$held_owner"
+		fi
+		take_over "$held_owner" "$held_pgid"
 	done
 }
+
 
 acquire_lock
 
@@ -494,9 +661,42 @@ if [ -n "$RECORD_CPU" ]; then
 	CPU_FLAG=-cpu=$RECORD_CPU
 fi
 
+# arm_exec DIR ARM BENCHTIME COUNT OUT runs one arm in its own process group and
+# returns its status. A go arm is a -bench regex: its stdout and stderr both go
+# to OUT, as `go test` prints them. A cargo:PACKAGE/BENCH arm is built first
+# (so the compile is not charged to the measurement window, and a build failure
+# is reported as one) and then run with COUNT as its --rounds; only its stdout
+# is the recorded output, and cargo's stderr goes to OUT.err.
+arm_exec() {
+	case $2 in
+	cargo:*)
+		spec=${2#cargo:}
+		pkg=${spec%%/*}
+		bench=${spec#*/}
+		: > "$5.err"
+		if ! spawn_group cargo bench --locked --manifest-path "$1/Cargo.toml" \
+			-p "$pkg" --bench "$bench" --no-run > /dev/null 2> "$5.err"; then
+			return 1
+		fi
+		spawn_group cargo bench --locked --manifest-path "$1/Cargo.toml" \
+			-p "$pkg" --bench "$bench" -- --rounds "$4" > "$5" 2>> "$5.err"
+		;;
+	*)
+		spawn_group go test -C "$1" -run '^$' -bench "$2" ${CPU_FLAG:+"$CPU_FLAG"} \
+			-benchtime="$3" -count="$4" "$RECORD_PKG" > "$5" 2>&1
+		;;
+	esac
+}
+
+# The cargo bench's own floor on rounds (benchstat will not quote an interval
+# below 6 samples), so the warm-up asks for it rather than for -count=1.
+WARM_COUNT=1
+case $1 in
+cargo:*) WARM_COUNT=10 ;;
+esac
+
 echo "record: warm-up (discarded) — $1"
-spawn_group go test -C "$WARM_DIR" -run '^$' -bench "$1" ${CPU_FLAG:+"$CPU_FLAG"} \
-	-benchtime=1s -count=1 "$RECORD_PKG" > "$TMP/warmup" 2>&1 || true
+arm_exec "$WARM_DIR" "$1" 1s "$WARM_COUNT" "$TMP/warmup" || true
 
 # ---------------------------------------------------------------------------
 # 4. One process per arm, into per-arm temporary files.
@@ -504,11 +704,23 @@ spawn_group go test -C "$WARM_DIR" -run '^$' -bench "$1" ${CPU_FLAG:+"$CPU_FLAG"
 # $TMP/parts lists those files in the order they are assembled.
 
 # run_arm DIR ARM COUNT: one benchmark process into $TMP/run, or no results.
+#
+# Exit status 0 is not enough: an arm whose -bench regex matches nothing exits 0
+# having printed `PASS` and no Benchmark row, and was assembled into the results
+# file as an empty section under a header that listed it.
 run_arm() {
-	if ! spawn_group go test -C "$1" -run '^$' -bench "$2" ${CPU_FLAG:+"$CPU_FLAG"} \
-		-benchtime="$BENCHTIME" -count="$3" "$RECORD_PKG" > "$TMP/run" 2>&1; then
+	: > "$TMP/run.err"
+	if ! arm_exec "$1" "$2" "$BENCHTIME" "$3" "$TMP/run"; then
 		echo "record: arm $2 failed in $1; no results written" >&2
 		cut -c1-200 < "$TMP/run" >&2
+		cut -c1-200 < "$TMP/run.err" >&2
+		exit 1
+	fi
+	rows=$(grep -cE '^Benchmark[^[:space:]]*[[:space:]]+[1-9][0-9]*[[:space:]]+[0-9][0-9.eE+-]*[[:space:]]+[^[:space:]]+' "$TMP/run" || true)
+	if [ "${rows:-0}" -lt 1 ]; then
+		echo "record: arm $2 in $1 produced no Benchmark rows; no results written" >&2
+		cut -c1-200 < "$TMP/run" >&2
+		cut -c1-200 < "$TMP/run.err" >&2
 		exit 1
 	fi
 	grep -E '^Benchmark' "$TMP/run" | cut -c1-120 || true
@@ -609,6 +821,17 @@ require_idle "after the last arm" "$IDLE_AFTER"
 	else
 		echo "# gusset-bench-package: $RECORD_DIR $RECORD_PKG"
 	fi
+	# The commit of the tree that was benchmarked (the first variant's, in
+	# variant mode; every variant's own is on its gusset-bench-variant line), so
+	# a reader can tell that the numbers describe code that has since changed.
+	# Full length, so it compares equal to `git rev-parse HEAD`; `unknown` when
+	# git cannot say, never an empty or guessed value. The modified count is the
+	# tracked paths that differed from that commit when the file was assembled.
+	commit_dir=$WARM_DIR
+	commit=$(git -C "$commit_dir" rev-parse HEAD 2>/dev/null || echo unknown)
+	commit_mods=$(git -C "$commit_dir" status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')
+	echo "# gusset-bench-commit: $commit"
+	echo "# gusset-bench-commit-modified: $commit_mods"
 	echo "# gusset-bench-arms: $*"
 	echo "# gusset-bench-benchtime: $BENCHTIME"
 	echo "# gusset-bench-count: $COUNT"
