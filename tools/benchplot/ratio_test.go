@@ -237,7 +237,7 @@ func TestResolveOneNamesARemedyThatExists(t *testing.T) {
 		"found 2 files matching transport-*.txt",
 		"transport-a.txt", "transport-b.txt",
 		"benchplot takes no file argument; its only flag is -check",
-		"move the recording you do not want charted out of " + dir,
+		"move the recording you do not want charted out of bench/results/ entirely",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message does not contain %q:\n%s", want, msg)

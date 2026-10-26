@@ -822,9 +822,9 @@ func resolveOne(dir, glob string) (string, error) {
 	}
 	return "", fmt.Errorf("found %d files matching %s in %s (%s); benchplot takes no file argument; "+
 		"its only flag is -check, and it will not choose which platform the docs describe. "+
-		"Keep exactly one: move the recording you do not want charted out of %s "+
-		"(or `git rm` it), then run again",
-		len(hits), glob, dir, strings.Join(names, ", "), dir)
+		"Keep exactly one: move the recording you do not want charted out of bench/results/ entirely "+
+		"(benchdoc also refuses a second recording there) or `git rm` it, then run again",
+		len(hits), glob, dir, strings.Join(names, ", "))
 }
 
 // writeDocTables regenerates the measured tables in docs/choosing.md, or in
