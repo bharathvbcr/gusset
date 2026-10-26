@@ -153,6 +153,21 @@ func TestBug_PanicLocationWorkerThread(t *testing.T) {
 // result does not rest on Go's view alone: the engine reports the most jobs it ever
 // ran at once, and that must be 1 on a pool of 1.
 //
+// The caller leaves through the path the name claims: Wait with a context whose
+// deadline passes while the job runs, which is waitInternal's ctx-deadline
+// abandon branch (wait.go). The test used to abandon through Discard, a
+// different path, so a change to that branch that returned the permit early
+// passed here and was caught only by other tests. Planting
+// s.releaseSemLocked(ticket) in that branch now fails this test.
+//
+// The gauge is how the test knows the job is in the engine before the caller's
+// deadline starts. A Wait deadline reaches Rust as a cancel, and a job cancelled
+// before it starts never runs the engine and rightly gives its permit back, so
+// a deadline that could pass while the job is still queued would report an I4
+// breach that is not one (the flake the Discard version was written to avoid).
+// The gauge is process-wide, so a second handle reads it while the first
+// handle's only permit is held.
+//
 // This test used to log instead of failing, and took the log-only branch in every
 // run it was checked in. Every assertion here is a t.Fatal.
 func TestBug_SemaphoreInFlightBreachOnTimeout(t *testing.T) {
@@ -164,16 +179,15 @@ func TestBug_SemaphoreInFlightBreachOnTimeout(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 	defer h.Close()
-	_ = peakInEngine(t, h) // reset the gauge
+	probe, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open (gauge reader) failed: %v", err)
+	}
+	defer probe.Close()
+	_ = peakInEngine(t, probe) // reset the gauge
 
-	// Caller 1 submits the job and abandons its ticket with Discard.
-	//
-	// It used to abandon by a 20 ms context deadline. Go hands that deadline to
-	// Rust, so on a loaded host the job could still be queued when it passed;
-	// a job cancelled before it starts never runs the engine and rightly gives
-	// its permit back, so the second caller was admitted and the test reported
-	// an I4 breach that was not one. Discard does not cancel, so the job runs to
-	// its end and the permit has to stay with it.
+	// Caller 1 submits the job under a long context, so nothing but its own
+	// Wait deadline can cancel it.
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel1()
 	jobStart := time.Now()
@@ -181,8 +195,29 @@ func TestBug_SemaphoreInFlightBreachOnTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("caller 1: Submit: %v", err)
 	}
-	if err := h.Discard(t1); err != nil {
-		t.Fatalf("caller 1: Discard: %v", err)
+
+	// Wait until the engine reports the job has entered. A read that finds the
+	// job already gone still reports it: the gauge's peak is since the last read.
+	entered := false
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if peakInEngine(t, probe) >= 1 {
+			entered = true
+			break
+		}
+	}
+	if !entered {
+		t.Fatalf("the job never entered the engine within 10 s of its submit")
+	}
+
+	// Caller 1 now leaves at a deadline, with the job running in the engine.
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelWait()
+	_, werr := h.Wait(waitCtx, t1)
+	if werr == nil {
+		hostprobe.Skip(t, "the job finished before caller 1's 20 ms deadline, %v after its submit: the deadline path never ran on this host", time.Since(jobStart))
+	}
+	if !errors.Is(werr, context.DeadlineExceeded) {
+		t.Fatalf("caller 1: Wait should have timed out against the running job, got %v", werr)
 	}
 
 	// The job runs for jobHold from some point after the submit. A second caller
