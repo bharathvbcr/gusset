@@ -801,18 +801,31 @@ func workflowSteps(lines []string) [][]string {
 	return steps
 }
 
+// yamlBlockScalar matches a block scalar header: | or > with the optional
+// chomping (+, -) and indentation-digit indicators in either order.
+var yamlBlockScalar = regexp.MustCompile(`^[|>](?:[+-]\d?|\d[+-]?)?$`)
+
+// stepRunBody returns a step's run body. The key may open the step
+// (`- run: |`, which an unnamed step does) or follow its first line, and the
+// body is every line indented deeper than the key.
 func stepRunBody(step []string) string {
 	var b strings.Builder
 	inRun := false
-	for _, l := range step {
+	keyIndent := 0
+	for i, l := range step {
 		trim := strings.TrimSpace(l)
 		if !inRun {
+			key := indentOf(l)
+			if i == 0 && strings.HasPrefix(trim, "- ") {
+				trim = strings.TrimSpace(strings.TrimPrefix(trim, "- "))
+				key += 2
+			}
 			if !strings.HasPrefix(trim, "run:") {
 				continue
 			}
 			rest := strings.TrimSpace(strings.TrimPrefix(trim, "run:"))
-			if rest == "|" || rest == ">" || rest == "|-" || rest == ">-" {
-				inRun = true
+			if header, _ := splitComment(rest); yamlBlockScalar.MatchString(header) {
+				inRun, keyIndent = true, key
 				continue
 			}
 			return rest
@@ -821,7 +834,7 @@ func stepRunBody(step []string) string {
 			b.WriteByte('\n')
 			continue
 		}
-		if !strings.HasPrefix(l, "          ") {
+		if indentOf(l) <= keyIndent {
 			break
 		}
 		b.WriteString(strings.TrimRight(l, " \t"))
