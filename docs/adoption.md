@@ -478,8 +478,11 @@ Things worth knowing before you hit them:
   want the work to stop early rather than merely be abandoned. Check once per
   chunk (for example `for chunk in data.chunks(4096) { ctx.check()?; … }`), not
   on every iteration: a branch in the hot loop stops LLVM from vectorizing it.
-  Moving the check made the example engine's sum of squares about 4× faster
-  (see [choosing](choosing.md)). Note that `gusset.Shutdown` will report an
+  Moving the check made the example engine's sum of squares faster, but the
+  size of the speedup is not backed by a committed benchmark: only the chunked
+  kernel is recorded (`bench/results/linux-amd64-vm/simd.txt`), and no run
+  with the check inside the loop is committed (see
+  [choosing](choosing.md)). Note that `gusset.Shutdown` will report an
   engine that never checks as still in flight when its drain budget expires.
 - **Pick the vector width at run time for hot kernels.** A Rust library is
   built for the baseline target unless you say otherwise: on x86-64 that is
