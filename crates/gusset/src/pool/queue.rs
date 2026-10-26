@@ -99,23 +99,27 @@ pub struct JobQueue<T> {
     fast_take_pauses: AtomicUsize,
 }
 
-/// The layout is the point of [`CachePadded`], and nothing else would notice it
-/// undone: a field moved out of its wrapper, or a wrapper shrunk, still
-/// compiles and passes every functional test. So the build checks it. Each
-/// padded field starts a different [`LINE`] and ends inside it, and the struct
-/// itself is `LINE`-aligned, so these offsets are line numbers in memory too.
-/// (`JobQueue<()>` stands for every `T`: the padded fields' sizes and alignments
-/// do not depend on it.)
+/// Implemented by [`CachePadded`] alone, so a bound on it names the wrapper.
+trait IsCachePadded {}
+
+impl<T> IsCachePadded for CachePadded<T> {}
+
+/// The padding is the point of [`CachePadded`], and nothing else would notice it
+/// undone: a field taken out of its wrapper still compiles and passes every
+/// functional test. So the build checks that each of `state`, `spinning` and
+/// `polled` is declared as a `CachePadded` (an unwrapped one fails the trait
+/// bound below) and that the wrapper's alignment is [`LINE`]. A padded field
+/// owns whole lines, so no other field, however the compiler orders them, can
+/// share one with it. The check is on declared types, not offsets; the runtime
+/// test `the_polled_fields_own_their_cache_line` checks addresses.
 const _: () = {
-    use std::mem::{align_of, offset_of, size_of};
-    assert!(align_of::<JobQueue<()>>() >= LINE);
-    assert!(size_of::<CachePadded<AtomicUsize>>() == LINE);
-    assert!(size_of::<CachePadded<Polled>>() == LINE);
-    assert!(size_of::<CachePadded<Mutex<State<()>>>>().is_multiple_of(LINE));
-    let state = offset_of!(JobQueue<()>, state) / LINE;
-    let spinning = offset_of!(JobQueue<()>, spinning) / LINE;
-    let polled = offset_of!(JobQueue<()>, polled) / LINE;
-    assert!(state != spinning && state != polled && spinning != polled);
+    assert!(std::mem::align_of::<CachePadded<()>>() == LINE);
+    let _: fn(&JobQueue<()>) = |q| {
+        fn padded<P: IsCachePadded>(_: &P) {}
+        padded(&q.state);
+        padded(&q.spinning);
+        padded(&q.polled);
+    };
 };
 
 /// Why a push was refused.
@@ -295,7 +299,7 @@ impl<T> Drop for QueueSender<T> {
 mod tests {
     use super::*;
 
-    /// The build-time check on offsets, repeated on a real allocation: the
+    /// The build-time check on declared types, repeated as addresses on a real allocation: the
     /// polled pair shares one line, and the lock, the poller count, the condvar
     /// and `cap` never land on it or on each other's lines.
     #[test]
