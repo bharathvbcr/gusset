@@ -514,4 +514,4 @@ Gusset's design builds upon insights, hard-won lessons, and patterns from prior 
 
 ## License
 
-`MIT OR Apache-2.0`
+Dual-licensed under either [`MIT`](LICENSE-MIT) or [`Apache-2.0`](LICENSE-APACHE) at your option.
