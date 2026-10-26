@@ -312,7 +312,9 @@ func rustupStepText(st []string) string {
 	return shellText(strings.Split(stepRunBody(st), "\n"), rustupWords)
 }
 
-var setPlusE = regexp.MustCompile(`(?m)(?:^|[;&|(]\s*|\s)set\s+(?:-\S+\s+)*\+[a-zA-Z]*e`)
+// setPlusE matches a body turning errexit off, in either spelling: `set +e`
+// (alone or among other short flags) and `set +o errexit`.
+var setPlusE = regexp.MustCompile(`(?m)(?:^|[;&|(]\s*|\s)set\s+(?:-\S+\s+)*(?:\+[a-zA-Z]*e|\+o\s+errexit\b)`)
 
 // rustupBodyViolations applies the rule to one shell body, a step's run body or
 // a whole script. who is the prefix of each message.

@@ -136,26 +136,29 @@ func TestPlantedRustupBypassesAreCaught(t *testing.T) {
 
 	// A check that does not stop the step is not a check.
 	for name, check := range map[string]string{
-		"|| echo naming exit":        okCheck + ` || echo "would exit 1"`,
-		"|| exit 1 || true":          okCheck + " || exit 1 || true",
-		"|| true after exit 1 list":  okCheck + " || true || exit 1",
-		"|| false then a semicolon":  okCheck + " || false; true",
-		"|| a group handler":         okCheck + " || { echo mismatch; exit 1; }",
-		"|| a subshell handler":      okCheck + " || (echo mismatch; exit 1)",
-		"|| exit with a variable":    okCheck + " || exit $?",
-		"|| exit 0":                  okCheck + " || exit 0",
-		"|| true":                    okCheck + " || true",
-		"backgrounded":               okCheck + " &",
-		"backgrounded then more":     okCheck + " & sleep 1",
-		"true || check":              "true || " + okCheck,
-		"false || true || check":     "false || true || " + okCheck,
-		"set +e before the check":    "set +e\n          " + okCheck,
-		"set +eu before the check":   "set +eu\n          " + okCheck,
-		"set -x +e before the check": "set -x +e\n          " + okCheck,
+		"|| echo naming exit":         okCheck + ` || echo "would exit 1"`,
+		"|| exit 1 || true":           okCheck + " || exit 1 || true",
+		"|| true after exit 1 list":   okCheck + " || true || exit 1",
+		"|| false then a semicolon":   okCheck + " || false; true",
+		"|| a group handler":          okCheck + " || { echo mismatch; exit 1; }",
+		"|| a subshell handler":       okCheck + " || (echo mismatch; exit 1)",
+		"|| exit with a variable":     okCheck + " || exit $?",
+		"|| exit 0":                   okCheck + " || exit 0",
+		"|| true":                     okCheck + " || true",
+		"backgrounded":                okCheck + " &",
+		"backgrounded then more":      okCheck + " & sleep 1",
+		"true || check":               "true || " + okCheck,
+		"false || true || check":      "false || true || " + okCheck,
+		"set +e before the check":     "set +e\n          " + okCheck,
+		"set +eu before the check":    "set +eu\n          " + okCheck,
+		"set -x +e before the check":  "set -x +e\n          " + okCheck,
+		"set +o errexit before check": "set +o errexit\n          " + okCheck,
+		"set -x +o errexit":           "set -x +o errexit\n          " + okCheck,
 	} {
 		good := ""
 		switch name {
-		case "set +e before the check", "set +eu before the check", "set -x +e before the check":
+		case "set +e before the check", "set +eu before the check", "set -x +e before the check",
+			"set +o errexit before check", "set -x +o errexit":
 			good = "set -e\n          " + okCheck
 		default:
 			good = okCheck + " || exit 1"
