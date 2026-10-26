@@ -623,3 +623,102 @@ func TestPitfall_WaitOfLargeTakeBufferDoesNotPayWrapperAllocs(t *testing.T) {
 		t.Fatalf("Wait of a 64 KiB take buffer allocated %.1f objects/op; want ≤ 4 (copy + submit bookkeeping). Eager Buffer wrap in drainPipe is the extra tax", allocs)
 	}
 }
+
+// TestZeroCopyEgress_LargeWaitBufferAddCleanupFreesOnGC is the Rust-owned half
+// of TestZeroCopyEgress_WaitBufferAddCleanupFreesOnGC. That test abandons
+// 4-byte results, which WaitBuffer carries in Go memory (id 0, nothing in Rust
+// to free), so on its own it no longer reaches the AddCleanup backstop it is
+// named for. A result over 4 KiB is a Rust take buffer; abandoning it must be
+// reclaimed by the cleanup, and the gauge must have counted it first, or a
+// return to baseline proves nothing.
+func TestZeroCopyEgress_LargeWaitBufferAddCleanupFreesOnGC(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const size = 64 * 1024
+	baseline := quiesceLiveBytes(t)
+
+	var peak uint64
+	abandonBuffers := func() {
+		for i := 0; i < 10; i++ {
+			ticket, err := h.Submit(ctx, allocatedInput(size, byte(i)))
+			if err != nil {
+				t.Fatalf("Submit %d failed: %v", i, err)
+			}
+			buf, err := h.WaitBuffer(ctx, ticket)
+			if err != nil {
+				t.Fatalf("WaitBuffer %d failed: %v", i, err)
+			}
+			if buf.ID() == 0 {
+				t.Fatalf("a %d-byte result must be a Rust take buffer, got a Go-memory one", size)
+			}
+			if live := gusset.Stats().LiveBytes; live > peak {
+				peak = live
+			}
+			runtime.KeepAlive(buf)
+			// intentionally do not call buf.Free()
+		}
+	}
+	abandonBuffers()
+	if peak < baseline+size {
+		t.Fatalf("LiveBytes peaked at %d with %d-byte Rust results outstanding over a baseline of %d: the gauge did not count them, so a return to baseline would prove nothing", peak, size, baseline)
+	}
+
+	if live, ok := settleLiveBytes(baseline, true); !ok {
+		t.Fatalf("unfreed Rust buffers leaked memory: baseline=%d live=%d", baseline, live)
+	}
+}
+
+// TestZeroCopyEgress_InlineWaitBufferResultIsNotRustMemory pins what the
+// Go-memory carriage of a small WaitBuffer result changes for Stats: such a
+// result owns nothing in Rust, so holding many of them does not move
+// LiveBytes, while a large one (a take buffer) still does.
+func TestZeroCopyEgress_InlineWaitBufferResultIsNotRustMemory(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const (
+		count = 64
+		small = 4096
+	)
+	baseline := quiesceLiveBytes(t)
+
+	held := make([]*gusset.Buffer, 0, count)
+	for i := 0; i < count; i++ {
+		in := make([]byte, small)
+		ticket, err := h.Submit(ctx, in) // in[0] == 0: echo
+		if err != nil {
+			t.Fatalf("Submit %d failed: %v", i, err)
+		}
+		buf, err := h.WaitBuffer(ctx, ticket)
+		if err != nil {
+			t.Fatalf("WaitBuffer %d failed: %v", i, err)
+		}
+		if buf.ID() != 0 || len(buf.Bytes()) != small {
+			t.Fatalf("result %d: id %d, %d bytes; want a %d-byte Go-memory buffer", i, buf.ID(), len(buf.Bytes()), small)
+		}
+		held = append(held, buf)
+	}
+	// 64 x 4 KiB = 256 KiB held. Counted, LiveBytes would be that far over the
+	// baseline; the slack covers the pool's own transient allocations.
+	if live := gusset.Stats().LiveBytes; live > baseline+count*small/4 {
+		t.Fatalf("LiveBytes %d with %d inline results held, baseline %d: they were counted as Rust memory", live, count, baseline)
+	}
+	for _, b := range held {
+		if err := b.Free(); err != nil {
+			t.Fatalf("Free: %v", err)
+		}
+	}
+}

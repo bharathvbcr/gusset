@@ -23,12 +23,17 @@ func (h *Handle) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
 }
 
 // WaitBuffer waits for completion of an asynchronously submitted job ticket,
-// returning a zero-copy *Buffer backed by Rust-owned memory.
+// returning a *Buffer that holds the result.
 //
-// If the job completed with inline bytes rather than an allocated buffer, a *Buffer
-// is allocated to hold the data.
-// The caller is responsible for calling buf.Free() when done, though runtime.AddCleanup
-// acts as a safety net if the buffer is garbage collected.
+// A result larger than 4 KiB is a zero-copy *Buffer backed by Rust-owned
+// memory (ID is non-zero). A result of 4 KiB or less is carried in 64-byte
+// aligned Go memory (ID is 0): it owns nothing in Rust, so it is not counted
+// in Stats, and passing it to Submit or CallBuffer sends its bytes inline.
+// Bytes, Free and the closed-handle behaviour are the same for both.
+//
+// The caller is responsible for calling buf.Free() when done. For a
+// Rust-backed result runtime.AddCleanup acts as a safety net if the buffer is
+// garbage collected; a Go-memory result is reclaimed by the garbage collector.
 func (h *Handle) WaitBuffer(ctx context.Context, ticket uint64) (*Buffer, error) {
 	if h == nil || h.state == nil {
 		return nil, ErrNilHandle
@@ -67,7 +72,7 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 }
 
 // testHookBeforeResultFill runs, when set by a test, just before an inline
-// result is copied into the Rust buffer WaitBuffer allocated for it.
+// result is copied into the Go-heap Buffer WaitBuffer builds for it.
 var testHookBeforeResultFill func(*handleState)
 
 func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, error) {
@@ -76,41 +81,39 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 		return nil, shutdownCause(ctx, err)
 	}
 
-	// Wrap under cgoMu so Close cannot HandleClose the take buffer between
-	// waitInternal returning the view and newBufferFromRaw installing it.
-	if !s.enterCgo() {
-		s.discardTake(takeID)
-		return nil, ErrClosed
-	}
 	if takeID != 0 {
+		// Wrap under cgoMu so Close cannot HandleClose the take buffer between
+		// waitInternal returning the view and newBufferFromRaw installing it.
+		if !s.enterCgo() {
+			s.discardTake(takeID)
+			return nil, ErrClosed
+		}
 		buf := newBufferFromRaw(s, takeID, res.data)
 		s.cgoMu.RUnlock()
 		return buf, nil
 	}
-	s.cgoMu.RUnlock()
 
-	if len(res.data) > 0 {
-		// Filled under the same cgoMu hold that allocates it: Close cannot
-		// free the buffer between the allocation and the copy.
-		buf, err := s.allocBuffer(len(res.data), false, res.data)
-		if err != nil {
-			if s.closed.Load() {
-				return nil, ErrClosed
-			}
-			// This result already exists and has left completed; any error
-			// here would lose it for good. Poison refuses new work only (I2),
-			// and NewBuffer's Rust allocation is poison-checked, so a sibling's
-			// panic used to turn a finished result into ErrPoisoned. Carry it
-			// on the Go heap instead, 64-byte aligned like a Rust buffer.
-			return newHeapBuffer(s, res.data), nil
-		}
-		return buf, nil
-	}
+	// An inline result is already Go memory: drainPipe copied it out of Rust
+	// and freed the Rust side before handing it over. There is nothing for
+	// Close to free under it, so no cgoMu is taken and no Rust buffer is
+	// allocated. The result carries on the Go heap, 64-byte aligned like a
+	// Rust buffer, with id 0 (Submit sends its bytes inline). This is also the
+	// only way a finished result can survive a poisoned handle (I2), so the
+	// poisoned case no longer needs a path of its own.
+	//
+	// claimLocked hands out a stored result before it looks at closed, so a
+	// Close that has begun is refused here, the same answer the take path gives.
 	if s.closed.Load() {
 		return nil, ErrClosed
 	}
-	// A job returning an empty output (0 bytes) produces a valid empty Buffer
-	return newBufferFromRaw(s, 0, nil), nil
+	if len(res.data) == 0 {
+		// A job returning an empty output (0 bytes) produces a valid empty Buffer
+		return newBufferFromRaw(s, 0, nil), nil
+	}
+	if testHookBeforeResultFill != nil {
+		testHookBeforeResultFill(s)
+	}
+	return newHeapBuffer(s, res.data), nil
 }
 
 // claimLocked is the front half of Wait and Discard, the two ways a ticket's

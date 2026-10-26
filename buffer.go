@@ -17,7 +17,9 @@ import (
 // belong in Phase 4 isolation, not in-process posix_memalign.
 const MaxBufferBytes = 1 << 30
 
-// Buffer wraps a 64-byte aligned Rust-owned buffer (R16).
+// Buffer wraps a 64-byte aligned buffer (R16): Rust-owned memory (ID is
+// non-zero), or, for a result of 4 KiB or less from WaitBuffer or CallBuffer,
+// Go memory (ID is 0).
 type Buffer struct {
 	// mu covers freed and data together. Free writes both; Bytes reads both.
 	// An atomic on freed alone still races the slice header: Bytes can load
@@ -69,7 +71,7 @@ func (h *Handle) NewBuffer(n int) (*Buffer, error) {
 }
 
 func (s *handleState) newBuffer(n int) (*Buffer, error) {
-	return s.allocBuffer(n, true, nil)
+	return s.allocBuffer(n)
 }
 
 // reserveBudget claims n bytes of the handle's buffer budget, if one is set.
@@ -94,15 +96,16 @@ func (s *handleState) releaseBudget(n int64) {
 	}
 }
 
-// allocBuffer allocates a Rust buffer. budgeted buffers count against
-// WithBufferBudget; a finished result re-wrapped for WaitBuffer does not, since
-// refusing it would lose work that already completed.
+// allocBuffer allocates a caller-owned Rust buffer, counted against
+// WithBufferBudget. A result buffer (WaitBuffer) never comes through here: it
+// is a take buffer wrapped in place or Go memory, and refusing one over budget
+// would lose work that already completed.
 //
-// fill, when non-nil, is copied into the new buffer before cgoMu is released.
-// Close frees every Rust buffer of the handle under cgoMu held exclusively, so
-// a fill done after this returns (through Bytes, which drops the lock on
-// return) could land after Close and write freed allocator memory.
-func (s *handleState) allocBuffer(n int, budgeted bool, fill []byte) (*Buffer, error) {
+// Nothing writes into the buffer while this holds cgoMu. Close frees every Rust
+// buffer of the handle under cgoMu held exclusively, so a write made after
+// this returns could land after Close and hit freed allocator memory (I1).
+// The caller fills it through Bytes, which refuses once the handle is closed.
+func (s *handleState) allocBuffer(n int) (*Buffer, error) {
 	if n <= 0 {
 		return nil, &Error{Code: ErrBadArg.Code, Msg: "buffer size must be greater than zero"}
 	}
@@ -117,7 +120,7 @@ func (s *handleState) allocBuffer(n int, budgeted bool, fill []byte) (*Buffer, e
 	}
 
 	var charge int64
-	if budgeted && s.bufBudget > 0 {
+	if s.bufBudget > 0 {
 		if !s.reserveBudget(int64(n)) {
 			return nil, ErrBufferBudget
 		}
@@ -133,12 +136,6 @@ func (s *handleState) allocBuffer(n int, budgeted bool, fill []byte) (*Buffer, e
 		return nil, errHandlePoisoned
 	}
 	id, slice, err := ffi.BufAlloc(s.ptr, n)
-	if err == nil && fill != nil {
-		if testHookBeforeResultFill != nil {
-			testHookBeforeResultFill(s)
-		}
-		copy(slice, fill)
-	}
 	s.cgoMu.RUnlock()
 
 	if err != nil {
@@ -174,10 +171,11 @@ func newBufferCharged(s *handleState, id uint64, slice []byte, charge int64) *Bu
 	return buf
 }
 
-// newHeapBuffer copies a small result into 64-byte aligned Go memory.
+// newHeapBuffer copies an inline result into 64-byte aligned Go memory.
 //
-// Id 0: nothing to free in Rust, and submit sends its bytes inline. Only used
-// for results within the 4 KiB inline limit.
+// Id 0: nothing to free in Rust, and submit sends its bytes inline. A result
+// reaches here only within the 4 KiB inline limit, which is also all Submit
+// accepts back from an id-0 Buffer.
 func newHeapBuffer(s *handleState, data []byte) *Buffer {
 	const align = 64
 	backing := make([]byte, len(data)+align-1)
