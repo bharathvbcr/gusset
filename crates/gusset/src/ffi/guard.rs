@@ -6,6 +6,7 @@ use crate::pool::PoolError;
 use std::panic::{catch_unwind, set_hook, take_hook, AssertUnwindSafe};
 use std::ptr;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, Once};
 
 /// Panic location with static lifetime guarantees (R3).
@@ -57,14 +58,79 @@ use std::thread::{self, ThreadId};
 /// evicted entry can only ever be missing, not mismatched.
 const MAX_PANIC_LOCATIONS: usize = 256;
 
-static PANIC_LOCATIONS: Mutex<Vec<(ThreadId, PanicLocation)>> = Mutex::new(Vec::new());
+/// The remembered panic locations, keyed by `K` (the thread id in production).
+///
+/// `len` mirrors `list.len()` and is only ever written while `list` is locked,
+/// so it is exact at every point of its modification order. In steady state the
+/// list is empty, and [`LocationTable::take`] — one call per FFI export and one
+/// per job — answers `None` from a load instead of taking a process-global mutex.
+///
+/// Why the load cannot miss an entry its own thread is looking for: an entry is
+/// inserted by the panic hook on the panicking thread, and taken by the firewall
+/// on that same thread after `catch_unwind` returns. The insertion's `len` store
+/// precedes the take's `len` load in that thread's program order, and an atomic
+/// load never reads a value older than the thread's own earlier store to it
+/// (write-read coherence), so the load returns that store or a later one. A
+/// later value of 0 means the list was empty at that point, i.e. the entry had
+/// been evicted — the same "missing, never wrong" outcome the lock gave. Entries
+/// are keyed by thread, so another thread's panics are neither visible to nor
+/// consumed by this thread's take, and cross-thread visibility is not needed.
+/// The store is `Release` and the load `Acquire` anyway: free on x86, one
+/// load-acquire on arm64, and it keeps the fast path correct if a later caller
+/// ever takes an entry recorded by another thread.
+///
+/// A thread's untaken entry (adopter code, a worker dying outside its
+/// `catch_unwind`) keeps `len` above zero until eviction, which only turns the
+/// fast path back into the locked scan.
+struct LocationTable<K> {
+    list: Mutex<Vec<(K, PanicLocation)>>,
+    len: AtomicUsize,
+    cap: usize,
+}
+
+impl<K: Copy + PartialEq> LocationTable<K> {
+    const fn new(cap: usize) -> Self {
+        Self {
+            list: Mutex::new(Vec::new()),
+            len: AtomicUsize::new(0),
+            cap,
+        }
+    }
+
+    fn record(&self, key: K, loc: PanicLocation) {
+        let mut list = self.list.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = list.iter().position(|(t, _)| *t == key) {
+            list[pos].1 = loc;
+        } else {
+            if list.len() >= self.cap {
+                list.remove(0);
+            }
+            list.push((key, loc));
+        }
+        self.len.store(list.len(), Ordering::Release);
+    }
+
+    fn take(&self, key: K) -> Option<PanicLocation> {
+        if self.len.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        let mut list = self.list.lock().unwrap_or_else(|e| e.into_inner());
+        let pos = list.iter().position(|(t, _)| *t == key)?;
+        let taken = list.swap_remove(pos).1;
+        self.len.store(list.len(), Ordering::Release);
+        Some(taken)
+    }
+
+    fn len(&self) -> usize {
+        self.list.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+static PANIC_LOCATIONS: LocationTable<ThreadId> = LocationTable::new(MAX_PANIC_LOCATIONS);
 
 /// Takes the last recorded panic location on the current thread.
 pub fn take_panic_location() -> Option<PanicLocation> {
-    let mut list = PANIC_LOCATIONS.lock().unwrap_or_else(|e| e.into_inner());
-    let id = thread::current().id();
-    let pos = list.iter().position(|(t, _)| *t == id)?;
-    Some(list.swap_remove(pos).1)
+    PANIC_LOCATIONS.take(thread::current().id())
 }
 
 /// Installs the Gusset global panic hook once (R2).
@@ -89,16 +155,7 @@ pub fn install_panic_hook() {
                     file: intern_file_string(l.file()),
                     line: l.line(),
                 };
-                let id = thread::current().id();
-                let mut list = PANIC_LOCATIONS.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(pos) = list.iter().position(|(t, _)| *t == id) {
-                    list[pos].1 = loc;
-                } else {
-                    if list.len() >= MAX_PANIC_LOCATIONS {
-                        list.remove(0);
-                    }
-                    list.push((id, loc));
-                }
+                PANIC_LOCATIONS.record(thread::current().id(), loc);
             }
             if !thread::current()
                 .name()
@@ -112,10 +169,7 @@ pub fn install_panic_hook() {
 
 /// Number of panic locations currently remembered. Test and diagnostic use.
 pub fn panic_location_count() -> usize {
-    PANIC_LOCATIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .len()
+    PANIC_LOCATIONS.len()
 }
 
 const MAX_PANIC_PAYLOAD_BYTES: usize = 32 * 1024;
@@ -452,5 +506,127 @@ mod tests {
         assert!(file.ends_with("ffi/guard.rs"), "panic location: {file}");
         assert!(st.line > 0);
         unsafe { gusset_status_free(&mut st) };
+    }
+
+    fn loc(line: u32) -> PanicLocation {
+        PanicLocation { file: "t.rs", line }
+    }
+
+    #[test]
+    fn the_entry_count_returns_to_zero_after_take() {
+        let t = LocationTable::<u64>::new(8);
+        assert_eq!(t.len.load(Ordering::Acquire), 0);
+        t.record(1, loc(10));
+        t.record(2, loc(20));
+        assert_eq!(t.len.load(Ordering::Acquire), 2);
+        // A second panic on a thread replaces its entry; it does not add one.
+        t.record(1, loc(11));
+        assert_eq!(t.len.load(Ordering::Acquire), 2);
+        assert_eq!(t.len(), 2);
+
+        assert_eq!(t.take(1).map(|l| l.line), Some(11));
+        assert_eq!(t.len.load(Ordering::Acquire), 1);
+        // A key with no entry takes nothing and leaves the count alone.
+        assert!(t.take(1).is_none());
+        assert!(t.take(3).is_none());
+        assert_eq!(t.len.load(Ordering::Acquire), 1);
+        assert_eq!(t.take(2).map(|l| l.line), Some(20));
+        assert_eq!(t.len.load(Ordering::Acquire), 0);
+        assert_eq!(t.len(), 0);
+    }
+
+    #[test]
+    fn eviction_at_the_cap_keeps_the_count_exact() {
+        const CAP: usize = 4;
+        let t = LocationTable::<u64>::new(CAP);
+        for k in 0..(CAP as u64 * 3) {
+            t.record(k, loc(k as u32));
+            let want = (k as usize + 1).min(CAP);
+            assert_eq!(t.len.load(Ordering::Acquire), want, "after record {k}");
+            assert_eq!(t.len(), want, "list length after record {k}");
+        }
+        // The oldest were evicted: missing, never mismatched.
+        for k in 0..(CAP as u64 * 2) {
+            assert!(t.take(k).is_none(), "key {k} should have been evicted");
+        }
+        assert_eq!(t.len.load(Ordering::Acquire), CAP);
+        for k in (CAP as u64 * 2)..(CAP as u64 * 3) {
+            assert_eq!(t.take(k).map(|l| l.line), Some(k as u32));
+        }
+        assert_eq!(t.len.load(Ordering::Acquire), 0);
+        assert_eq!(t.len(), 0);
+    }
+
+    /// With nothing recorded, a take answers from the count and never touches
+    /// the lock. The list is held locked here; the pre-fast-path take blocked
+    /// on it, so the answer never arrives and the receive times out.
+    #[test]
+    fn an_empty_table_is_taken_without_the_lock() {
+        let t = std::sync::Arc::new(LocationTable::<u64>::new(4));
+        let held = t.list.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let taker = {
+            let t = std::sync::Arc::clone(&t);
+            thread::spawn(move || {
+                let _ = tx.send(t.take(7).is_none());
+            })
+        };
+        let answered = rx.recv_timeout(std::time::Duration::from_secs(10));
+        drop(held);
+        let joined = taker.join();
+        assert_eq!(answered, Ok(true), "take must not wait on the lock");
+        assert!(joined.is_ok());
+    }
+
+    /// Several threads panic under `catch_unwind` at distinct sites and take
+    /// their own location, concurrently and repeatedly, through the real hook
+    /// and the real global table. Each must get its own site, and nothing may
+    /// be left behind for the next call on that thread.
+    #[test]
+    fn concurrent_panics_each_get_their_own_location() {
+        // One site per thread, each on its own line, paired with that line.
+        let sites: [(u32, fn()); 6] = [
+            (line!(), || panic!("site 0")),
+            (line!(), || panic!("site 1")),
+            (line!(), || panic!("site 2")),
+            (line!(), || panic!("site 3")),
+            (line!(), || panic!("site 4")),
+            (line!(), || panic!("site 5")),
+        ];
+        install_panic_hook();
+        let start = std::sync::Barrier::new(sites.len());
+        std::thread::scope(|scope| {
+            for (want_line, site) in sites {
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    for round in 0..200 {
+                        // A quiet call between panics: no location to find.
+                        assert!(
+                            take_panic_location().is_none(),
+                            "round {round}: stale location"
+                        );
+                        let mut st = FfiStatus::ok();
+                        let r: Result<(), i32> = unsafe {
+                            ffi_guard_code(&mut st, || -> Result<(), FfiError> {
+                                site();
+                                Ok(())
+                            })
+                        };
+                        assert_eq!(r, Err(FFI_PANIC));
+                        assert!(!st.file.is_null());
+                        let file = unsafe { std::slice::from_raw_parts(st.file, st.file_len) };
+                        assert!(
+                            String::from_utf8_lossy(file).ends_with("ffi/guard.rs"),
+                            "wrong file"
+                        );
+                        assert_eq!(st.line, want_line, "round {round}: another thread's site");
+                        unsafe { gusset_status_free(&mut st) };
+                        // The firewall consumed it: nothing is left for this thread.
+                        assert!(take_panic_location().is_none());
+                    }
+                });
+            }
+        });
     }
 }
