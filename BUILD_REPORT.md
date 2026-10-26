@@ -4,7 +4,7 @@ Date: 2026-10-26. Base: `main` @ `d151fa3`, after the main checkout was fast-for
 
 **Scope.** The ask was "work on major optimizations and bugs, pull all changes and merge".
 - Bugs and gate defects: four PRs merged, each with a passing Matrix run on main after merge.
-- Optimizations: three candidates are implemented, adversarially tested and pushed, but **none is merged**. The house rule is that a speedup lands only with an interleaved `bench/record.sh` A/B. `record.sh` refuses to record below 60% CPU idle, and this host sat at 0–37% idle the whole session, from other repositories' workloads and GitPulse.app (about 140% CPU). Running the A/B is armed to happen automatically once the host is quiet (see "Benchmarks").
+- Optimizations: three candidates are implemented, adversarially tested, pushed and A/B'd, and **none is merged**. The house rule is that a speedup lands only with an interleaved `bench/record.sh` A/B. `record.sh` refuses to record below 60% CPU idle, and this host sat at 0–37% idle the whole session, from other repositories' workloads and GitPulse.app (about 140% CPU). The host went quiet at the end of the session; the A/Bs then ran and none of the three showed a significant difference, so none is merged (see "Benchmarks").
 
 **Gates.**
 - `.devcouncil/config.yaml` has `gates.mode: off`, so no `dev verify` gate ran.
@@ -39,7 +39,7 @@ Every PR went through implementation and review (Opus plus the Cursor and Codex 
 | ft-a0485e94 N2 test/gate weaknesses | review | Items 1, 3, 5 (#27) and 7 (#26) are done. Items 2, 4 and 6 are timing bounds; the card's criterion 2 forbids touching them without noise-floor evidence, which this host could not give. |
 | ft-c9335ebc N3 housekeeping | review | Items 1–4 are done: main checkout current, other session's edits verified and landed via #24, stale-CHANGELOG note, `w1-main-green` worktree removed (162 MB, clean, merged commit), DevMap rebuilt. Item 5 was deliberately not filed. |
 | ft-7e821586 R14 asan-rust flake (new) | review | Criteria 1–2 (#28) are done. Criterion 3, diagnosing the next occurrence from the new evidence, stays open. |
-| ft-8a8279f5 sub-10 µs coordination overhead | in_progress | Criterion 8's code half is merged (#26). R6, R11 and G8 are on branches waiting for their A/B. Its criteria 3, 5 and 6 and R7 remain blocked on the quiet-host baseline (ft-568a30e2 criterion 4). |
+| ft-8a8279f5 sub-10 µs coordination overhead | in_progress | Criterion 8's code half is merged (#26). R6, R11 and G8 were A/B'd with no significant win (R6 CallParallel unmeasured) and stay on branches. Its criteria 3, 5 and 6 and R7 remain blocked on the quiet-host baseline (ft-568a30e2 criterion 4). |
 | ft-3d60ee16, ft-415ddf1f, ft-8a827cf5 | review | Moved by the 2026-10-24 wrap-up spec, which this session applied: 7 card updates, each verified by SQL as `<rev>\|1\|1\|1\|1\|0`, plus new cards N1 ft-197f6d41, N2 ft-a0485e94 and N3 ft-c9335ebc. |
 | ft-97faf4f4 main-green tracker | in_progress | M2 stands at 2 of 3 consecutive green main nightlies on this tree (40179055849, 40303616113). |
 | ft-0dde896c release, ft-568a30e2 bench pipeline | unchanged | Release steps are owner-gated. ft-568a30e2 criterion 4 needs a quiet host. |
@@ -48,29 +48,30 @@ Every PR went through implementation and review (Opus plus the Cursor and Codex 
 
 **No benchmark delta is reported.** No runtime or hot-path code was merged, so there is nothing to regress. #26 changes only the seed benchmark's arm list and the doc generator. The committed data is unchanged, and `make docs-check` passes on it.
 
-**Candidates waiting for an A/B.** Each is one commit plus tests, off `d151fa3`, pushed and with no PR:
+**Candidates, A/B'd and not landed.** Each candidate is one commit plus tests, branched off `d151fa3` and pushed, with no PR. Each branch also carries its A/B result files under `bench/results/gp-feat-001/`.
 
 | Branch | Head | Change | Correctness evidence |
 | --- | --- | --- | --- |
-| `perf/r6-panic-location-fastpath` | `f8b451e` | `take_panic_location` answers from an atomic entry count without taking the process-wide mutex when nothing is recorded. The mutex was on every FFI export and every job. | Miri 11/11. Two 8-thread stress tests were added after the adversarial pass showed the count-after-unlock mutants survived; both now die. The Relaxed-ordering mutant is equivalent (same-thread coherence) and documented. Go panic zoo and `-race` pass. |
-| `perf/r11-queue-padding` | `a061ab5` | JobQueue's mutex, `spinning`, and polled `queued`/`closed` each get their own 128-byte line. | A marker-trait const guard fails the build if any single field loses its padding. Workspace tests, Go tests and `-race` pass. Checked on x86_64 and aarch64 targets and at the 1.97 floor. |
-| `perf/g8-header-copy` | `1eddbfd` | The trace and span ids are copied into the cgo header as whole arrays instead of byte by byte. | Sizeof guards in both directions fail to compile on a length change. cgocheck2, `-race` and `FuzzReadTraceCarrier` (30 s, 2.86M execs) pass. A new byte-offset test catches a dropped byte. |
+| `perf/r6-panic-location-fastpath` | `7057c93` | `take_panic_location` answers from an atomic entry count without taking the process-wide mutex when nothing is recorded. The mutex was on every FFI export and every job. | Miri 11/11. Two 8-thread stress tests were added after the adversarial pass showed the count-after-unlock mutants survived; both now die. The Relaxed-ordering mutant is equivalent (same-thread coherence) and documented. Go panic zoo and `-race` pass. |
+| `perf/r11-queue-padding` | `af24b33` | JobQueue's mutex, `spinning`, and polled `queued`/`closed` each get their own 128-byte line. | A marker-trait const guard fails the build if any single field loses its padding. Workspace tests, Go tests and `-race` pass. Checked on x86_64 and aarch64 targets and at the 1.97 floor. |
+| `perf/g8-header-copy` | `2bf92e1` | The trace and span ids are copied into the cgo header as whole arrays instead of byte by byte. | Sizeof guards in both directions fail to compile on a length change. cgocheck2, `-race` and `FuzzReadTraceCarrier` (30 s, 2.86M execs) pass. A new byte-offset test catches a dropped byte. |
 
-**How the A/B runs.** It follows the R9 precedent in `bench/results/gp-feat-001/README.md`.
-- **Prebuilt checkouts.** The four checkouts are detached `git worktree`s with `make build` already run, under `/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/{base,r6,r11,g8}`. The script is `run_ab.sh` beside them.
-- **Background wait.** A job in this session waits for three consecutive samples at or above 65% idle, then runs the script. It ends with the session.
-- **Smoke test.** The exact invocation was run by hand at 0% idle. It refused correctly ("refusing to record — CPU was 0.0% idle") and wrote nothing.
-- **After this session.** A later session must recreate the checkouts. The recipe is in the agent memory `gusset-perf-ab-pending`. Once the scratchpad is gone, run `git worktree prune` to drop the dangling entries.
+**A/B results.** The host went quiet at 18:15 and the A/Bs ran through `bench/record.sh` against base `d151fa3`, following the R9 precedent in `bench/results/gp-feat-001/README.md`. Setup:
+- `RECORD_PKG=./bench/...` and `RECORD_VARIANTS="base=… cand=…"`;
+- 10 ABBA rounds of `-benchtime=1s`, on darwin-arm64 at 65–83% idle;
+- summarised with `benchstat -ignore ld -col 'variant@(base cand)' -filter '.unit:sec/op'`.
 
-For each candidate:
+| Candidate | GussetCallNoop (base → cand) | GussetCallParallel (base → cand) |
+| --- | --- | --- |
+| R6 | 1.854 µs ±17% → 1.558 µs ±15%, p=0.105 | not recorded: `record.sh` refused twice on its after-arm idle check |
+| R11 | 1.660 µs ±57% → 2.031 µs ±20%, p=0.353 | 3.399 µs ±10% → 3.655 µs ±15%, p=0.143 |
+| G8 | 1.444 µs ±22% → 1.440 µs ±8%, p=0.631 | 3.511 µs ±13% → 3.524 µs ±4%, p=0.739 |
 
-```sh
-RECORD_VARIANTS="base=<d151fa3 checkout> cand=<branch checkout>" \
-  sh bench/record.sh OUT 1s 10 'GussetCallParallel$'
-```
+**No difference is significant.** The noise floor is the reason: the base medians alone moved from 1.44 to 1.85 µs across the three runs, so this host cannot resolve a change smaller than about 20%. Under the card's landing rule (a significant interleaved win, with a committed results file), none of the three is merged:
+- **R11 and G8:** rejected at this resolution. R11 trends slower; G8 is unchanged, as expected for a 24-byte copy.
+- **R6:** undecided. Its contention argument is about CallParallel, and that arm is still unmeasured. It should be re-run on a quieter host.
 
-The same command runs again with `'GussetCallNoop$'`.
-- **Landing rule:** a candidate lands only with a benchstat win at p < 0.05 and a committed results file. A loser is recorded as rejected on ft-8a8279f5.
+**The first automatic attempt recorded nothing.** `run_ab.sh` did not set `RECORD_PKG`, so `record.sh` ran the root package, and every arm reported "produced no Benchmark rows". The smoke test before it had only exercised the refusal path, so it could not catch this. The recipe in the agent memory `gusset-perf-ab-pending` now includes the variable.
 - **R6 caveat:** one untaken stray panic entry disables the fast path until it is evicted.
 
 **Not attempted:**
@@ -98,7 +99,7 @@ The same command runs again with `'GussetCallNoop$'`.
 
 ## Owner decisions pending
 1. **libc bump (ft-d3d3888d).** libc 0.2.191 (2026-10-16) ships Apple `F_SETNOSIGPIPE` (rust-lang/libc#5609, merged 2026-10-11), so the card's first criterion is met; the card now records this (revision 4, still backlog). The card says "dependency change: ask first". The change is `Cargo.lock` 0.2.189 → 0.2.191, use `libc::F_SETNOSIGPIPE`, and drop the local constant in `pool/sys.rs`.
-2. **Benchmarking needs a quiet host.** Pausing the other workloads (GitPulse.app's CPU use, other repositories' test runs) for about 30 minutes would let the R6/R11/G8 A/Bs and the ft-568a30e2 baseline record.
+2. **Benchmarking needs a quiet host.** Pausing the other workloads (GitPulse.app's CPU use, other repositories' test runs) for about 30 minutes would let the R6 CallParallel A/B and the ft-568a30e2 baseline record. The end-of-session window reached 65–83% idle and still could not resolve differences below about 20%.
 3. **Issue #4 and M2.** The third consecutive green main nightly comes from tonight's scheduled run. Closing issue #4 is yours.
 4. **Carried over:**
    - ft-415ddf1f: unpinned apk packages in the musl images, and `--default-toolchain stable` floating, which matches the "track stable" toolchain policy.
@@ -109,7 +110,7 @@ The same command runs again with `'GussetCallNoop$'`.
 - `tools/benchplot` hard-codes the "18 goroutines" label (`main.go`, `crossover.go`), which goes wrong on a recording host with a different `GOMAXPROCS`.
 
 ## Worktrees
-The five agent worktrees were removed after their branches were pushed. All were clean; together they held 863 MB, mostly `target/`. Left registered: the four `ab/` checkouts and this report's worktree, all in the session scratchpad.
+The five agent worktrees were removed after their branches were pushed. All were clean; together they held 863 MB, mostly `target/`. The four A/B checkouts and the report worktrees were removed after the A/B; no worktree from this session remains registered.
 
 ## Tools
 - **GitPulse insights, start of session:** every facet `ok`, 2 worktrees, no collisions. The board was readable and writable; the 2026-10-24 schema refusals did not recur.
