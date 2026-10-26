@@ -17,6 +17,18 @@ Changes since v0.0.3. The C ABI layout is unchanged (17 exports, ABI layout vers
 - A second test catches a handle that reads its completion descriptor instead of taking it (`ft-3d60ee16`, criterion 11). Replacing the `swap(-1)` in `release_pipe_with` with a `load` was caught by one test, the close-count test. `a_second_release_cannot_close_the_descriptor_it_gave_up` finds it through the effect: the first release hands back the number without closing it, the second runs the real `close(2)`, and the descriptor must still carry a write to the read end. It never frees and re-acquires a number, so it cannot race the module's parallel tests. A second `libc::close` inside `close_fd` stays uncaught, by design (`sys.rs`, `close_fd`). Test-only; no production change.
 - `TestPitfall_OpenNilOptionIsRefusedNotPanicked`, `TestFFI_ArgumentRefusalsAreBadArg` and the Rust `argument_refusal_tests` pin the two changes above, and that the refusals outside the list stay `FFI_ERR`.
 
+### 2026-10-26 · Hand-typed doc numbers corrected or removed, and the v0.0.3 CI sentences annotated (card N3)
+
+Documentation and changelog only; no runtime, export, ABI or public-surface change (17 exports, 13 Go entry points). It protects R15 (every number in docs is generated); no I1 to I6 runtime invariant is touched.
+
+#### Documentation
+- **`docs/choosing.md` no longer types the thread counts under the concurrency table.** The sentence said 2048 callers cost Gusset "~21 threads rather than ~370". The committed sweep (`bench/results/crossover/scaling-rawcgo-darwin-arm64-go1.27.1-rust1.98.0.txt`) has blocking cgo at 255 peak threads at 2048 in-flight calls in all six repetitions, and 21 for Gusset in `scaling-gusset-…`; 370 matches neither. The sentence now points at the 2048 row of the generated table, which is where both counts are derived.
+- **The crossover prose in `docs/choosing.md` no longer types "2x", "1.1x" or "18 goroutines".** It refers to the limits and the goroutine count the generated crossover table states, so a re-recording on a machine with a different `GOMAXPROCS` cannot leave the prose wrong. (The generator itself still spells "18 goroutines" in `tools/benchplot/main.go` and `crossover.go`; that is not changed here.)
+- **`docs/adoption.md` no longer claims the chunked check made the example engine "about 4× faster".** Only the chunked kernel is committed (`bench/results/linux-amd64-vm/simd.txt`, about 7 GB/s at 1 MiB); no run with `ctx.check()` inside the loop is, so the size of the speedup has no committed benchmark behind it. The sentence says so.
+
+#### Changelog
+- **A dated note under `[0.0.3]` records that "GitHub Actions has not run this tree" is stale.** The per-section sentences are left as written; the note cites the passing Matrix runs on the release (run 40080429800 on the `v0.0.3` tag `ffae8aa`) and on the merges before it.
+
 ### 2026-10-24 · Poisoned-handle recovery and the engine registry's semantics (card ft-8a827cf5)
 
 Documentation, godoc, rustdoc and tests; no runtime, export, ABI or public-surface change (17 exports, 13 Go entry points).
@@ -91,6 +103,8 @@ Workflow, `tools/ci/versions.env` and test changes only: no runtime, export, ABI
 ## [0.0.3] - 2026-10-24
 
 Release since v0.0.2 (`b6f5200`). It fixes a write-after-free that v0.0.2 shipped (Security, below), and only this release is supported (`SECURITY.md`). The C ABI is unchanged: 17 exports, ABI layout version 2, and `gusset.h` differs from v0.0.2 only in comments. The Go API gains `Handle.Discard`, the thirteenth entry point, and the exported sentinels `ErrClosed`, `ErrNilHandle`, `ErrNilContext`, `ErrNilBuffer` and `ErrInputTooLarge`. One Go behaviour change: a `WaitBuffer` that loses a race with `Close` returns a buffer whose `Bytes` is nil instead of `ErrClosed`. `install.sh` defaults to this tag and refuses, before building, a tree whose `make install` ignores `DESTDIR`; `tools/ci/lint.sh version-parity` holds CHANGELOG, `SECURITY.md`, `install.sh` and `docs/adoption.md` to the version in `Cargo.toml`. The `FFI_ERR` to `FFI_BAD_ARG` status change (`ft-3d60ee16`) is not in this release; it ships in the next one with its own note. The dated sections after Security are the entries as they landed on `main`, newest first.
+
+Note (2026-10-26, added after release; the per-section text below is unchanged): the sentences "GitHub Actions has not run this tree" in this section were true when each section was written, and are no longer true of the release. The v0.0.3 tag is `ffae8aa`, and the Matrix run on that commit, run 40080429800, passed all 21 of its jobs. The release PR's final head, `0860a01`, passed the Matrix on its pull request (run 40078391383), and every merge to `main` from PR #5 (`2ed9a29`, run 40060453498) through the release has a passing push run of its own (for example run 40077242984 on `910961a`). The one failing pull-request run on the release branch (run 40077294133, `2492753`) was followed by the passing run on `0860a01` before the merge.
 
 ### Security
 
