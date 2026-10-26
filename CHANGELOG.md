@@ -17,6 +17,20 @@ Changes since v0.0.3. The C ABI layout is unchanged (17 exports, ABI layout vers
 - A second test catches a handle that reads its completion descriptor instead of taking it (`ft-3d60ee16`, criterion 11). Replacing the `swap(-1)` in `release_pipe_with` with a `load` was caught by one test, the close-count test. `a_second_release_cannot_close_the_descriptor_it_gave_up` finds it through the effect: the first release hands back the number without closing it, the second runs the real `close(2)`, and the descriptor must still carry a write to the read end. It never frees and re-acquires a number, so it cannot race the module's parallel tests. A second `libc::close` inside `close_fd` stays uncaught, by design (`sys.rs`, `close_fd`). Test-only; no production change.
 - `TestPitfall_OpenNilOptionIsRefusedNotPanicked`, `TestFFI_ArgumentRefusalsAreBadArg` and the Rust `argument_refusal_tests` pin the two changes above, and that the refusals outside the list stay `FFI_ERR`.
 
+### 2026-10-26 · A failed R14 harness run leaves its stderr in the job log and as an artifact
+
+Harness script, workflow and tests; no runtime, export, ABI or public-surface change. No I1 to I6 invariant is touched: this is R14 evidence, so that the next red R14 job says why.
+
+On PR #24 (a docs-only change) the `R14 sealed staticlibs (ubuntu-latest)` job failed once in `asan-rust run` (Matrix run 40383974940) with only a path to `host.stderr`. The runner was gone, nothing was uploaded, and the same job passed on the rerun, so the cause cannot be recovered. The flake itself is not diagnosed here.
+
+#### Changed
+- **`expect_pass` in `bench/r14/run.sh` prints what the binary wrote to stderr when it fails.** It is the only helper in the script that sent output to a file and failed with the path alone; every scenario with a runtime check (sealed, race, cgocheck2, asan, asan-rust, nolto, skew) goes through it. A failure now prints the exit status (above 128 is a signal), then the last 200 lines of the file, each cut to 500 bytes and prefixed `R14-STDERR:`, before the unchanged `FAIL:` line and exit status 1. A passing run stays quiet. POSIX `sh`, `tail -n`, `cut -c` and `sed`, so macOS and Linux behave the same.
+- **The `r14` and `r14-musl` jobs in `matrix.yml` upload `bench/r14/target/**/*.stderr` on failure** (`if: failure()`, the same pinned `actions/upload-artifact` as the fuzz jobs; `r14-stderr-<os>` per matrix leg, `r14-musl-stderr`). The Rosetta leg writes under the same directory, so its files replace the native leg's of the same name.
+
+#### Tests
+- `TestEveryR14JobUploadsItsStderrOnFailure` holds every job that runs `bench/r14/run.sh` to that upload, after the harness step, with an artifact name that carries the matrix leg; `TestPlantedR14JobWithoutItsStderrIsCaught` plants the violations (no upload, no `if`, success only, wrong files, one name for every leg, upload before the harness).
+- `TestR14ExpectPass*` extract run.sh's own `fail` and `expect_pass` and run them under `sh -eu` against stub binaries: a failing run's stderr and exit status reach the output and the exit status is still 1; a passing run prints nothing; 500 lines of stderr print only the last 200, cut to 500 bytes; a silent SIGSEGV says its stderr was empty and reports 139.
+
 ### 2026-10-26 · Three tests and gates that could pass without examining what their names claim (card N2, items 1, 3, 5)
 
 Tests only; no runtime, export, ABI or public-surface change (17 exports, 13 Go entry points). Each change below was shown to fail on a planted mutation or bypass of what it claims to check, and to pass on the real tree.
