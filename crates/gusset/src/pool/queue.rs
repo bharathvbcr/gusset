@@ -15,6 +15,7 @@
 
 use super::lock_recover;
 use std::collections::VecDeque;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -38,13 +39,27 @@ struct State<T> {
     sleepers: usize,
 }
 
-/// The shared queue. Workers hold an `Arc` and call [`JobQueue::pop`].
-pub struct JobQueue<T> {
-    state: Mutex<State<T>>,
-    ready: Condvar,
-    cap: usize,
-    /// Workers currently in their polling phase.
-    spinning: AtomicUsize,
+/// Bytes between two values that different threads write: two cache lines on
+/// Apple M-series (128-byte lines), and what x86's adjacent-line prefetcher
+/// pairs up. `Slot` in the completion ring pads to the same size.
+const LINE: usize = 128;
+
+/// Gives its value a whole [`LINE`] to itself: aligned to one and sized to a
+/// multiple of it, so no other field of the enclosing struct shares its line.
+#[repr(align(128))]
+struct CachePadded<T>(T);
+
+impl<T> Deref for CachePadded<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+/// The lock-free mirrors of [`State`] that every polling worker reads on every
+/// poll. They change only when a unit is pushed or taken, or the queue closes.
+struct Polled {
     /// `items.len()`, readable without the lock.
     ///
     /// Pollers read this and take the lock only when it is nonzero
@@ -57,6 +72,23 @@ pub struct JobQueue<T> {
     /// `closed`, readable without the lock, so an empty closed queue ends
     /// the poll at once instead of spinning out the window.
     closed: AtomicBool,
+}
+
+/// The shared queue. Workers hold an `Arc` and call [`JobQueue::pop`].
+///
+/// The three fields that threads write at different rates each own a [`LINE`],
+/// so a write to one does not invalidate a poll of another: `state` is locked
+/// by every push and pop, `spinning` is written on entry to and exit from every
+/// `pop`, and `polled` is what the spinning workers read. `queued` and `closed`
+/// used to share a line with `spinning` and the mutex, so every `pop` entry
+/// evicted the line every other poller was reading.
+pub struct JobQueue<T> {
+    state: CachePadded<Mutex<State<T>>>,
+    ready: Condvar,
+    cap: usize,
+    /// Workers currently in their polling phase.
+    spinning: CachePadded<AtomicUsize>,
+    polled: CachePadded<Polled>,
     /// Test-only: how long a polling taker pauses after releasing the lock
     /// with a unit in hand, and how many times it did. Widens the window
     /// between the take and the return so the wake decision in `push` can be
@@ -66,6 +98,25 @@ pub struct JobQueue<T> {
     #[cfg(test)]
     fast_take_pauses: AtomicUsize,
 }
+
+/// The layout is the point of [`CachePadded`], and nothing else would notice it
+/// undone: a field moved out of its wrapper, or a wrapper shrunk, still
+/// compiles and passes every functional test. So the build checks it. Each
+/// padded field starts a different [`LINE`] and ends inside it, and the struct
+/// itself is `LINE`-aligned, so these offsets are line numbers in memory too.
+/// (`JobQueue<()>` stands for every `T`: the padded fields' sizes and alignments
+/// do not depend on it.)
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+    assert!(align_of::<JobQueue<()>>() >= LINE);
+    assert!(size_of::<CachePadded<AtomicUsize>>() == LINE);
+    assert!(size_of::<CachePadded<Polled>>() == LINE);
+    assert!(size_of::<CachePadded<Mutex<State<()>>>>().is_multiple_of(LINE));
+    let state = offset_of!(JobQueue<()>, state) / LINE;
+    let spinning = offset_of!(JobQueue<()>, spinning) / LINE;
+    let polled = offset_of!(JobQueue<()>, polled) / LINE;
+    assert!(state != spinning && state != polled && spinning != polled);
+};
 
 /// Why a push was refused.
 #[derive(Debug)]
@@ -80,16 +131,18 @@ impl<T> JobQueue<T> {
     /// A queue holding at most `cap` units, and its sending half.
     pub fn new(cap: usize) -> (QueueSender<T>, Arc<JobQueue<T>>) {
         let q = Arc::new(JobQueue {
-            state: Mutex::new(State {
+            state: CachePadded(Mutex::new(State {
                 items: VecDeque::with_capacity(cap),
                 closed: false,
                 sleepers: 0,
-            }),
+            })),
             ready: Condvar::new(),
             cap: cap.max(1),
-            spinning: AtomicUsize::new(0),
-            queued: AtomicUsize::new(0),
-            closed: AtomicBool::new(false),
+            spinning: CachePadded(AtomicUsize::new(0)),
+            polled: CachePadded(Polled {
+                queued: AtomicUsize::new(0),
+                closed: AtomicBool::new(false),
+            }),
             #[cfg(test)]
             pause_after_fast_take: Mutex::new(None),
             #[cfg(test)]
@@ -108,7 +161,7 @@ impl<T> JobQueue<T> {
                 return Err(PushError::Full(item));
             }
             st.items.push_back(item);
-            self.queued.store(st.items.len(), Ordering::Release);
+            self.polled.queued.store(st.items.len(), Ordering::Release);
             // Wake a sleeper only for units the polling workers cannot take
             // right away: waking one for a unit a poller is about to grab
             // costs a syscall and a wake that finds nothing, while skipping
@@ -126,7 +179,7 @@ impl<T> JobQueue<T> {
 
     fn close(&self) {
         lock_recover(&self.state).closed = true;
-        self.closed.store(true, Ordering::Release);
+        self.polled.closed.store(true, Ordering::Release);
         self.ready.notify_all();
     }
 
@@ -144,10 +197,10 @@ impl<T> JobQueue<T> {
             // says there is something to take (see `queued`). try_lock, since
             // another worker taking a unit right now is fine: poll again
             // rather than queue behind it.
-            if self.queued.load(Ordering::Acquire) > 0 {
+            if self.polled.queued.load(Ordering::Acquire) > 0 {
                 if let Ok(mut st) = self.state.try_lock() {
                     if let Some(item) = st.items.pop_front() {
-                        self.queued.store(st.items.len(), Ordering::Release);
+                        self.polled.queued.store(st.items.len(), Ordering::Release);
                         // Stop counting as a poller before unlocking. `push`
                         // reads `spinning` under this lock to decide whether a
                         // sleeper must be woken; decremented after the unlock,
@@ -161,7 +214,7 @@ impl<T> JobQueue<T> {
                         return Some(item);
                     }
                 }
-            } else if self.closed.load(Ordering::Acquire) {
+            } else if self.polled.closed.load(Ordering::Acquire) {
                 // Closed and (as far as the load shows) empty: confirm under
                 // the lock below, which also hands out a unit raced in.
                 break;
@@ -190,7 +243,7 @@ impl<T> JobQueue<T> {
         let mut st = lock_recover(&self.state);
         loop {
             if let Some(item) = st.items.pop_front() {
-                self.queued.store(st.items.len(), Ordering::Release);
+                self.polled.queued.store(st.items.len(), Ordering::Release);
                 return Some(item);
             }
             if st.closed {
@@ -241,6 +294,38 @@ impl<T> Drop for QueueSender<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The build-time check on offsets, repeated on a real allocation: the
+    /// polled pair shares one line, and the lock, the poller count, the condvar
+    /// and `cap` never land on it or on each other's lines.
+    #[test]
+    fn the_polled_fields_own_their_cache_line() {
+        fn lines<F>(f: &F) -> std::ops::RangeInclusive<usize> {
+            let at = f as *const F as usize;
+            (at / LINE)..=((at + std::mem::size_of::<F>() - 1) / LINE)
+        }
+        fn disjoint(
+            a: &std::ops::RangeInclusive<usize>,
+            b: &std::ops::RangeInclusive<usize>,
+        ) -> bool {
+            a.end() < b.start() || b.end() < a.start()
+        }
+        let (_tx, q) = JobQueue::<[u8; 300]>::new(4);
+        let state = lines(&q.state);
+        let spinning = lines(&q.spinning);
+        let polled = lines(&q.polled);
+        let queued = lines(&q.polled.queued);
+        let closed = lines(&q.polled.closed);
+        assert_eq!(queued, closed, "the polled pair shares one line");
+        assert!(polled.contains(queued.start()), "and it is the polled line");
+        assert!(disjoint(&polled, &spinning), "polled vs spinning");
+        assert!(disjoint(&polled, &state), "polled vs the mutex");
+        assert!(disjoint(&spinning, &state), "spinning vs the mutex");
+        for (name, other) in [("ready", lines(&q.ready)), ("cap", lines(&q.cap))] {
+            assert!(disjoint(&polled, &other), "polled vs {name}");
+            assert!(disjoint(&spinning, &other), "spinning vs {name}");
+        }
+    }
 
     #[test]
     fn fifo_bounded_and_drains_after_close() {
@@ -327,7 +412,7 @@ mod tests {
                 if q.fast_take_pauses.load(Ordering::SeqCst) == 1 {
                     break true;
                 }
-                if q.queued.load(Ordering::SeqCst) == 0
+                if q.polled.queued.load(Ordering::SeqCst) == 0
                     && q.fast_take_pauses.load(Ordering::SeqCst) == 0
                     && start.elapsed() > Duration::from_millis(50)
                 {
