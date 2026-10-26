@@ -165,8 +165,22 @@ expect_naive_failure() { # dir archive-a archive-b
 	echo "$log" | grep -oE "(duplicate symbol '[^']+'|multiple definition of \`[^']+')" | sort -u
 }
 
+# The binary's stderr goes to a file next to it so a passing run stays quiet, but
+# a runner is gone when the job ends: the asan-rust run failed once on a CI
+# runner (PR #24, run 40383974940) and left only a path to a file nobody could
+# read. A failure therefore prints the last 200 lines, each cut to 500 bytes and
+# prefixed R14-STDERR so the evidence is greppable, with the exit status (above
+# 128 is a signal: 134 is SIGABRT, 139 SIGSEGV). matrix.yml also uploads the file.
 expect_pass() { # binary label
-	"$1" 2>"$1.stderr" || fail "$2 (stderr in $1.stderr)"
+	"$1" 2>"$1.stderr" && return 0
+	rc=$?
+	echo "R14-STDERR: $2: $1 exited with status $rc; last 200 lines of $1.stderr follow" >&2
+	if [ -s "$1.stderr" ]; then
+		tail -n 200 "$1.stderr" | cut -c1-500 | sed 's/^/R14-STDERR: /' >&2
+	else
+		echo "R14-STDERR: (stderr was empty or unreadable)" >&2
+	fi
+	fail "$2 (exit status $rc; stderr in $1.stderr)"
 }
 
 need() { [ -f "$1" ] || fail "$1 is missing; run '$0 build' first"; }
