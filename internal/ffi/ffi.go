@@ -491,15 +491,24 @@ func RingRelease(owner unsafe.Pointer) {
 	C.gusset_ring_release((*C.GussetRing)(owner))
 }
 
+// The pointer casts in Submit are only sound if the C trace and span arrays are
+// exactly as long as the Go ones: each array below would have a negative length,
+// a compile error, unless the sizes are equal.
+var (
+	_ [unsafe.Sizeof(C.CallHeader{}.trace_id) - unsafe.Sizeof(CallHeader{}.TraceID)]struct{}
+	_ [unsafe.Sizeof(CallHeader{}.TraceID) - unsafe.Sizeof(C.CallHeader{}.trace_id)]struct{}
+	_ [unsafe.Sizeof(C.CallHeader{}.span_id) - unsafe.Sizeof(CallHeader{}.SpanID)]struct{}
+	_ [unsafe.Sizeof(CallHeader{}.SpanID) - unsafe.Sizeof(C.CallHeader{}.span_id)]struct{}
+)
+
 // Submit submits a task.
 func Submit(h unsafe.Pointer, header CallHeader, input []byte, bufferID uint64) (uint64, error) {
 	var cHeader C.CallHeader
-	for i := 0; i < 16; i++ {
-		cHeader.trace_id[i] = C.uint8_t(header.TraceID[i])
-	}
-	for i := 0; i < 8; i++ {
-		cHeader.span_id[i] = C.uint8_t(header.SpanID[i])
-	}
+	// One array store each. [16]C.uint8_t and [16]byte are distinct Go types, so
+	// they cannot be assigned or converted; they are the same bytes (the
+	// assertions below, and the offsets and sizes init verifies against Rust).
+	*(*[16]byte)(unsafe.Pointer(&cHeader.trace_id)) = header.TraceID
+	*(*[8]byte)(unsafe.Pointer(&cHeader.span_id)) = header.SpanID
 	cHeader.timeout_ns = C.uint64_t(header.TimeoutNS)
 	cHeader.flags = C.uint32_t(header.Flags)
 	cHeader.reserved = C.uint32_t(header.Reserved)
