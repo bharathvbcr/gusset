@@ -17,6 +17,20 @@ Changes since v0.0.3. The C ABI layout is unchanged (17 exports, ABI layout vers
 - A second test catches a handle that reads its completion descriptor instead of taking it (`ft-3d60ee16`, criterion 11). Replacing the `swap(-1)` in `release_pipe_with` with a `load` was caught by one test, the close-count test. `a_second_release_cannot_close_the_descriptor_it_gave_up` finds it through the effect: the first release hands back the number without closing it, the second runs the real `close(2)`, and the descriptor must still carry a write to the read end. It never frees and re-acquires a number, so it cannot race the module's parallel tests. A second `libc::close` inside `close_fd` stays uncaught, by design (`sys.rs`, `close_fd`). Test-only; no production change.
 - `TestPitfall_OpenNilOptionIsRefusedNotPanicked`, `TestFFI_ArgumentRefusalsAreBadArg` and the Rust `argument_refusal_tests` pin the two changes above, and that the refusals outside the list stay `FFI_ERR`.
 
+### 2026-10-26 · The crossover sweep gains its 1 µs and 10 µs arms; the table's ratios stop contradicting its bars (card ft-8a8279f5)
+
+Benchmark source, tooling and tests; no runtime, export, ABI or public-surface change. No baseline is recorded here: the new arms have no data until a quiet-host re-record, and the committed `bench/results/` files and `docs/choosing.md` are untouched. This protects I6 (the docs describe what the code and the recorded data do).
+
+#### Benchmarks
+- **`workSizes` in `bench/seed/go/crossover_test.go` gains 1_450 and 14_500 iterations.** At 0.70–0.72 ns an iteration on the recording host (the committed `1000it-` calibrations) these are about 1.01–1.04 µs and 10.1–10.4 µs, so their calibrated labels read 1 µs and 10 µs rather than falling just under the truncation boundary (1_400 would label as about 976–1005 ns); they are the arms the crossover table is asked to answer for; the existing 1_000 and 10_000 arms (about 0.7 µs and 7 µs) stay. The labels are still calibrated on the host that runs the arm. `tools/benchplot` reads the arms back out of the benchmark names, so a recording made before this change renders as it did (`make docs-check` is clean on the committed data) and a recording that has the new arms charts and tabulates all seven. A smoke run (`-benchtime=1x`) confirms the arms execute; it is not a recording.
+
+#### Tooling
+- **The crossover table and chart no longer print a ratio that contradicts the bar it is read against.** `tableRatio` and `ratioLabel` printed 0.998 as "1.00×" (a win shown as a tie; `aheadCell` listed it as ahead at "1.00×"), 1.002 as "1.00×", 1.104 as "1.10×" (over the 1.1× bar shown as on it) and 1.099 as "1.10×"; the chart printed 1.002 as "+0%" and 0.998 as "−0%". Both now go through `clearRound`, which adds decimals until the printed number is on the same side of 1, 1.10 and 2 as the value and equals a bar only when the value does: "0.998×", "1.002×", "1.099×", "1.104×". Ratios away from the bars print as before, so no committed figure changes.
+- **`mustOne`'s refusal of a second matching results file names a remedy that exists.** It told the reader to "pass one explicitly", and `benchplot` takes no file argument (its only flag is `-check`). It now lists the matching files and says to move the one not to be charted out of the directory. The decision is `resolveOne`, so a test can read it.
+
+#### Tests
+- `tools/benchplot/ratio_test.go`: table-driven boundary tests for `tableRatio` and `ratioLabel` (0.998, 1.0, 1.002, 1.099, 1.1, 1.104, and the 2× bar) that also check the printed value against every bar; `aheadCell` and `withinCell` cells at the same boundaries; the seven-arm sweep (work discovery, lookup of 1_000 against 10_000 and 1_400 against 14_000, chart ticks, the block's arm list); a recording without the new arms; and the refusal's message. The ratio and message tests fail against the previous code.
+
 ### 2026-10-24 · Poisoned-handle recovery and the engine registry's semantics (card ft-8a827cf5)
 
 Documentation, godoc, rustdoc and tests; no runtime, export, ABI or public-surface change (17 exports, 13 Go entry points).

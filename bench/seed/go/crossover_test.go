@@ -55,7 +55,18 @@ func spinPayload(iters uint32) []byte {
 }
 
 // workSizes are iteration counts spanning a noop to roughly a millisecond.
-var workSizes = []uint32{0, 1_000, 10_000, 100_000, 1_000_000}
+//
+// On the recording host an iteration costs about 0.7 ns, so 1_000 and 10_000
+// are about 0.7 µs and 7 µs. 1_450 and 14_500 are the arms that land on about
+// 1 µs and 10 µs, the two work sizes docs/choosing.md's crossover table is
+// asked to answer for. The labels are measured by calibrate() on whatever host
+// runs this, so the names say what an arm really cost there, not what it was
+// meant to cost.
+//
+// tools/benchplot reads the arms back out of the names, in ascending iteration
+// count, so adding or removing a size needs no change there; a recording made
+// before an arm existed simply does not chart it.
+var workSizes = []uint32{0, 1_000, 1_450, 10_000, 14_500, 100_000, 1_000_000}
 
 // calibrateBatch is how long one timed batch must last before its per-call
 // figure is trustworthy.
