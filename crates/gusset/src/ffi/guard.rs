@@ -578,6 +578,80 @@ mod tests {
         assert!(joined.is_ok());
     }
 
+    /// Threads hammer one table, each recording its own key and taking it back
+    /// at once. The cap is far above the key count, so eviction cannot explain a
+    /// miss: a `None` here is a lost entry. That is what the count would cause if
+    /// it were published after the list lock is released, since another thread's
+    /// stale store could then read 0 while this thread's entry is in the list.
+    #[test]
+    fn threads_always_take_back_the_entry_they_just_recorded() {
+        const THREADS: u64 = 8;
+        let rounds: u32 = if cfg!(miri) { 20 } else { 200_000 };
+        let t = LocationTable::<u64>::new(1024);
+        let start = std::sync::Barrier::new(THREADS as usize);
+        std::thread::scope(|scope| {
+            for key in 0..THREADS {
+                let (t, start) = (&t, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    for round in 0..rounds {
+                        t.record(key, loc(round));
+                        let got = t.take(key);
+                        assert_eq!(
+                            got.map(|l| l.line),
+                            Some(round),
+                            "thread {key} round {round}: lost or foreign entry"
+                        );
+                    }
+                });
+            }
+        });
+        assert_eq!(t.len.load(Ordering::Acquire), 0);
+        assert_eq!(t.len(), 0);
+    }
+
+    /// The count is exact whenever the table is quiescent. Threads record
+    /// together, stop at a barrier, and each checks the count is the number of
+    /// entries; then they take together and check it is zero. A count published
+    /// after the list lock is released can land out of order with another
+    /// thread's update and read high or low once everything has settled, which
+    /// the take-back test above cannot see (a high count only costs the fast
+    /// path; it loses nothing).
+    #[test]
+    fn the_count_is_exact_once_concurrent_updates_settle() {
+        const THREADS: u64 = 8;
+        let rounds: u32 = if cfg!(miri) { 4 } else { 2_000 };
+        let t = LocationTable::<u64>::new(1024);
+        let gate = std::sync::Barrier::new(THREADS as usize);
+        std::thread::scope(|scope| {
+            for key in 0..THREADS {
+                let (t, gate) = (&t, &gate);
+                scope.spawn(move || {
+                    for round in 0..rounds {
+                        gate.wait();
+                        t.record(key, loc(round));
+                        gate.wait();
+                        assert_eq!(
+                            t.len.load(Ordering::Acquire),
+                            THREADS as usize,
+                            "thread {key} round {round}: count after the records settled"
+                        );
+                        assert_eq!(t.len(), THREADS as usize);
+                        gate.wait();
+                        assert_eq!(t.take(key).map(|l| l.line), Some(round));
+                        gate.wait();
+                        assert_eq!(
+                            t.len.load(Ordering::Acquire),
+                            0,
+                            "thread {key} round {round}: count after the takes settled"
+                        );
+                        assert_eq!(t.len(), 0);
+                    }
+                });
+            }
+        });
+    }
+
     /// Several threads panic under `catch_unwind` at distinct sites and take
     /// their own location, concurrently and repeatedly, through the real hook
     /// and the real global table. Each must get its own site, and nothing may
