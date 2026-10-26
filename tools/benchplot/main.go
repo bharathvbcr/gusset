@@ -500,15 +500,51 @@ func crossoverChart(m map[string][]benchfile.Sample, works []workPoint) string {
 }
 
 // ratioLabel renders a ratio the way a reader would say it out loud.
+//
+// Rounding goes through clearRound, so a label never reads as a tie with a bar
+// its value is on one side of: 1.002 is "+0.2%", not "+0%", and 1.099 is
+// "+9.9%", not "+10%".
 func ratioLabel(r float64) string {
 	switch {
-	case r >= 1.1:
-		return fmt.Sprintf("%.2f×", r)
+	case r >= crossoverTight:
+		return clearRound(r, 2, ratioBars...) + "×"
 	case r >= 1:
-		return fmt.Sprintf("+%.0f%%", (r-1)*100)
+		return "+" + clearRound((r-1)*100, 0, 0, (crossoverTight-1)*100) + "%"
 	default:
-		return fmt.Sprintf("−%.0f%%", (1-r)*100)
+		return "−" + clearRound((1-r)*100, 0, 0) + "%"
 	}
+}
+
+// ratioBars are the values a printed ratio is read against: Gusset ahead of raw
+// cgo below 1, and the two limits the crossover table reports.
+var ratioBars = []float64{1, crossoverTight, crossoverLoose}
+
+// clearRound formats v with at least minDigits decimals, adding decimals until
+// the printed number is on the same side of every bar as v, and equal to a bar
+// only when v is. A fixed two-decimal format printed 0.998 as "1.00" (a win
+// shown as a tie), 1.104 as "1.10" (over the bar shown as on it) and 1.099 as
+// "1.10" (under shown as on). The digits are capped: past the last, the
+// shortest exact form is used, which is on the right side by construction.
+func clearRound(v float64, minDigits int, bars ...float64) string {
+	const maxDigits = 6
+	for d := minDigits; d <= maxDigits; d++ {
+		s := strconv.FormatFloat(v, 'f', d, 64)
+		printed, err := strconv.ParseFloat(s, 64)
+		if err == nil && sameSides(v, printed, bars) {
+			return s
+		}
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// sameSides reports whether a and b compare identically against every bar.
+func sameSides(a, b float64, bars []float64) bool {
+	for _, bar := range bars {
+		if (a < bar) != (b < bar) || (a > bar) != (b > bar) {
+			return false
+		}
+	}
+	return true
 }
 
 // threadChart plots peak OS threads against in-flight call count.
@@ -759,20 +795,36 @@ func discoverConcurrencies(m map[string][]benchfile.Sample) []int {
 // tools/benchdoc takes the same line, for the same reason: picking one silently
 // means the docs describe a platform nobody chose.
 func mustOne(dir, glob string) string {
-	hits, err := filepath.Glob(filepath.Join(dir, glob))
+	hit, err := resolveOne(dir, glob)
 	if err != nil {
 		fatal(err)
 	}
+	return hit
+}
+
+// resolveOne is mustOne's decision, returned rather than fatal so a test can
+// read the message.
+func resolveOne(dir, glob string) (string, error) {
+	hits, err := filepath.Glob(filepath.Join(dir, glob))
+	if err != nil {
+		return "", err
+	}
 	switch len(hits) {
 	case 1:
-		return hits[0]
+		return hits[0], nil
 	case 0:
-		fatal(fmt.Errorf("no %s in %s; run `make bench-crossover` and `make bench-scaling`", glob, dir))
-	default:
-		fatal(fmt.Errorf("found %d files matching %s in %s; pass one explicitly rather than "+
-			"letting the tool choose which platform the docs describe", len(hits), glob, dir))
+		return "", fmt.Errorf("no %s in %s; run `make bench-crossover` and `make bench-scaling`", glob, dir)
 	}
-	return ""
+	sort.Strings(hits)
+	names := make([]string, len(hits))
+	for i, h := range hits {
+		names[i] = filepath.Base(h)
+	}
+	return "", fmt.Errorf("found %d files matching %s in %s (%s); benchplot takes no file argument; "+
+		"its only flag is -check, and it will not choose which platform the docs describe. "+
+		"Keep exactly one: move the recording you do not want charted out of %s "+
+		"(or `git rm` it), then run again",
+		len(hits), glob, dir, strings.Join(names, ", "), dir)
 }
 
 // writeDocTables regenerates the measured tables in docs/choosing.md, or in
@@ -881,14 +933,18 @@ func fmtMiB(mib float64) string {
 // single annotation on a chart and badly as a column, where it puts "978.74×"
 // three rows above "+2%" and leaves the reader converting between two scales to
 // see that one number is the continuation of the other.
+//
+// The digits are the least that keep the printed number on the same side of
+// every bar as the value (see clearRound), because the cells beside it say
+// "ahead of" and "within 1.1×" and a rounded figure must not contradict them.
 func tableRatio(r float64) string {
 	switch {
 	case r >= 100:
-		return fmt.Sprintf("%.0f×", r)
+		return clearRound(r, 0, ratioBars...) + "×"
 	case r >= 10:
-		return fmt.Sprintf("%.1f×", r)
+		return clearRound(r, 1, ratioBars...) + "×"
 	default:
-		return fmt.Sprintf("%.2f×", r)
+		return clearRound(r, 2, ratioBars...) + "×"
 	}
 }
 
