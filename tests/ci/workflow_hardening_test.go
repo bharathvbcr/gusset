@@ -19,9 +19,24 @@ var (
 	jobHeader  = regexp.MustCompile(`^  [A-Za-z0-9_-]+:\s*$`)
 )
 
+// workflowFiles lists the workflow files in dir: GitHub runs .yml and .yaml
+// alike, and a rule that read one extension would never see a workflow added
+// under the other.
+func workflowFiles(dir string) ([]string, error) {
+	var paths []string
+	for _, ext := range []string{"yml", "yaml"} {
+		found, err := filepath.Glob(filepath.Join(dir, "*."+ext))
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, found...)
+	}
+	return paths, nil
+}
+
 func workflows(t *testing.T) map[string][]string {
 	t.Helper()
-	paths, err := filepath.Glob("../../.github/workflows/*.yml")
+	paths, err := workflowFiles("../../.github/workflows")
 	if err != nil || len(paths) == 0 {
 		t.Fatalf("no workflows found: %v", err)
 	}

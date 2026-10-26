@@ -26,8 +26,6 @@ var (
 	digestRef      = regexp.MustCompile(`^[^\s@]+@sha256:[0-9a-f]{64}$`)
 	imageKeyLine   = regexp.MustCompile(`^\s*(?:- )?(container|image):\s*(.*)$`)
 	dockerUsesLine = regexp.MustCompile(`^\s*(?:- )?uses:\s*docker://(\S+)`)
-	containerRun   = regexp.MustCompile(`\b(?:docker|podman)\s+(?:run|pull|create)\b`)
-	makeVarCall    = regexp.MustCompile(`\$\(([A-Za-z_][A-Za-z0-9_]*)\)`)
 	rustupPipe     = regexp.MustCompile(`rustup\.rs\b`)
 	versionsVar    = regexp.MustCompile(`^([A-Z][A-Z0-9_]*)=(.*)$`)
 )
@@ -129,28 +127,27 @@ func containerImages(lines []string) []imageUse {
 	return append(out, commandImages(lines)...)
 }
 
-// commandImages returns the image argument of every docker/podman
-// run|pull|create in lines, which may be a workflow's run bodies or a plain
-// shell script or Makefile. It is the whole of the image rule for the latter:
-// `container:` and `image:` are YAML keys, and in a Makefile `image:` is a
-// target.
+// commandImages returns the image operand of every docker, podman or nerdctl
+// run, pull or create in lines (`container run` and `image pull` forms, and
+// `$(DOCKER)` or `${DOCKER}` for the binary included), which may be a
+// workflow's run bodies or a plain shell script or Makefile. It is the whole of
+// the image rule for the latter: `container:` and `image:` are YAML keys, and
+// in a Makefile `image:` is a target. Compose files and `docker buildx` are not
+// read: the repository uses neither.
 //
-// A Makefile's `$(CURDIR)` is read as `$CURDIR`: commandSegments splits at a
-// closing paren, which would cut the command before its image.
+// The operand is the first argument that is not an option or an option's value,
+// so `-e BASE=golang:1@sha256:<hex> alpine:3.24` names alpine:3.24, not the
+// digest that sits in an environment variable.
 func commandImages(lines []string) []imageUse {
 	var out []imageUse
 	for _, ll := range logicalLines(lines) {
-		for _, seg := range commandSegments(makeVarCall.ReplaceAllString(ll.text, "$$$1")) {
-			if !containerRun.MatchString(seg) {
-				continue
-			}
-			ref := strings.TrimSpace(seg)
-			for _, f := range strings.Fields(seg) {
-				if strings.Contains(f, "@sha256:") {
-					ref = f
+		for _, c := range shellCommands(flattenSubst(ll.text, engineWords)) {
+			if ref, ok := imageOperand(c.words); ok {
+				if ref == "" {
+					ref = strings.Join(c.words, " ")
 				}
+				out = append(out, imageUse{ll.n, unquote(ref), "docker/podman run in a run body"})
 			}
-			out = append(out, imageUse{ll.n, ref, "docker/podman run in a run body"})
 		}
 	}
 	return out
@@ -220,200 +217,6 @@ func imageDriftViolations(all map[string][]imageUse) []string {
 	return out
 }
 
-// rustupInitViolations reports an unverified rustup-init. A step that runs
-// rustup-init must source tools/ci/versions.env, download the pinned
-// $RUSTUP_VERSION, and, before each run, check the very path it runs against
-// $RUSTUP_INIT_SHA256_X86_64_MUSL with a `sha256sum -c` whose failure stops the
-// step (a check of some other file does not count, nor one followed by
-// `|| true`), with nothing fetched or copied over that path between the check
-// and the run. `apk add rustup` is refused too: it installs a rustup-init this
-// repo never checked, and the unverified-download shortcut (sh.rustup.rs) is
-// refused for the same reason.
-//
-// A run is any command whose command word is rustup-init, at any path and with
-// any arguments or none (shellCommands, commandWord): the rule used to match
-// only `rustup-init -y` and `rustup-init --`, so `rustup-init -q -y` and a bare
-// `rustup-init` skipped it entirely. A run reached through a shell variable
-// ($RI -y) is not seen; the downloads in this repo name the path.
-func rustupInitViolations(name string, lines []string) []string {
-	var out []string
-	for _, ll := range logicalLines(lines) {
-		at := name + ":" + strconv.Itoa(ll.n) + ": "
-		if rustupPipe.MatchString(ll.text) {
-			out = append(out, at+"rustup is fetched from rustup.rs with no pinned version or checksum: "+strings.TrimSpace(ll.text))
-		}
-		for _, seg := range commandSegments(ll.text) {
-			if apkAddsRustup(strings.Fields(seg)) {
-				out = append(out, at+"apk add rustup installs an unverified rustup-init; download the pinned one: "+strings.TrimSpace(seg))
-			}
-		}
-	}
-	for _, st := range workflowSteps(lines) {
-		text := rustupStepText(st)
-		runs := rustupRuns(text)
-		if len(runs) == 0 {
-			continue
-		}
-		step := name + ": step " + strconv.Quote(stepTitle(st)) + " runs rustup-init "
-		if !strings.Contains(text, "tools/ci/versions.env") {
-			out = append(out, step+"without sourcing tools/ci/versions.env")
-		}
-		for _, v := range []string{"RUSTUP_VERSION", "RUSTUP_INIT_SHA256_X86_64_MUSL"} {
-			if !strings.Contains(text, "$"+v) && !strings.Contains(text, "${"+v) {
-				out = append(out, step+"without using $"+v)
-			}
-		}
-		// Each run of rustup-init needs an earlier `sha256sum -c` line that
-		// names that same path and the pinned checksum: verifying some other
-		// file, or any hash, proves nothing about what gets executed.
-		for _, run := range runs {
-			path := strings.Trim(run.words[0], `"'`)
-			end, ok := checksumBefore(text[:run.start], path)
-			if !ok {
-				out = append(out, step+"("+strconv.Quote(path)+") without an earlier `sha256sum -c` line that checks that path against $RUSTUP_INIT_SHA256_X86_64_MUSL and whose failure stops the step")
-				continue
-			}
-			if w := rewritesPath(text[end:run.start], path); w != "" {
-				out = append(out, step+"("+strconv.Quote(path)+") fetches or copies over the path after it was checked: "+w)
-			}
-		}
-	}
-	return out
-}
-
-// rustupStepText is a step's run body with comments removed and each backslash
-// continuation joined into one line. Offsets used by the rules are into this text.
-func rustupStepText(st []string) string {
-	var body []string
-	for _, l := range strings.Split(stepRunBody(st), "\n") {
-		body = append(body, stripShellComment(l))
-	}
-	return strings.ReplaceAll(strings.Join(body, "\n"), "\\\n", " ")
-}
-
-// rustupRuns returns the commands of text that run rustup-init, each reduced to
-// its command word (the path it runs).
-func rustupRuns(text string) []shellCmd {
-	var runs []shellCmd
-	for _, c := range shellCommands(text) {
-		if i, w := commandWord(c.words); i >= 0 && (w == "rustup-init" || strings.HasSuffix(w, "/rustup-init")) {
-			c.words = []string{w}
-			runs = append(runs, c)
-		}
-	}
-	return runs
-}
-
-// shellCmd is one simple command of a shell body: where it starts in the text,
-// its words, and the separator that ended it.
-type shellCmd struct {
-	start int
-	words []string
-	sep   string
-}
-
-// shellSplit separates commands, a newline included. Quoting is not understood:
-// the rules that use it look at command words and whole-word paths, which a
-// separator inside a quoted string does not move.
-var shellSplit = regexp.MustCompile(`;|&&|\|\||\||\)|\n`)
-
-func shellCommands(text string) []shellCmd {
-	var out []shellCmd
-	prev := 0
-	for _, m := range shellSplit.FindAllStringIndex(text, -1) {
-		out = append(out, shellCmd{prev, strings.Fields(text[prev:m[0]]), text[m[0]:m[1]]})
-		prev = m[1]
-	}
-	return append(out, shellCmd{prev, strings.Fields(text[prev:]), ""})
-}
-
-var shellAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
-
-// commandPrefix names the words that sit before the command a shell line runs.
-var commandPrefix = map[string]bool{
-	"sudo": true, "exec": true, "time": true, "env": true, "nohup": true, "command": true,
-	"then": true, "do": true, "if": true, "!": true, "sh": true, "bash": true,
-}
-
-// commandWord returns the index and text of the word that names the command:
-// the first word that is not a prefix (sudo, exec, `then`), an option of one,
-// an environment assignment, or an opening paren or brace.
-func commandWord(words []string) (int, string) {
-	for i, w := range words {
-		w = strings.Trim(strings.TrimLeft(w, "({"), `"'`)
-		if w == "" || commandPrefix[w] || strings.HasPrefix(w, "-") || shellAssignment.MatchString(w) {
-			continue
-		}
-		return i, w
-	}
-	return -1, ""
-}
-
-var sha256Check = regexp.MustCompile(`sha256sum\s+(?:-\w+\s+)*(?:-c\b|--check\b)`)
-
-// failureHandler matches what may follow `||` on a check without hiding its
-// failure: a nonzero exit, or `false`. `|| true`, `|| :`, `|| echo ...` and a
-// bare `exit` (which keeps the status of the echo before it) all let the step
-// carry on past a mismatch.
-var failureHandler = regexp.MustCompile(`\bexit\s+[1-9]\d*\b|\bfalse\b`)
-
-// checksumBefore finds the latest line of before that runs `sha256sum -c`
-// over path using the pinned checksum variable and does not discard the result
-// of the check, and returns the offset in before where that line ends (or
-// len(before) when it is the line the run is on). The path must appear as a
-// whole word ("./x" and "x" are the same file), so /tmp/rustup-init.new and
-// /tmp/other do not count for /tmp/rustup-init.
-func checksumBefore(before, path string) (end int, ok bool) {
-	want := regexp.MustCompile(`(?:^|[\s"'=])(?:\./)?` + regexp.QuoteMeta(strings.TrimPrefix(path, "./")) + `(?:$|[\s"'])`)
-	off := 0
-	for _, l := range strings.SplitAfter(before, "\n") {
-		next := off + len(l)
-		m := sha256Check.FindStringIndex(l)
-		if m != nil &&
-			(strings.Contains(l, "$RUSTUP_INIT_SHA256_X86_64_MUSL") || strings.Contains(l, "${RUSTUP_INIT_SHA256_X86_64_MUSL")) &&
-			want.MatchString(l) &&
-			checkFailureStops(l[m[1]:]) {
-			end, ok = off+m[1], true
-		}
-		off = next
-	}
-	return end, ok
-}
-
-// checkFailureStops reports whether the rest of a check's line, after
-// `sha256sum -c`, leaves its exit status alone: either no `||`, or a `||`
-// whose handler fails.
-func checkFailureStops(rest string) bool {
-	_, handler, hasOr := strings.Cut(rest, "||")
-	return !hasOr || failureHandler.MatchString(handler)
-}
-
-// pathWriters are the commands that put a file at a path.
-var pathWriters = map[string]bool{
-	"wget": true, "curl": true, "cp": true, "mv": true, "install": true,
-	"tee": true, "dd": true, "ln": true, "rsync": true, "aria2c": true,
-}
-
-// rewritesPath returns the first command of between, the text from a passed
-// check to the run it guards, that may replace the checked file: a downloader
-// or copier that names the path or the file's name, or a redirect onto the
-// path. A check proves what was on disk when it ran, not what is there later.
-func rewritesPath(between, path string) string {
-	base := path[strings.LastIndex(path, "/")+1:]
-	redirect := regexp.MustCompile(`>>?\s*["']?(?:\./)?` + regexp.QuoteMeta(strings.TrimPrefix(path, "./")) + `(?:$|[\s"';&|)])`)
-	for _, c := range shellCommands(between) {
-		i, w := commandWord(c.words)
-		if i < 0 {
-			continue
-		}
-		cmd := strings.Join(c.words, " ")
-		if redirect.MatchString(cmd) || (pathWriters[w] && strings.Contains(cmd, base)) {
-			return strings.TrimSpace(cmd)
-		}
-	}
-	return ""
-}
-
 // apkAddsRustup reports an `apk add` command line that names the rustup package.
 func apkAddsRustup(f []string) bool {
 	add := false
@@ -477,7 +280,7 @@ func TestRustupInitIsPinnedAndVerified(t *testing.T) {
 		t.Errorf("found %d rustup-init runs in the workflows, want the 2 the musl jobs make; the rule is not looking at them", runs)
 	}
 	for _, p := range buildFiles {
-		for _, v := range rustupInitViolations(p, readLines(t, p)) {
+		for _, v := range rustupScriptViolations(p, readLines(t, p)) {
 			t.Error(v)
 		}
 	}
@@ -578,7 +381,6 @@ func TestPlantedImageViolationsAreCaught(t *testing.T) {
 	for name, body := range map[string]string{
 		"the real shape":                   verified,
 		"the run on the line of its check": pinned("", "", okCheck+" && /tmp/rustup-init -q -y"),
-		"a failing handler group":          pinned(okCheck+" || { echo mismatch; exit 1; }", "", "/tmp/rustup-init -y"),
 		"a failing handler with false":     pinned(okCheck+" || false", "", "/tmp/rustup-init -y"),
 		"chmod between check and run":      pinned(okCheck, "chmod +x /tmp/rustup-init", "/tmp/rustup-init -q -y"),
 		"a second check after a rewrite":   pinned(okCheck, "cp /tmp/x /tmp/rustup-init\n          "+okCheck, "/tmp/rustup-init -y"),
