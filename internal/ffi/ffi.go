@@ -506,7 +506,8 @@ func Submit(h unsafe.Pointer, header CallHeader, input []byte, bufferID uint64) 
 	var cHeader C.CallHeader
 	// One array store each. [16]C.uint8_t and [16]byte are distinct Go types, so
 	// they cannot be assigned or converted; they are the same bytes (the
-	// assertions below, and the offsets and sizes init verifies against Rust).
+	// size assertions above this function, and the offsets and sizes init
+	// verifies against Rust).
 	*(*[16]byte)(unsafe.Pointer(&cHeader.trace_id)) = header.TraceID
 	*(*[8]byte)(unsafe.Pointer(&cHeader.span_id)) = header.SpanID
 	cHeader.timeout_ns = C.uint64_t(header.TimeoutNS)
