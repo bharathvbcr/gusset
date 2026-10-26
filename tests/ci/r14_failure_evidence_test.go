@@ -268,8 +268,18 @@ exit 1
 }
 
 func TestR14ExpectPassSaysWhenThereIsNoStderr(t *testing.T) {
+	out, status := runExpectPass(t, "exit 3\n")
+	if status != 1 || !strings.Contains(out, "stderr was empty") || !strings.Contains(out, "exited with status 3") {
+		t.Errorf("a silent failure: status %d, output:\n%s", status, out)
+	}
+}
+
+// A crash reports the signal's status. Whether the stderr file is empty
+// depends on the shell: dash (Linux CI) writes "Segmentation fault" into the
+// redirected stream, macOS sh writes nothing, so only the status is asserted.
+func TestR14ExpectPassReportsACrashStatus(t *testing.T) {
 	out, status := runExpectPass(t, "kill -SEGV $$\n")
-	if status != 1 || !strings.Contains(out, "stderr was empty") || !strings.Contains(out, "exited with status 139") {
-		t.Errorf("a silent crash: status %d, output:\n%s", status, out)
+	if status != 1 || !strings.Contains(out, "exited with status 139") {
+		t.Errorf("a crash: status %d, output:\n%s", status, out)
 	}
 }
