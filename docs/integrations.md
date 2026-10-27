@@ -174,11 +174,9 @@ call a stale index fresh. A warm process has to keep that, which means one
 `status` per call even though the rest of the query is warm.
 
 What is not known: how often a real session makes these calls, and what share of
-a turn they take. Nothing in Manvi or here measures it. By this page's
-historical per-query figures, a `graph_context` of 25 files is about 26 starts of
-a process that costs 8-11 ms to start and open the store, 5 at a time; against a
-model round trip that is probably small, but that is an estimate, not a
-measurement. So the pool is a candidate with a caller, not a recommendation.
+a turn they take. Nothing in Manvi or here measures it, and no committed
+recording gives a per-start cost to multiply by, so no figure is offered. The
+pool is a candidate with a caller, not a recommendation.
 
 **Running `devmap` in-process through Gusset stays the wrong tool** even for
 such a caller. On top of a warm process it would save only the pipe round trip,
