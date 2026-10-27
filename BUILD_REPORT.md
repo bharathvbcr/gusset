@@ -19,7 +19,7 @@ Asked for as "Commit and merge all branches and next wave". End: `main` @ `8cf85
 - No PR was open.
 - The only branches not in main are the five rejected `perf/*` branches, which you chose in wave 3 to keep off main.
 
-**Merged.** Codex reviewed the PR and found nothing, and every CI check passed on its final head.
+**Merged.** Codex and Cursor Bugbot each reviewed the PR and found nothing; Cursor's security and approval agents also completed. Every CI check passed on its final head.
 
 | PR | Merge | Card | What | Main Matrix / adopter after merge |
 | --- | --- | --- | --- | --- |
@@ -40,7 +40,7 @@ Asked for as "Commit and merge all branches and next wave". End: `main` @ `8cf85
 DevCouncil's `integrate` still writes the devcouncil server's `DEVCOUNCIL_PROJECT_ROOT` as an absolute path. That is the same shape as gap 1, but the devcouncil tools take no `repo_path`, so #40 leaves it alone and ft-6c759bc0 records it. The card moved to review.
 
 **ft-8a8279f5, the perf card: one of its two open criteria is now met.**
-- **Nightly on this main: met.** Nightly 40561859391 was dispatched on `a460275`, which carries G7 and R10. Every job concluded success: Miri, Go fuzz (long), both chaos hammers, cargo-fuzz, ASan and the Step 5 snippet. #40 merged afterwards and changed only agent configuration.
+- **Nightly on this main: met.** Nightly 40561859391 was started by hand (`workflow_dispatch`) on `a460275` rather than waiting for the scheduled run. It is not one of the scheduled nightlies M2 counts. It ran on `a460275`, which carries G7 and R10. Every job concluded success: Miri, Go fuzz (long), both chaos hammers, cargo-fuzz, ASan and the Step 5 snippet. #40 merged afterwards and changed only agent configuration.
 - **Crossover 1 µs and 10 µs data: not recorded.** An idle gate in the worktree `bench/crossover-1us-10us` waits for three consecutive samples at or above 70% idle (bounded to 12 h), then runs `make bench-crossover`. The gate sits above `record.sh`'s 60% floor because the target's two cargo builds run before `record.sh` checks. In the samples logged before this report was written, the host never reached 70% idle; other sessions' Go builds and test binaries held it.
 - **For the PR that lands the data.** `CROSS_SUFFIX` now reads `go1.27.3`, and `benchplot`'s `mustOne` requires exactly one `transport-*` and one `threads-*` file. The new files must therefore replace the `go1.27.2` ones. The card stays in_progress.
 
@@ -48,7 +48,7 @@ DevCouncil's `integrate` still writes the devcouncil server's `DEVCOUNCIL_PROJEC
 
 **Still yours.** These were carried from wave 3 and are unanswered:
 - the libc 0.2.191 bump (ft-d3d3888d);
-- closing issue #4 with a comment naming the fix commits. Nightly 40561859391 is a further green main nightly, after the three that M2 counted.
+- closing issue #4 with a comment naming the fix commits. The dispatched nightly 40561859391 also passed.
 
 ## Wave 3 (2026-10-27)
 
