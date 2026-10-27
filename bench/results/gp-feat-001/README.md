@@ -187,6 +187,40 @@ reading as open. Today every waiter retakes mu, so nothing on this branch can
 reach it; the reorder is in `archive/g6-rejected-bprime-recycle` for anyone who
 builds on that path.
 
+### Rejected: R6, R11, G8 and R8 (2026-10-26/27)
+
+These records are kept here as evidence; none of the code landed. Each
+candidate stays on its pushed branch, and the owner chose on 2026-10-27 to keep
+it off main. Every file is `bench/record.sh` in variant mode, 10 ABBA rounds of
+`-benchtime=1s`. `base` and `cand` are the commits each file's
+`gusset-bench-variant-*` header records; each branch head adds only these two
+result files on top of its measured commit (`git diff --stat <measured> <head>`).
+
+| candidate | measured commit (`cand`) | branch @ head | base | files |
+| --- | --- | --- | --- | --- |
+| R6, `take_panic_location` answered from an atomic count | `f8b451e` | `perf/r6-panic-location-fastpath` @ `11bfac7` | `d151fa3` | `r6-*.txt` |
+| R11, cache-line padding in `JobQueue` | `a061ab5` | `perf/r11-queue-padding` @ `af24b33` | `d151fa3` | `r11-*.txt` |
+| G8, submit header ids copied as arrays | `1eddbfd` | `perf/g8-header-copy` @ `2bf92e1` | `d151fa3` | `g8-*.txt` |
+| R8, promote every result over 48 B on the worker | `f38e9b1` | `perf/r8-promote-midsize` @ `9bf6c52` | `9224a7f` (result-size instrument) | `r8-*.txt` |
+
+The medians, intervals and p-values are not copied here (R15: documentation
+numbers come from `benchstat`, not from hand). Each verdict below is what this
+prints:
+
+```
+for f in r6-*.txt r11-*.txt g8-*.txt r8-*.txt; do
+  benchstat -ignore ld -col 'variant@(base cand)' -filter '.unit:sec/op' "$f"
+done
+```
+
+- **R6, R11, G8:** `~` on both `GussetCallNoop` and `GussetCallParallel`, so
+  the change does not earn its code.
+- **R8:** `GussetWaitBufferResultSize` is significantly faster from 49 B to
+  4096 B, but `GussetSubmitWaitResult` (plain `Wait`) is significantly slower
+  over the same sizes, by more than the 5% bar at each of 49 B, 256 B, 1024 B and 4096 B.
+  Its `CallResult` arm was refused three times by `record.sh`'s idle floor and
+  is not recorded.
+
 ## Next
 
 In profile order, each needing its own A/B:

@@ -17,6 +17,13 @@ Changes since v0.0.3. The C ABI layout is unchanged (17 exports, ABI layout vers
 - A second test catches a handle that reads its completion descriptor instead of taking it (`ft-3d60ee16`, criterion 11). Replacing the `swap(-1)` in `release_pipe_with` with a `load` was caught by one test, the close-count test. `a_second_release_cannot_close_the_descriptor_it_gave_up` finds it through the effect: the first release hands back the number without closing it, the second runs the real `close(2)`, and the descriptor must still carry a write to the read end. It never frees and re-acquires a number, so it cannot race the module's parallel tests. A second `libc::close` inside `close_fd` stays uncaught, by design (`sys.rs`, `close_fd`). Test-only; no production change.
 - `TestPitfall_OpenNilOptionIsRefusedNotPanicked`, `TestFFI_ArgumentRefusalsAreBadArg` and the Rust `argument_refusal_tests` pin the two changes above, and that the refusals outside the list stay `FFI_ERR`.
 
+### 2026-10-27 · A/B records of the rejected perf candidates R6, R11, G8 and R8 (card ft-8a8279f5)
+
+Recorded results only; no code, export, ABI or public-surface change.
+
+#### Benchmarks
+- **`bench/results/gp-feat-001/` now holds the interleaved A/B records behind four rejected candidates.** R6, R11 and G8 show no significant difference on `GussetCallNoop` or `GussetCallParallel`. R8 makes `WaitBuffer` faster from 49 B to 4 KiB but plain `Wait` slower over the same sizes, past the 5% bar. Their code stays on the `perf/*` branches the README names, by the owner's decision of 2026-10-27; the README carries each verdict and the command that reproduces it.
+
 ### 2026-10-26 · Quiet-host baseline for the dispatch, deadline, Discard and Stats benchmarks (card ft-568a30e2, criterion 4)
 
 Recorded results only; no code, export, ABI or public-surface change, and the README's benchmark table is unchanged.
