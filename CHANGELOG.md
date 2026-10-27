@@ -27,6 +27,17 @@ Documentation and changelog only; no runtime, export, ABI or public-surface chan
 - **Manvi does run `devmap` from long-lived Go processes, and the page's earlier conclusion changes in one place.** The agent harness and `manvi serve` start one `devmap` process per query, up to 26 for one `graph_context` call, through DevCouncil's `dc/devmap`. A warm pool would therefore have a repeated-query caller, and would belong in `dc/devmap`. The page does not recommend building it: no measurement of real sessions exists, and Manvi deliberately reads `status` once per call, which a warm process must keep. DevCouncil's own paths and the verdict on running `devmap` through Gusset are unchanged.
 - **The pending list is rewritten item by item**: two items done, one surveyed and not run, one still pending (is the pool worth building), and the pins in both apps reported as behind and left alone. Section headers keep their 2026-09-27 timings; the new sections say they were surveyed on 2026-10-26.
 
+### 2026-10-26 · The parallel crossover rows are labelled with the recorded GOMAXPROCS, not a typed "18 goroutines"
+
+Docs tooling and tests; no runtime, export, ABI or public-surface change. No I1 to I6 invariant is touched: this protects R15 (every number in docs is generated). `make docs-check` is clean and `docs/choosing.md` is byte-identical, because the committed recording was made at GOMAXPROCS 18.
+
+#### Changed
+- **`tools/benchplot` reads the parallel arm's goroutine count off the recording.** The table header and the crossover table's row were the literal `18 goroutines`. `BenchmarkCrossoverParallel` is `b.RunParallel` with the default parallelism (`bench/seed/go/crossover_test.go` never calls `SetParallelism`), so it runs GOMAXPROCS goroutines, and `go test` writes that GOMAXPROCS on every benchmark name as the `-N` suffix. A recording from a host with another core count would have been labelled 18 and passed `make docs-check`, which compares the generated block only with itself. `benchfile.Row` now keeps the suffix it used to discard (`Procs`), `File.ProcsOf` returns the one value a prefix's rows share, and `benchplot` builds both labels from it. It refuses, naming the lines, a recording whose parallel rows disagree, have no suffix (`go test` omits it at GOMAXPROCS 1, and a hand-edited file looks the same), or are absent.
+- The cost-per-call table moved from `renderDocTables` into `renderCostTable`, so the label has one owner and the table can be tested without the scaling recordings.
+
+#### Tests
+- `TestParallelLabelFollowsTheRecordedGOMAXPROCS` renders both generated tables from a recording with `-8` suffixes and asserts `8 goroutines` appears and `18 goroutines` does not. `TestParallelLabelRefusesMixedGOMAXPROCS`, `TestParallelLabelRefusesRowsWithoutASuffix` and `TestParallelLabelRefusesARecordingWithoutTheParallelArm` pin the refusals. `TestParallelLabelOfTheCommittedRecordingIs18` pins the committed data. Against a `parallelGoroutines` that returns the typed `18 goroutines`, the first four fail and the fifth passes.
+
 ### 2026-10-26 · A failed R14 harness run leaves its stderr in the job log and as an artifact
 
 Harness script, workflow and tests; no runtime, export, ABI or public-surface change. No I1 to I6 invariant is touched: this is R14 evidence, so that the next red R14 job says why.
