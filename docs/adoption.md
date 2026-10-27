@@ -553,9 +553,14 @@ Things worth knowing before you hit them:
   reachable for as long as you use its bytes, and do not use a slice after `Free`
   or `Handle.Close`. A `*Buffer` keeps its `*Handle` reachable, so a
   handle cannot be collected, and closed, while one of its buffers is still in use.
-- **Buffers are 64-byte aligned on every path.** That includes a small
-  `WaitBuffer` result on a poisoned handle, which is carried in aligned Go memory
-  (`ID() == 0`) rather than lost.
+- **Buffers are 64-byte aligned on every path.** That includes a `WaitBuffer`
+  result of 4 KiB or less that the engine returned as bytes, which is carried in
+  aligned Go memory (`ID() == 0`): it owns nothing in Rust, so
+  `Stats().LiveBytes` does not count it, it needs no cleanup beyond `Free`, and
+  it also survives a poisoned handle rather than being lost. A result over
+  4 KiB, or one the engine returned in a Rust buffer of its own
+  (`JobOutput::Buffer` or `JobOutput::Allocated`) at any size, is Rust memory
+  (`ID() != 0`) and counts.
 - **Trace propagation is explicit.** Attach a value implementing
   `TraceID() [16]byte` / `SpanID() [8]byte` under `gusset.SpanContextKey`.
 

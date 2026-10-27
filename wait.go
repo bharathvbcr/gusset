@@ -23,12 +23,19 @@ func (h *Handle) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
 }
 
 // WaitBuffer waits for completion of an asynchronously submitted job ticket,
-// returning a zero-copy *Buffer backed by Rust-owned memory.
+// returning a *Buffer that holds the result.
 //
-// If the job completed with inline bytes rather than an allocated buffer, a *Buffer
-// is allocated to hold the data.
-// The caller is responsible for calling buf.Free() when done, though runtime.AddCleanup
-// acts as a safety net if the buffer is garbage collected.
+// A result of 4 KiB or less that the engine returned as bytes is carried in
+// 64-byte aligned Go memory (ID is 0): it owns nothing in Rust, so it is not
+// counted in Stats, and passing it to Submit or CallBuffer sends its bytes
+// inline. A result over 4 KiB, or one the engine returned in a Rust buffer
+// of its own (JobOutput::Buffer or JobOutput::Allocated, whatever its size),
+// is a zero-copy *Buffer backed by Rust-owned memory (ID is non-zero).
+// Bytes, Free and the closed-handle behaviour are the same for both.
+//
+// The caller is responsible for calling buf.Free() when done. For a
+// Rust-backed result runtime.AddCleanup acts as a safety net if the buffer is
+// garbage collected; a Go-memory result is reclaimed by the garbage collector.
 func (h *Handle) WaitBuffer(ctx context.Context, ticket uint64) (*Buffer, error) {
 	if h == nil || h.state == nil {
 		return nil, ErrNilHandle
@@ -57,6 +64,9 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 		if !s.enterCgo() {
 			return nil, ErrClosed
 		}
+		if testHookBeforeTakeView != nil {
+			testHookBeforeTakeView(s)
+		}
 		out := make([]byte, len(res.data))
 		copy(out, res.data)
 		s.cgoMu.RUnlock()
@@ -66,9 +76,18 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	return res.data, nil
 }
 
-// testHookBeforeResultFill runs, when set by a test, just before an inline
-// result is copied into the Rust buffer WaitBuffer allocated for it.
+// testHookBeforeResultFill runs, when set by a test, just before WaitBuffer
+// builds the Go-heap Buffer for an inline result: it copies the result, or
+// adopts it when it is already 64-byte aligned (adoptHeapBuffer).
 var testHookBeforeResultFill func(*handleState)
+
+// testHookBeforeTakeView runs, when set by a test, with cgoMu held for reading,
+// just before Wait copies a take buffer out of Rust memory or WaitBuffer wraps
+// it. Those are the two places the library still reads a Rust result that
+// reached the waiter (a result over 4 KiB, which the worker promoted onto a
+// buffer, or an engine's own buffer of any size). Close frees that buffer under cgoMu held exclusively (I1), so a
+// Close started here must not be able to finish until the hook returns.
+var testHookBeforeTakeView func(*handleState)
 
 func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, error) {
 	res, takeID, err := s.waitInternal(ctx, ticket)
@@ -76,41 +95,65 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 		return nil, shutdownCause(ctx, err)
 	}
 
-	// Wrap under cgoMu so Close cannot HandleClose the take buffer between
-	// waitInternal returning the view and newBufferFromRaw installing it.
-	if !s.enterCgo() {
-		s.discardTake(takeID)
-		return nil, ErrClosed
-	}
 	if takeID != 0 {
+		// Wrap under cgoMu so Close cannot HandleClose the take buffer between
+		// waitInternal returning the view and newBufferFromRaw installing it.
+		if !s.enterCgo() {
+			s.discardTake(takeID)
+			return nil, ErrClosed
+		}
+		if testHookBeforeTakeView != nil {
+			testHookBeforeTakeView(s)
+		}
 		buf := newBufferFromRaw(s, takeID, res.data)
 		s.cgoMu.RUnlock()
 		return buf, nil
 	}
-	s.cgoMu.RUnlock()
 
-	if len(res.data) > 0 {
-		// Filled under the same cgoMu hold that allocates it: Close cannot
-		// free the buffer between the allocation and the copy.
-		buf, err := s.allocBuffer(len(res.data), false, res.data)
-		if err != nil {
-			if s.closed.Load() {
-				return nil, ErrClosed
-			}
-			// This result already exists and has left completed; any error
-			// here would lose it for good. Poison refuses new work only (I2),
-			// and NewBuffer's Rust allocation is poison-checked, so a sibling's
-			// panic used to turn a finished result into ErrPoisoned. Carry it
-			// on the Go heap instead, 64-byte aligned like a Rust buffer.
-			return newHeapBuffer(s, res.data), nil
-		}
-		return buf, nil
-	}
+	// An inline result is already Go memory: drainPipe copied it out of Rust
+	// and freed the Rust side before handing it over. There is nothing for
+	// Close to free under it, so no cgoMu is taken and no Rust buffer is
+	// allocated. The result carries on the Go heap, 64-byte aligned like a
+	// Rust buffer, with id 0 (Submit sends its bytes inline). This is also the
+	// only way a finished result can survive a poisoned handle (I2), so the
+	// poisoned case no longer needs a path of its own.
+	//
+	// claimLocked hands out a stored result before it looks at closed, so a
+	// Close that has begun is refused here, the same answer the take path gives.
 	if s.closed.Load() {
 		return nil, ErrClosed
 	}
-	// A job returning an empty output (0 bytes) produces a valid empty Buffer
-	return newBufferFromRaw(s, 0, nil), nil
+	if len(res.data) == 0 {
+		// A job returning an empty output (0 bytes) produces a valid empty Buffer
+		return newBufferFromRaw(s, 0, nil), nil
+	}
+	if testHookBeforeResultFill != nil {
+		testHookBeforeResultFill(s)
+	}
+	// Adopt the result's own backing array when it is 64-byte aligned, rather
+	// than copy it a second time. That is safe only because nothing else holds
+	// res.data once waitBuffer has it (takeID == 0 here, so it is Go memory):
+	//
+	//   - Both producers of an id-0 result make it fresh for this one completion
+	//     and keep no reference: drainPipe's inline branch (make + copy of the
+	//     record's bytes, which alias the reader's buffer and are reused) and
+	//     its default branch (make + copy of take()'s Rust view, whose buffer
+	//     it frees). A result still in Rust memory always has takeID != 0: the
+	//     owned flag is only set on an id of at least 1 (buffer ids start at 1,
+	//     pool/mod.rs ID_CEILING), and a Rust view with no flag over 4 KiB takes
+	//     the same take path. So a Rust-owned slice, which is 64-byte aligned by
+	//     design, cannot reach this line to be mistaken for Go memory.
+	//   - The callResult is moved, not shared: deliver sends it down one
+	//     waiter's channel (a receive clears the slot, so a recycled channel
+	//     keeps no reference) or stores it in completed, from which claimLocked
+	//     deletes it as it returns it. takeUnclaimedLocked drops the map's
+	//     entries. A ticket has one claimant (pending refuses a second waiter,
+	//     the entry leaves completed or the ticket is abandoned), and Discard
+	//     claims through the same function, so a result goes to Wait, WaitBuffer
+	//     or Discard, never two of them.
+	//   - Wait already returns res.data to its caller with no copy, so this
+	//     hands WaitBuffer's caller the same ownership Wait's caller has.
+	return adoptHeapBuffer(s, res.data), nil
 }
 
 // claimLocked is the front half of Wait and Discard, the two ways a ticket's
