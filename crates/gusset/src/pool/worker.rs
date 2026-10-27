@@ -477,10 +477,15 @@ impl Handle {
                     // Dropping the cache can run an adopter handler's `Drop`
                     // (the last reference to a cleared handler), and that can
                     // panic. Nothing above this frame catches it, so it is
-                    // caught here and discarded, as a panic payload is
-                    // everywhere else a worker meets one outside a job.
+                    // caught here and logged: the handle it would have
+                    // poisoned inside a job is already closing.
                     if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(engines))) {
-                        drop_panic_payload(payload);
+                        crate::ffi::log_event(&format!(
+                            "gusset: worker gusset-w{} panicked releasing its cached engines \
+                             at exit: {}",
+                            worker_id,
+                            extract_panic_payload(payload)
+                        ));
                     }
                 })
                 .map_err(|e| format!("failed to spawn worker thread: {}", e))?;

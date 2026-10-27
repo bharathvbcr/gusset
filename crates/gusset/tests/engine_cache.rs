@@ -434,22 +434,99 @@ fn several_opcodes_on_one_worker_are_all_dropped_by_a_clear() {
     clear_engine_handlers();
 }
 
+/// Captured handler state that panics when dropped while armed.
+struct PanicsOnDrop(Arc<AtomicBool>);
+
+impl Drop for PanicsOnDrop {
+    fn drop(&mut self) {
+        if self.0.load(Ordering::Acquire) {
+            panic!("handler state failed to drop");
+        }
+    }
+}
+
+/// A worker releases a cleared handler when it next dispatches, and that
+/// handler's `Drop` can panic. The panic is caught by the job's firewall and
+/// poisons the handle, but jobs already queued on it still run, and they must
+/// not run a handler that was cleared: the cache is only trusted again once its
+/// refresh has finished. One worker, so the same cache sees all three jobs.
+#[test]
+fn a_panicking_handler_drop_during_a_refresh_does_not_let_a_queued_job_run_a_cleared_handler() {
+    let _registry = registry_lock();
+    const OPCODE: u32 = 9451;
+    clear_engine_handlers();
+    let armed = Arc::new(AtomicBool::new(false));
+    let guard = PanicsOnDrop(Arc::clone(&armed));
+    let gate = Arc::new(Gate::default());
+    set_engine_handler(move |_ctx: &JobContext, _input: &[u8]| {
+        let _keeps_the_guard_alive = &guard;
+        Ok(vec![1u8])
+    });
+    install(OPCODE, gated(2, &gate));
+    let session = Session::open(1);
+
+    // Both handlers are now cached on the worker.
+    assert_eq!(bytes(&session.run(0, b"x")), vec![1]);
+    assert_eq!(bytes(&session.run(OPCODE, b"x")), vec![2]);
+
+    // Hold the worker, queue two jobs behind it, then clear. Both queued jobs are
+    // dequeued after the clear returned.
+    let held = session.submit(OPCODE, b"hold");
+    wait_for("the worker to be inside the hold job", || {
+        gate.holding.load(Ordering::SeqCst) == 1
+    });
+    let refresh_panics = session.submit(0, b"x");
+    let after_it = session.submit(OPCODE, b"x");
+    clear_engine_handlers();
+    // The cache now holds the last reference to the opcode 0 handler.
+    armed.store(true, Ordering::Release);
+    gate.release.store(true, Ordering::Release);
+
+    assert_eq!(bytes(&session.results(&[held]).remove(0)), vec![2]);
+    let panicked = session.results(&[refresh_panics]).remove(0);
+    assert!(
+        matches!(panicked, JobResult::Panic { .. }),
+        "dropping the cleared handler should have panicked inside the job: {panicked:?}"
+    );
+    assert_refused(&session.results(&[after_it]).remove(0), OPCODE);
+
+    armed.store(false, Ordering::Release);
+    session.close();
+    clear_engine_handlers();
+}
+
 /// The version a handler installed under `version` answers with.
 fn versioned(version: u64) -> Handler {
     Box::new(move |_ctx, _input| Ok(version.to_le_bytes().to_vec()))
 }
 
-/// What one submitter saw.
+/// What one submitter has seen so far, readable by the controller. `ran` and
+/// `refused` count outcomes per opcode (slot 0 is opcode 0), and `newest` is the
+/// highest handler version that answered.
 #[derive(Default)]
-struct Seen {
-    ran: [u64; 2],
-    refused: [u64; 2],
-    violations: Vec<String>,
+struct Progress {
+    ran: [AtomicU64; 2],
+    refused: [AtomicU64; 2],
+    newest: [AtomicU64; 2],
 }
 
-/// A controller registers, replaces and clears handlers as fast as it can while
-/// submitters run jobs on both opcodes, and no job may run a handler that was
-/// removed before the job was submitted.
+/// Waits until `ready` holds for every submitter. The controller paces itself on
+/// what the submitters have done rather than on the clock, so a slow runner
+/// stretches the run instead of emptying a window.
+fn await_every(what: &str, progress: &[Progress], ready: impl Fn(usize, &Progress) -> bool) {
+    let started = Instant::now();
+    while !progress.iter().enumerate().all(|(i, p)| ready(i, p)) {
+        assert!(
+            started.elapsed() < GATE_WAIT,
+            "timed out waiting for {what}"
+        );
+        thread::sleep(Duration::from_micros(50));
+    }
+}
+
+/// A controller registers, replaces and clears handlers while submitters run
+/// jobs on both opcodes, and no job may run a handler that was removed before
+/// the job was submitted.
 ///
 /// Every handler answers with the version it was installed as, and versions only
 /// grow. The controller stores a version into `installed` after the
@@ -464,6 +541,12 @@ struct Seen {
 ///
 /// A cache that kept a handler across a clear, or across a replacement, breaks
 /// one of the two on the first stale hit.
+///
+/// The controller waits for every submitter to see each state before it moves
+/// on: each submitter has run a job on the handler just installed (so there is a
+/// cached handler to go stale) and has been refused after each clear. Both
+/// halves of every epoch therefore happen on every run, whatever the host's
+/// speed.
 #[test]
 fn concurrent_install_replace_and_clear_never_run_a_handler_removed_before_submission() {
     let _registry = registry_lock();
@@ -475,13 +558,16 @@ fn concurrent_install_replace_and_clear_never_run_a_handler_removed_before_submi
     let installed = AtomicU64::new(0);
     let cleared = AtomicU64::new(0);
     let finished = AtomicBool::new(false);
+    let progress: Vec<Progress> = (0..SUBMITTERS).map(|_| Progress::default()).collect();
 
-    let seen: Vec<Seen> = thread::scope(|scope| {
-        let submitters: Vec<_> = (0..SUBMITTERS)
-            .map(|_| {
-                scope.spawn(|| {
+    let violations: Vec<String> = thread::scope(|scope| {
+        let submitters: Vec<_> = progress
+            .iter()
+            .map(|mine| {
+                let (installed, cleared, finished) = (&installed, &cleared, &finished);
+                scope.spawn(move || {
                     let session = Session::open(2);
-                    let mut seen = Seen::default();
+                    let mut violations = Vec::new();
                     while !finished.load(Ordering::Acquire) {
                         for (slot, opcode) in [0, OPCODE].into_iter().enumerate() {
                             let cleared_before = cleared.load(Ordering::Acquire);
@@ -491,38 +577,38 @@ fn concurrent_install_replace_and_clear_never_run_a_handler_removed_before_submi
                                     let version = match <[u8; 8]>::try_from(answer.as_slice()) {
                                         Ok(raw) => u64::from_le_bytes(raw),
                                         Err(_) => {
-                                            seen.violations
+                                            violations
                                                 .push(format!("answer of {} bytes", answer.len()));
                                             continue;
                                         }
                                     };
-                                    seen.ran[slot] += 1;
                                     if version <= cleared_before {
-                                        seen.violations.push(format!(
+                                        violations.push(format!(
                                             "opcode {opcode} ran version {version}, cleared \
                                              through {cleared_before} before the submit"
                                         ));
                                     }
                                     if opcode == 0 && version < installed_before {
-                                        seen.violations.push(format!(
+                                        violations.push(format!(
                                             "opcode 0 ran version {version}, replaced by \
                                              {installed_before} before the submit"
                                         ));
                                     }
+                                    mine.newest[slot].fetch_max(version, Ordering::Release);
+                                    mine.ran[slot].fetch_add(1, Ordering::Release);
                                 }
                                 JobResult::Err(msg)
                                     if msg.contains("no engine handler registered") =>
                                 {
-                                    seen.refused[slot] += 1;
+                                    mine.refused[slot].fetch_add(1, Ordering::Release);
                                 }
-                                other => seen
-                                    .violations
+                                other => violations
                                     .push(format!("opcode {opcode}: unexpected {other:?}")),
                             }
                         }
                     }
                     session.close();
-                    seen
+                    violations
                 })
             })
             .collect();
@@ -530,6 +616,8 @@ fn concurrent_install_replace_and_clear_never_run_a_handler_removed_before_submi
         let mut version = 0u64;
         for _ in 0..EPOCHS {
             // Two installs of opcode 0 with no clear between: a replacement.
+            // Each waits until every submitter has had a job answered by it, so
+            // the next call has a cached handler to displace.
             for _ in 0..2 {
                 version += 1;
                 set_engine_handler({
@@ -537,9 +625,11 @@ fn concurrent_install_replace_and_clear_never_run_a_handler_removed_before_submi
                     move |ctx: &JobContext, input: &[u8]| handler(ctx, input)
                 });
                 installed.store(version, Ordering::Release);
-                // Long enough for jobs to run the handler just installed, so the
-                // replacement that follows has a cached handler to displace.
-                thread::sleep(Duration::from_micros(150));
+                await_every(
+                    "every submitter to run the new global handler",
+                    &progress,
+                    |_, p| p.newest[0].load(Ordering::Acquire) >= version,
+                );
             }
             version += 1;
             let handler = versioned(version);
@@ -547,35 +637,64 @@ fn concurrent_install_replace_and_clear_never_run_a_handler_removed_before_submi
                 handler(ctx, input)
             })
             .must("register");
-            thread::sleep(Duration::from_micros(300));
+            await_every(
+                "every submitter to run the registered handler",
+                &progress,
+                |_, p| p.newest[1].load(Ordering::Acquire) >= version,
+            );
+
+            let refused_before: Vec<[u64; 2]> = progress
+                .iter()
+                .map(|p| {
+                    [
+                        p.refused[0].load(Ordering::Acquire),
+                        p.refused[1].load(Ordering::Acquire),
+                    ]
+                })
+                .collect();
             clear_engine_handlers();
             cleared.store(version, Ordering::Release);
-            thread::sleep(Duration::from_micros(100));
+            await_every(
+                "every submitter to be refused after the clear",
+                &progress,
+                |i, p| {
+                    p.refused[0].load(Ordering::Acquire) > refused_before[i][0]
+                        && p.refused[1].load(Ordering::Acquire) > refused_before[i][1]
+                },
+            );
         }
         finished.store(true, Ordering::Release);
 
         submitters
             .into_iter()
-            .map(|s| match s.join() {
-                Ok(seen) => seen,
+            .flat_map(|s| match s.join() {
+                Ok(violations) => violations,
                 Err(_) => panic!("a submitter panicked"),
             })
             .collect()
     });
 
-    let violations: Vec<&String> = seen.iter().flat_map(|s| &s.violations).collect();
     assert!(
         violations.is_empty(),
         "{} violation(s), first: {:?}",
         violations.len(),
         violations.first()
     );
-    // Not vacuous: both opcodes ran handlers, and both were refused in the gaps.
     for (slot, name) in ["opcode 0", "the registry opcode"].into_iter().enumerate() {
-        let ran: u64 = seen.iter().map(|s| s.ran[slot]).sum();
-        let refused: u64 = seen.iter().map(|s| s.refused[slot]).sum();
-        assert!(ran > 0, "{name}: no job ever ran a handler");
-        assert!(refused > 0, "{name}: no job was ever refused");
+        let ran: u64 = progress
+            .iter()
+            .map(|p| p.ran[slot].load(Ordering::Acquire))
+            .sum();
+        let refused: u64 = progress
+            .iter()
+            .map(|p| p.refused[slot].load(Ordering::Acquire))
+            .sum();
+        println!("{name}: {ran} jobs ran a handler, {refused} were refused");
+        assert!(ran >= EPOCHS * SUBMITTERS as u64, "{name}: ran {ran}");
+        assert!(
+            refused >= EPOCHS * SUBMITTERS as u64,
+            "{name}: refused {refused}"
+        );
     }
     clear_engine_handlers();
 }

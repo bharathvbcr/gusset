@@ -144,6 +144,12 @@ where
 /// (the cache notices the clear then) or exits, so a worker that stays idle
 /// holds its last handler until then. `Close` joins the workers, so the
 /// recovery recipe above (`Close`, clear, reinstall, `Open`) releases them.
+///
+/// The same delay moves where a panic in a handler's `Drop` surfaces. It no
+/// longer unwinds into the caller of this function (or of `set_engine_handler`)
+/// when a worker holds the last reference: it is a panic in the job that makes
+/// the worker release the handler, which poisons that job's handle, or a
+/// logged fault when the worker releases it at exit.
 pub fn clear_engine_handlers() {
     let mut g = GLOBAL_ENGINE.write().unwrap_or_else(|e| e.into_inner());
     *g = None;
@@ -209,11 +215,16 @@ impl EngineCache {
     }
 
     /// Forgets everything resolved under another generation.
+    ///
+    /// The generation is assigned last. Dropping a cleared handler can run its
+    /// `Drop`, and that can panic: unwinding out of here before the entries are
+    /// gone must leave the old tag in place, so the next call refreshes again
+    /// instead of trusting entries the registry no longer holds.
     fn adopt(&mut self, generation: u64) {
         if self.generation != generation {
-            self.generation = generation;
             self.global = GlobalSlot::Unresolved;
             self.by_opcode.clear();
+            self.generation = generation;
         }
     }
 
