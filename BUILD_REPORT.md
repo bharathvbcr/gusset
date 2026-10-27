@@ -1,6 +1,6 @@
 # BUILD_REPORT
 
-Date: 2026-10-26. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End: `main` @ `a9cb808`. The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
+Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End of wave 1: `main` @ `a9cb808`. End of wave 2: `main` @ `6fe980a` (see "Wave 2", which supersedes the scope lines below). The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
 
 **Scope.** The ask was "work on major optimizations and bugs, pull all changes and merge".
 - Bugs and gate defects: four PRs merged, each with a passing Matrix run on main after merge.
@@ -37,14 +37,15 @@ Changes made in response to reviews:
 | --- | --- | --- | --- |
 | `perf/r6-panic-location-fastpath` | `11bfac7` | GussetCallParallel 3.565 µs ±11% → 3.565 µs ±18%, p=0.424 (66.9% → 78.8% idle) | **Rejected.** The parallel arm was the one R6's contention argument was about. With CallNoop also not significant (p=0.105), there is nothing to land. |
 | `perf/r8-promote-midsize` | `9bf6c52` | WaitBufferResultSize: 7–30% faster from 49 B to 4096 B (p≤0.014), allocs/op 4 → 3. SubmitWaitResult: **slower**, +16% at 49 B, +12% at 256 B and +9% at 4096 B (each p≤0.001), and +7% at 1024 B (p=0.050). CallResult: not recorded; `record.sh` refused it three times on its idle check. | **Rejected as built.** Plain `Wait` regresses by more than 5%. This is the cost R8's own commit message named as unproven ("serial Wait at 49..4096 bytes"). The `WaitBuffer` gain is real but the `Wait` path pays for it. |
-| `perf/g7-waitbuffer-heap` | `bd2e6a7` | GussetWaitBuffer: −17% at 48 B (1.742 → 1.442 µs, p=0.000), −11% at 256 B (2.582 → 2.297 µs, p=0.001); 0 B, 1024 B and 4096 B not significant; allocs/op 4 → 3 from 48 B to 4096 B (72.8% → 70.0% idle) | **Significant win with no regression. Not merged, because it is adopter-visible:** `Buffer.ID()` is 0 and `Stats().LiveBytes` stops counting an inline `WaitBuffer` or `CallBuffer` result. Your decision; see "Owner decisions pending". |
+| `perf/g7-waitbuffer-heap` | `bd2e6a7` | GussetWaitBuffer: −17% at 48 B (1.742 → 1.442 µs, p=0.000), −11% at 256 B (2.582 → 2.297 µs, p=0.001); 0 B, 1024 B and 4096 B not significant; allocs/op 4 → 3 from 48 B to 4096 B (72.8% → 70.0% idle) | **Significant win with no significant regression** (the worst size, 4096 B, is +2.2% at p=0.425). Not merged, because it is adopter-visible and rewrites an I1 regression test; see "Owner decisions pending". |
 
 **Process in wave 2.**
-- Lanes L6 (R8), L7 (G7), L8 (#31) and L9 (#32) were implemented by Sonnet in their own worktrees and reviewed by Opus and the Codex and Cursor bots. No separate adversarial Sonnet pass ran in this wave; that is a deviation from the brief.
+- Lanes L6 (R8, whose instrument commit `9224a7f` became #33), L7 (G7), L8 (#31) and L9 (#32) were implemented by Sonnet in their own worktrees and reviewed by Opus and the Codex and Cursor bots. No separate adversarial Sonnet pass ran in this wave; that is a deviation from the brief.
 - Fable was not consulted. The one judgement call, G7, is an owner decision, not Fable's.
 - The A/Bs ran from two host-gated background watchers. Each waited for three samples a minute apart at 65% idle or more before calling `record.sh`, which applies its own 60% floor.
   - The host first stayed that quiet at 22:56.
   - Five of the eleven attempts were refused on the after-arm idle check: all three CallResult tries and two SubmitWaitResult tries.
+  - The first refusal (23:08, 59.81% idle) overlapped my own `make docs`, `make docs-check` and push for #34, so that one may have been self-inflicted.
 
 ## Merged
 
@@ -137,7 +138,14 @@ Every PR went through implementation and review (Opus plus the Cursor and Codex 
 
 ## Owner decisions pending
 1. **libc bump (ft-d3d3888d).** libc 0.2.191 (2026-10-16) ships Apple `F_SETNOSIGPIPE` (rust-lang/libc#5609, merged 2026-10-11), so the card's first criterion is met; the card now records this (revision 4, still backlog). The card says "dependency change: ask first". The change is `Cargo.lock` 0.2.189 → 0.2.191, use `libc::F_SETNOSIGPIPE`, and drop the local constant in `pool/sys.rs`.
-2. **G7 (wave 2): merge `perf/g7-waitbuffer-heap`?** It is a significant win on small `WaitBuffer` results with no regression, but adopters would see `Buffer.ID()` return 0 and `Stats().LiveBytes` stop counting these results. The branch carries the godoc, `docs/adoption.md`, CHANGELOG and DECISIONS text for that change. It is not rebased on current main.
+2. **G7 (wave 2): merge `perf/g7-waitbuffer-heap`?** It is a significant win on small `WaitBuffer` results with no significant regression. What merging it changes:
+   - **Adopters see two changes:** `Buffer.ID()` returns 0 for a result of 4 KiB or less, and `Stats().LiveBytes` stops counting these results.
+     - The bytes now live on the Go heap, where `GOMEMLIMIT` and the GC already see them, so I1's two-heap accounting stays whole.
+     - These results were never charged to `WithBufferBudget`; before G7, `waitBuffer` called `allocBuffer` with `budgeted` false. So the budget is unchanged.
+   - **It rewrites an I1 regression test.** `TestWaitBuffer_CloseCannotFreeTheResultBeingFilled` pinned the 2026-09-30 write-after-free: Close freeing the Rust buffer a fill was writing into.
+     - With no Rust buffer for these results, "Close cannot finish first" no longer holds, so the assertion changed.
+     - The rewritten test still forces the race and checks that the result is intact, lives in Go memory, and can be freed. Its comment explains the change.
+   - **Where the decision is recorded:** the branch carries the godoc, `docs/adoption.md`, CHANGELOG and a DECISIONS row. It is not rebased on current main.
 3. **Benchmarking needs a quiet host.** Wave 2 found one quiet window, and five of eleven recordings were still refused. R8's CallResult arm is unrecorded, and R7 and R10 are not attempted.
 4. **Issue #4 and M2.** The nightlies on 2026-10-25 and 2026-10-26 were green on `d151fa3`. As of 07:08Z on 2026-10-27, the third has not run; it will run on `6fe980a`. Closing issue #4 is yours.
 5. **Carried over:**
