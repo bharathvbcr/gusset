@@ -24,6 +24,16 @@ Benchmarks only; no runtime, export, ABI or public-surface change. No results ar
 #### Benchmarks
 - **`bench/result_size_test.go` measures the result egress paths across the size thresholds.** `BenchmarkGussetCallResult`, `BenchmarkGussetSubmitWaitResult` and `BenchmarkGussetWaitBufferResultSize` run the diagnostic echo at 0, 48, 49, 256, 1024 and 4096 bytes (and 4097 for the two that can submit it), straddling `INLINE_RESULT_MAX` (48) and the 4 KiB promotion threshold. Until now no benchmark returned a result between a no-op and 64 KiB, so the R8 (worker-side promotion) and G7 (heap-backed `WaitBuffer`) candidates had nothing to be A/B'd against.
 
+### 2026-10-26 · `docs/integrations.md` records the Manvi and GitPulse survey (card ft-83151a08)
+
+Documentation and changelog only; no runtime, export, ABI or public-surface change (17 exports, 13 Go entry points). No I1 to I6 invariant is touched. The survey was read-only: nothing was built or run in Manvi or GitPulse, and `git` against those checkouts was refused to the session, so the files read are their working trees.
+
+#### Documentation
+- **Manvi's `gusset-check` is read and recorded as inferred, not run.** It wraps DevCouncil's `gussetfn.SelfTest` behind a `gusset.MaxPoolSize` guard (`manvi/gussetcheck/check_cgo.go`), so it is the same check the page already describes for DevCouncil. It is a gate in Manvi's `verify.sh` and release build. Every `gusset.` identifier `gussetfn` uses exists in this tree and `internal/ffi/exports.txt` is unchanged since Manvi's pin (`320c56c`, 142 commits behind), so it should still print `ok`; running it needs a cgo build and was not done.
+- **GitPulse's Go-to-Rust surface is one check program.** `go/` holds the same check behind a `gusset` build tag; the product (`src-tauri`) is Rust and reaches Go and Rust through a `manvi serve` stdio child, the `devmap` binary and vendored `devmap-*` crates. Neither repository has `import "C"` or `#cgo` in its Go. GitPulse's CI pin (`92c2056`) is 309 commits behind.
+- **Manvi does run `devmap` from long-lived Go processes, and the page's earlier conclusion changes in one place.** The agent harness and `manvi serve` start one `devmap` process per query, up to 26 for one `graph_context` call, through DevCouncil's `dc/devmap`. A warm pool would therefore have a repeated-query caller, and would belong in `dc/devmap`. The page does not recommend building it: no measurement of real sessions exists, and Manvi deliberately reads `status` once per call, which a warm process must keep. DevCouncil's own paths and the verdict on running `devmap` through Gusset are unchanged.
+- **The pending list is rewritten item by item**: two items done, one surveyed and not run, one still pending (is the pool worth building), and the pins in both apps reported as behind and left alone. Section headers keep their 2026-09-27 timings; the new sections say they were surveyed on 2026-10-26.
+
 ### 2026-10-26 · The parallel crossover rows are labelled with the recorded GOMAXPROCS, not a typed "18 goroutines"
 
 Docs tooling and tests; no runtime, export, ABI or public-surface change. No I1 to I6 invariant is touched: this protects R15 (every number in docs is generated). `make docs-check` is clean and `docs/choosing.md` is byte-identical, because the committed recording was made at GOMAXPROCS 18.
