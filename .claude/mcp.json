@@ -2,8 +2,6 @@
   "mcpServers": {
     "devmap": {
       "args": [
-        "--root",
-        "/Users/bharath/Code/devtools/gusset",
         "mcp"
       ],
       "command": "devmap",
