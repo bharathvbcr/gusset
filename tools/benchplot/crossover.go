@@ -24,6 +24,44 @@ const (
 	crossoverTight = 1.10
 )
 
+// parallelGoroutines names the parallel arm's row ("18 goroutines") from the
+// recording, not from the host that made the committed one.
+//
+// BenchmarkCrossoverParallel is b.RunParallel with the default parallelism
+// (bench/seed/go/crossover_test.go never calls SetParallelism), which starts
+// GOMAXPROCS goroutines, and `go test` writes that GOMAXPROCS on every
+// benchmark name. A recording that cannot say so unambiguously is refused.
+func parallelGoroutines(f *benchfile.File) (string, error) {
+	procs, err := f.ProcsOf("BenchmarkCrossoverParallel/")
+	if err != nil {
+		return "", err
+	}
+	if procs == 1 {
+		return "1 goroutine", nil
+	}
+	return fmt.Sprintf("%d goroutines", procs), nil
+}
+
+// renderCostTable is the cost-per-call table: every work size, serial and
+// parallel, with the ratio of each pair. parallel names the parallel columns'
+// goroutine count.
+func renderCostTable(tm map[string][]benchfile.Sample, works []workPoint, parallel string) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("| work per call | cgo, serial | Gusset, serial | ratio | cgo, %s | Gusset, %s | ratio |\n",
+		parallel, parallel))
+	b.WriteString("| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n")
+	for _, w := range works {
+		sr := medianByIters(tm, "BenchmarkCrossoverSerial/RawCgo/", w.iters, "ns/op")
+		sg := medianByIters(tm, "BenchmarkCrossoverSerial/Gusset/", w.iters, "ns/op")
+		pr := medianByIters(tm, "BenchmarkCrossoverParallel/RawCgo/", w.iters, "ns/op")
+		pg := medianByIters(tm, "BenchmarkCrossoverParallel/Gusset/", w.iters, "ns/op")
+		b.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s |\n",
+			w.label, fmtDur(sr), fmtDur(sg), tableRatio(sg/sr),
+			fmtDur(pr), fmtDur(pg), tableRatio(pg/pr)))
+	}
+	return b.String()
+}
+
 // crossoverArm is one work size's Gusset ÷ raw-cgo ratio, serial and parallel.
 type crossoverArm struct {
 	label    string
@@ -111,10 +149,11 @@ func aheadCell(arms []crossoverArm, ratio func(crossoverArm) float64) string {
 }
 
 // renderCrossover is the generated crossover summary. repsLo and repsHi are the
-// fewest and most repetitions behind any median.
-func renderCrossover(arms []crossoverArm, repsLo, repsHi int) string {
-	serial := func(a crossoverArm) float64 { return a.serial }
-	parallel := func(a crossoverArm) float64 { return a.parallel }
+// fewest and most repetitions behind any median; parallel names the parallel
+// row ("18 goroutines"), which parallelGoroutines reads off the recording.
+func renderCrossover(arms []crossoverArm, repsLo, repsHi int, parallel string) string {
+	serialRatio := func(a crossoverArm) float64 { return a.serial }
+	parallelRatio := func(a crossoverArm) float64 { return a.parallel }
 
 	labels := make([]string, len(arms))
 	for i, a := range arms {
@@ -135,7 +174,7 @@ func renderCrossover(arms []crossoverArm, repsLo, repsHi int) string {
 	for _, row := range []struct {
 		name  string
 		ratio func(crossoverArm) float64
-	}{{"serial", serial}, {"18 goroutines", parallel}} {
+	}{{"serial", serialRatio}, {parallel, parallelRatio}} {
 		b.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n", row.name,
 			withinCell(arms, crossoverLoose, row.ratio),
 			withinCell(arms, crossoverTight, row.ratio),
