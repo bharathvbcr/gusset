@@ -512,15 +512,6 @@ pub fn check_pipe_write_end(fd: i32) -> Result<()> {
     Ok(())
 }
 
-/// XNU `F_SETNOSIGPIPE` (`sys/fcntl.h`). libc exports only `SO_NOSIGPIPE`.
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "watchos",
-    target_os = "tvos"
-))]
-const F_SETNOSIGPIPE: libc::c_int = 73;
-
 /// Sets the given file descriptor to non-blocking mode (`O_NONBLOCK`).
 ///
 /// On Apple it then sets `F_SETNOSIGPIPE`. That second `fcntl` is compiled out
@@ -569,7 +560,7 @@ pub(crate) fn set_nonblocking_with(
         // untested on Linux, where it compiles out). Asking the kernel
         // not to raise it for this descriptor turns a write to a closed
         // pipe into EPIPE whatever the thread's mask.
-        if fcntl(fd, F_SETNOSIGPIPE, 1) < 0 {
+        if fcntl(fd, libc::F_SETNOSIGPIPE, 1) < 0 {
             let err = Error::last_os_error();
             // O_NONBLOCK is already on. A refusal must not leave it there:
             // open has not taken the descriptor yet.
@@ -614,15 +605,6 @@ pub(crate) fn close_fd_with(fd: i32, close: impl FnOnce(i32) -> i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// XNU `F_GETNOSIGPIPE` (`sys/fcntl.h`). libc exports only `SO_NOSIGPIPE`.
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "watchos",
-        target_os = "tvos"
-    ))]
-    const F_GETNOSIGPIPE: libc::c_int = 74;
 
     #[test]
     fn check_buffer_len_refuses_zero_and_the_ceiling_without_allocating() {
@@ -739,7 +721,7 @@ mod tests {
             target_os = "tvos"
         ))]
         {
-            cmd == F_SETNOSIGPIPE
+            cmd == libc::F_SETNOSIGPIPE
         }
         #[cfg(not(any(
             target_os = "macos",
@@ -777,7 +759,7 @@ mod tests {
         ))]
         {
             // SAFETY: F_GETNOSIGPIPE reads one flag on a descriptor this test owns.
-            let nosig = unsafe { libc::fcntl(w, F_GETNOSIGPIPE) };
+            let nosig = unsafe { libc::fcntl(w, libc::F_GETNOSIGPIPE) };
             assert_eq!(nosig, 1, "NOSIGPIPE must be set");
         }
         close_pair(r, w);
@@ -826,7 +808,7 @@ mod tests {
                  flags would not prove a rollback"
             );
             // SAFETY: F_GETNOSIGPIPE reads one flag on a descriptor this test owns.
-            let nosig = unsafe { libc::fcntl(w, F_GETNOSIGPIPE) };
+            let nosig = unsafe { libc::fcntl(w, libc::F_GETNOSIGPIPE) };
             assert_eq!(nosig, 0, "a failed F_SETNOSIGPIPE left NOSIGPIPE set");
         }
         #[cfg(not(any(
@@ -891,7 +873,7 @@ mod tests {
     ))]
     fn nosigpipe(fd: i32) -> i32 {
         // SAFETY: F_GETNOSIGPIPE reads one flag on a descriptor this test owns.
-        unsafe { libc::fcntl(fd, F_GETNOSIGPIPE) }
+        unsafe { libc::fcntl(fd, libc::F_GETNOSIGPIPE) }
     }
 
     /// A pipe that already has `O_NONBLOCK` and `O_APPEND` must get those exact
@@ -915,7 +897,7 @@ mod tests {
         assert_eq!(nosigpipe(w), 0, "a fresh pipe must not have NOSIGPIPE");
         let mut nosig_calls = 0;
         let result = set_nonblocking_with(w, |fd, cmd, arg| {
-            if cmd == F_SETNOSIGPIPE {
+            if cmd == libc::F_SETNOSIGPIPE {
                 nosig_calls += 1;
                 write_errno(libc::EPERM);
                 return -1;
@@ -1041,7 +1023,7 @@ mod tests {
         assert_eq!(before & libc::O_NONBLOCK, 0, "a fresh pipe is blocking");
         let mut setfl = 0;
         let result = set_nonblocking_with(w, |fd, cmd, arg| {
-            if cmd == F_SETNOSIGPIPE {
+            if cmd == libc::F_SETNOSIGPIPE {
                 write_errno(libc::EPERM);
                 return -1;
             }
@@ -1106,7 +1088,7 @@ mod tests {
         write_errno(0);
         let mut setfl = 0;
         let result = set_nonblocking_with(w, |fd, cmd, arg| {
-            if cmd == F_SETNOSIGPIPE || (cmd == libc::F_SETFL && setfl == 1) {
+            if cmd == libc::F_SETNOSIGPIPE || (cmd == libc::F_SETFL && setfl == 1) {
                 return -1;
             }
             if cmd == libc::F_SETFL {

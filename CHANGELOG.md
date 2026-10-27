@@ -20,6 +20,13 @@ Changes since v0.0.3. The C ABI layout is unchanged (17 exports, ABI layout vers
 - A second test catches a handle that reads its completion descriptor instead of taking it (`ft-3d60ee16`, criterion 11). Replacing the `swap(-1)` in `release_pipe_with` with a `load` was caught by one test, the close-count test. `a_second_release_cannot_close_the_descriptor_it_gave_up` finds it through the effect: the first release hands back the number without closing it, the second runs the real `close(2)`, and the descriptor must still carry a write to the read end. It never frees and re-acquires a number, so it cannot race the module's parallel tests. A second `libc::close` inside `close_fd` stays uncaught, by design (`sys.rs`, `close_fd`). Test-only; no production change.
 - `TestPitfall_OpenNilOptionIsRefusedNotPanicked`, `TestFFI_ArgumentRefusalsAreBadArg` and the Rust `argument_refusal_tests` pin the two changes above, and that the refusals outside the list stay `FFI_ERR`.
 
+### Dependencies
+
+- **libc 0.2.191 in both lockfiles, and `pool::sys` uses its Apple `F_SETNOSIGPIPE` and `F_GETNOSIGPIPE` (`ft-d3d3888d`).**
+  - `Cargo.lock` moves from 0.2.189 and `fuzz/Cargo.lock` from 0.2.190. Both `Cargo.toml` files still say `"0.2"`.
+  - rust-lang/libc#5609 added the two constants in 0.2.191, with the values gusset had hard-coded (73 and 74). The local copies are removed.
+  - The `fcntl` calls are unchanged, as are the export count and the ABI.
+
 ### 2026-10-27 · The allocator counters add with `fetch_add` and sit on their own cache lines (card ft-8a8279f5, R10)
 
 Rust allocator accounting and its benchmarks; no export, ABI or public-surface change (`AllocStats` keeps its layout, 17 exports, 13 Go entry points). Protects I1: `AdviseMemoryLimit` reads the live total these counters keep, and none of the three may wrap or read small after reaching the top. **This is a candidate: no timing was recorded with it, and it lands only if an interleaved A/B (`RECORD_VARIANTS`, `BenchmarkBufferAllocParallel`) shows it faster.**
