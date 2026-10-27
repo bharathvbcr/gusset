@@ -1,0 +1,348 @@
+# gusset-bench: v1
+# gusset-bench-recorded: 2026-10-27T06:54:16Z
+# gusset-bench-host: Mac-8005.lan
+# gusset-bench-uname: Darwin 27.0.0 arm64
+# gusset-bench-package: each variant's directory, ./bench/...
+# gusset-bench-commit: 9224a7fb98f165572ae9be4799fdb2ed7ca73cdb
+# gusset-bench-commit-modified: 0
+# gusset-bench-arms: GussetSubmitWaitResult$
+# gusset-bench-benchtime: 1s
+# gusset-bench-count: 10
+# gusset-bench-cpu: default
+# gusset-bench-order: 10 rounds; each round ran every arm once (-count=1); variant order alternates (odd rounds listed, even rounds reversed)
+# gusset-bench-round-1: base cand
+# gusset-bench-round-2: cand base
+# gusset-bench-round-3: base cand
+# gusset-bench-round-4: cand base
+# gusset-bench-round-5: base cand
+# gusset-bench-round-6: cand base
+# gusset-bench-round-7: base cand
+# gusset-bench-round-8: cand base
+# gusset-bench-round-9: base cand
+# gusset-bench-round-10: cand base
+# gusset-bench-variant-base: 9224a7f, 0 tracked path(s) modified, /private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/inst
+# gusset-bench-variant-cand: f38e9b1, 0 tracked path(s) modified, /private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/r8
+# gusset-bench-cpu-idle-before: 87.16
+# gusset-bench-cpu-idle-after: 82.47
+# gusset-bench-min-idle: 60
+# gusset-bench-exclusive: yes
+variant: base
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/inst/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  876045	      1280 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  886440	      1327 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  610773	      1825 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  539846	      2098 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  448660	      2738 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  410052	      3054 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  375897	      3030 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.473s
+variant: base
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/inst/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  914010	      1330 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  881787	      1380 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  602755	      1906 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  520887	      2169 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  427018	      2804 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  387056	      3205 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  374938	      3001 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.535s
+variant: base
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/inst/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  908697	      1289 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  880098	      1390 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  580077	      1873 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  540978	      2153 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  438606	      2741 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  387345	      3051 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  391476	      3179 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.531s
+variant: base
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/inst/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  703959	      1658 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  785896	      1865 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  492852	      2511 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  425259	      2903 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  340165	      3433 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  375210	      3090 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  379893	      3172 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.926s
+variant: base
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/inst/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  879721	      1415 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  812647	      1502 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  568834	      2007 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  508605	      2283 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  429560	      3095 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  372279	      3131 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  342543	      3130 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.604s
+variant: base
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/inst/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  878742	      1336 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  885314	      1369 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  627463	      1850 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  516730	      2122 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  444496	      2696 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  370689	      2982 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  391094	      3057 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.451s
+variant: base
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/inst/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  901831	      1316 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  897302	      1354 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  613732	      1863 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  531295	      2165 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  428640	      2641 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  387183	      3054 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  389299	      3053 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.463s
+variant: base
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/inst/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  863078	      1306 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  870132	      1371 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  590340	      1965 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  534808	      2144 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  440686	      2694 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  392851	      3047 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  394809	      2992 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.509s
+variant: base
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/inst/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  881606	      1260 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  857293	      1378 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  610347	      1863 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  548656	      2173 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  426783	      2716 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  373977	      3229 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  374988	      3173 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.436s
+variant: base
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/inst/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  905130	      1327 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  870568	      1375 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  585859	      1869 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  525447	      2153 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  432649	      2781 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  363102	      3229 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  395710	      3002 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.450s
+variant: cand
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/r8/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  909244	      1321 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  868922	      1403 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  535036	      2128 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  490398	      2442 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  463674	      2554 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  376233	      3102 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  382370	      3100 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.628s
+variant: cand
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/r8/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  871585	      1332 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  858655	      1403 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  541177	      2206 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  472935	      2460 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  397574	      2931 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  364407	      3233 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  373069	      3196 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.532s
+variant: cand
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/r8/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  910486	      1309 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  843547	      1421 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  554835	      2119 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  475406	      2580 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  408544	      3488 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  278526	      4170 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  281492	      4122 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.835s
+variant: cand
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/r8/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  715332	      1725 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  659320	      1861 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  434043	      2911 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  383452	      3184 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  367183	      3448 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  298306	      4060 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  321824	      3911 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.987s
+variant: cand
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/r8/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  836311	      1416 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  847012	      1453 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  532592	      2228 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  456538	      2526 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  392962	      3036 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  330254	      3685 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  395400	      3001 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.639s
+variant: cand
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/r8/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  904087	      1325 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  890008	      1373 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  533998	      2119 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  470946	      2410 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  415046	      2980 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  350371	      3268 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  371218	      3214 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.542s
+variant: cand
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/r8/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  912489	      1277 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  857400	      1381 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  532686	      2133 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  476300	      2374 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  413874	      2853 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  355983	      3303 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  392426	      3102 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.456s
+variant: cand
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/r8/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  895438	      1296 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  914642	      1376 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  531931	      2360 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  436508	      2382 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  420510	      2853 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  334372	      3429 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  396372	      2987 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.516s
+variant: cand
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/r8/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  849676	      1356 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  869803	      1428 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  532951	      2218 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  488901	      2339 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  400704	      2920 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  347538	      3279 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  391705	      3118 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	9.398s
+variant: cand
+# github.com/bharathvbcr/gusset/bench.test
+ld: warning: search path '/private/tmp/claude-501/-Users-bharath-Code-devtools-gusset/ff0b44f6-cff4-42b5-9a14-20c954ed8416/scratchpad/ab/r8/internal/ffi/../../target/debug' not found
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gusset/bench
+cpu: Apple M5 Pro
+BenchmarkGussetSubmitWaitResult/0B-18 	  913621	      1310 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGussetSubmitWaitResult/48B-18         	  848568	      1348 ns/op	      48 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/49B-18         	  560769	      2050 ns/op	      64 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/256B-18        	  471087	      2338 ns/op	     256 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/1024B-18       	  424936	      2837 ns/op	    1024 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4096B-18       	  329422	      3370 ns/op	    4096 B/op	       1 allocs/op
+BenchmarkGussetSubmitWaitResult/4097B-18       	  400070	      3030 ns/op	    4864 B/op	       1 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gusset/bench	8.431s
