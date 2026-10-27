@@ -1,6 +1,6 @@
 # BUILD_REPORT
 
-Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End of wave 1: `main` @ `a9cb808`. End of wave 2: `main` @ `6fe980a` (see "Wave 2", which supersedes the scope lines below). The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
+Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End of wave 1: `main` @ `a9cb808`. End of wave 2: `main` @ `6fe980a`. End of wave 3: `main` @ `8ef9659`. "Wave 3" and "Wave 2" supersede the scope lines below. The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
 
 **Scope.** The ask was "work on major optimizations and bugs, pull all changes and merge".
 - Bugs and gate defects: four PRs merged, each with a passing Matrix run on main after merge.
@@ -9,6 +9,75 @@ Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`,
 **Gates.**
 - `.devcouncil/config.yaml` has `gates.mode: off`, so no `dev verify` gate ran.
 - Done was not requested for any card. Every card that moved went to `review`, `gitpulse_complete_task` returned `verification: null`, and `held_for_review` was false.
+
+## Wave 3 (2026-10-27)
+
+Asked for as "Next wave", then "Commit and merge all branches and next wave". End: `main` @ `8ef9659`. Where wave 3 changed a conclusion in the sections below, this section supersedes it.
+
+**How "merge all branches" was read.**
+- **G7:** taken as the owner's go on the decision wave 2 left pending.
+- **PR #25:** merged (license text).
+- **R6, R11, G8 and R8:** these A/B'd without a win (R8 with a `Wait` regression), so they were put to you. You chose to keep their code off main and land only their records (#37).
+- **Branches already contained in main:** deleted, eleven at the start of the wave, `docs/license-copyright` after #25, and four more after the merges.
+- **Branches still on the remote:** the five rejected perf branches (`perf/r6-*`, `perf/r7-*`, `perf/r8-*`, `perf/g8-*`, `perf/r11-*`), each carrying its A/B records.
+
+**Merged.** Each PR merged only after every CI check passed on its final head and every bot finding was addressed. Cursor's bots did not run on the wave-3 PRs because of a usage limit, and on #36 Codex never reviewed the final head; both are noted on the PRs.
+
+| PR | Merge | Card | What | Main Matrix / adopter after merge |
+| --- | --- | --- | --- | --- |
+| #25 | `f0a7f5d` | — | Copyright holder standardised in LICENSE-MIT and LICENSE-APACHE (the other session's PR; its uncommitted edits in the main checkout were byte-identical and are now clean) | 40503367872 / 40503367914 |
+| #37 | `0c639a7` | ft-8a8279f5 | A/B records of the rejected R6, R11, G8 and R8, with the commit each measured | 40514816971 / 40514817082 |
+| #36 | `9c9ba1e` | ft-8a8279f5 | G7: `WaitBuffer` carries a bytes result of 4 KiB or less in Go memory and adopts `drainPipe`'s slice when it is already 64-byte aligned | 40538268623 / 40538268622 |
+| #38 | `8ef9659` | ft-8a8279f5 | R10: the allocator counters add with a bounded `fetch_add` and sit on their own cache lines | 40541162271 / 40541162201 |
+
+**What changed in each PR during review.**
+- **#36, G7. CI caught a regression the earlier local A/B missed.** The first push failed the benchgate: `GussetWaitBufferResultSize/4096B` was slower than main beyond the 10% threshold. The gain shrank with size, because G7 copied a result `drainPipe` had already copied (two Go allocations and two copies against one).
+  - **The fix.** `waitBuffer` now adopts that slice when it is already 64-byte aligned and copies it otherwise. Alignment is tested at run time on every result.
+  - **The benchgate then:** every size from 48 B to 4096 B significantly faster, every other row `~`.
+  - **Codex P2.** An engine's own buffer (`JobOutput::Buffer` or `Allocated`) of 4 KiB or less is still Rust memory with a non-zero `ID()`. The docs had promised Go memory for every small result. The guarantee is narrowed to bytes results, and `TestInterop_AllocatorBackedOutputAllPaths` pins both cases per allocator lane.
+  - **New test.** The I1 regression test rewrite was offset by `TestTakeResult_CloseCannotFreeTheViewBeingUsed`. It is deterministic and fails all four subtests against the unlocked v0.0.3-shape mutant.
+- **#37, the rejected records.** Codex found two problems:
+  - the README typed medians and p-values, against AGENTS.md's rule that doc numbers come from benchstat;
+  - it named branch heads where the records measured earlier commits.
+
+  Both were fixed: verdicts are stated as what the committed command prints, and each measured commit is named. The heads add only result files on top of the measured commits.
+- **#38, R10.** The adversarial pass found no break. Its three low findings were fixed:
+  - a compile-time assertion now pins the no-wrap headroom (checked to fail the build when loosened);
+  - a stale AGENTS.md pitfall row;
+  - stale names in the benchmark's comment.
+
+**Perf candidates A/B'd in wave 3.** Each was recorded through `bench/record.sh` in 10 ABBA rounds unless noted, on this host while other sessions ran. `record.sh` refused 15 attempts on its idle floor across the seven Go recordings before they went through. Verdicts are stated as what `benchstat -ignore ld -col 'variant@(base cand)' -filter '.unit:sec/op'` prints for each committed file.
+
+| Candidate | Records | Verdict |
+| --- | --- | --- |
+| G7 (`perf/g7-waitbuffer-heap`, merged) | `bench/results/gp-feat-001/g7-*-vs-main-*` against main `0c639a7`, plus the PR benchgate | **Landed.** Locally, `WaitBufferResultSize` was significantly faster at 49 B, 256 B and 1 KiB, `~` elsewhere, with wide intervals: the arm started at the idle floor. allocs/op fell from 4 to 2 from 48 B to 4 KiB. `SubmitWaitResult` (`Wait`) and `CallResult` (`Call`) were `~` at every size. |
+| R10 (`perf/r10-alloc-counters`, merged) | `r10-*` against the instrument base `c972b34` | **Landed.** `BufferAllocParallel` significantly faster, with tight intervals; `GussetCallParallel` `~`. |
+| R7 (`perf/r7-engine-cache`, not merged) | `r7-*` on the branch, against its instrument base `f88ac08` | **Rejected.** `GussetCallParallel` and `GussetCallNoop` are `~`. On the Rust dispatch bench, three serial arms are significantly slower with the cache, and registered opcode 0 and the three parallel arms are `~`. `record.sh` will not run a `cargo:` arm as variants, so the two builds were alternated by hand: six runs of 10 rounds, in base, cand, cand, base, base, cand order, each gated on 60% idle, giving n=30 per arm. |
+
+The R7 adversarial pass found two regressions against main, both demonstrated by scratch tests:
+1. A handler whose `Drop` panics during `clear_engine_handlers` skips the generation bump, so a worker keeps running a removed handler.
+2. An idle worker of another open handle keeps a cleared handler's captures alive.
+
+R7 is rejected on the A/B, so neither is fixed; both are recorded in the branch's last commit.
+
+**Process in wave 3.**
+- **Lanes.** Sonnet implemented G7's merge of main, G7's adoption fix, R7 and R10, each in its own worktree.
+  - R7 and R10 each had a separate adversarial Sonnet pass.
+  - G7's adoption fix had none. It got an Opus review, the Codex bot and the CI benchgate.
+  - Opus reviewed every diff before its PR.
+- **Fable** was not consulted. The judgement calls were the owner's: G7, and the rejected branches, which were put to you.
+- **A wrong claim, corrected.** Two pushes to the G7 branch failed silently: the worktree's branch had no upstream, and I cut the output to its last line. I reported that the allocator-API jobs had passed the new `ID()` assertion when they had run on the commit before it. That was corrected on the PR, and the jobs then passed on the real head (3512ff2).
+- **Issue #4** is not closed. The third consecutive green main nightly ran (below), but closing the issue is outward-facing and needs your go.
+
+**Main CI.** Matrix and adopter passed on main after every wave-3 merge; the run ids are in the table above.
+
+**Cards moved in wave 3.**
+- **ft-0dde896c (release):** moved to review. Every criterion is met; the last PENDING line was the advisory, GHSA-9w4m-4vr2-xcvx, published 2026-10-25.
+- **ft-97faf4f4 (main-green tracker):** moved to review. M2's three consecutive green scheduled main nightlies are 40179055849, 40303616113 and 40482856845, and every job of the third concluded success. Closing issue #4 waits for your go.
+- **ft-8a8279f5 (perf):** stays in_progress. G7 and R10 landed and R7 is rejected, so every named candidate is now decided. R8's unrecorded CallResult arm cannot change R8's rejection. Two acceptance criteria remain open:
+  - the committed crossover data still lacks the 1 µs and 10 µs arms that #26 added, which needs a quiet-host `make bench-crossover` and a `make docs` PR;
+  - the nightly hammer has not yet run on this main.
+  One deviation: the card asks for R7 to be A/B'd against #34's baseline. It was A/B'd against its interleaved instrument base instead, which is the stronger comparison.
 
 ## Wave 2 (2026-10-26 evening to 2026-10-27)
 
@@ -76,10 +145,10 @@ Every PR went through implementation and review (Opus plus the Cursor and Codex 
 | ft-a0485e94 N2 test/gate weaknesses | review | Items 1, 3, 5 (#27) and 7 (#26) are done. Items 2, 4 and 6 are timing bounds; the card's criterion 2 forbids touching them without noise-floor evidence, which this host could not give. |
 | ft-c9335ebc N3 housekeeping | review | Items 1–4 are done: main checkout current, other session's edits verified and landed via #24, stale-CHANGELOG note, `w1-main-green` worktree removed (162 MB, clean, merged commit), DevMap rebuilt. Item 5 was deliberately not filed. |
 | ft-7e821586 R14 asan-rust flake (new) | review | Criteria 1–2 (#28) are done. Criterion 3, diagnosing the next occurrence from the new evidence, stays open. |
-| ft-8a8279f5 sub-10 µs coordination overhead | in_progress | Criterion 8's code half is merged (#26). R6, R11 and G8 were A/B'd with no significant win and stay on branches. Wave 2: R6 CallParallel measured (no difference), R8 rejected, G7 awaits your decision, and the ft-568a30e2 baseline that R7 needed is merged (#34). |
+| ft-8a8279f5 sub-10 µs coordination overhead | in_progress | Criterion 8's code half is merged (#26). R6, R11 and G8 were A/B'd with no significant win and stay on branches. Wave 2: R6 CallParallel measured (no difference), R8 rejected, and the ft-568a30e2 baseline that R7 needed is merged (#34). Wave 3: G7 (#36) and R10 (#38) landed; R7 rejected. |
 | ft-3d60ee16, ft-415ddf1f, ft-8a827cf5 | review | Moved by the 2026-10-24 wrap-up spec, which this session applied: 7 card updates, each verified by SQL as `<rev>\|1\|1\|1\|1\|0`, plus new cards N1 ft-197f6d41, N2 ft-a0485e94 and N3 ft-c9335ebc. |
-| ft-97faf4f4 main-green tracker | in_progress | M2 stands at 2 of 3 consecutive green main nightlies on this tree (40179055849, 40303616113). |
-| ft-0dde896c release | unchanged | Release steps are owner-gated. |
+| ft-97faf4f4 main-green tracker | review (wave 3) | M2's three consecutive green main nightlies: 40179055849, 40303616113, 40482856845. Closing issue #4 is yours. |
+| ft-0dde896c release | review (wave 3) | Every criterion met; the advisory was published 2026-10-25. |
 | ft-568a30e2 bench pipeline | review (wave 2) | Criterion 4, the quiet-host baseline, merged in #34; the other eleven criteria were met by #17 and #18. |
 | ft-83151a08 integrations survey | review (wave 2) | `docs/integrations.md` (#32). Manvi's `gusset-check` is inferred to pass, not run: it needs a cgo build. |
 
@@ -138,7 +207,7 @@ Every PR went through implementation and review (Opus plus the Cursor and Codex 
 
 ## Owner decisions pending
 1. **libc bump (ft-d3d3888d).** libc 0.2.191 (2026-10-16) ships Apple `F_SETNOSIGPIPE` (rust-lang/libc#5609, merged 2026-10-11), so the card's first criterion is met; the card now records this (revision 4, still backlog). The card says "dependency change: ask first". The change is `Cargo.lock` 0.2.189 → 0.2.191, use `libc::F_SETNOSIGPIPE`, and drop the local constant in `pool/sys.rs`.
-2. **G7 (wave 2): merge `perf/g7-waitbuffer-heap`?** It is a significant win on small `WaitBuffer` results with no significant regression. What merging it changes:
+2. **G7 (wave 2): resolved in wave 3.** You approved it and it merged as #36; the text below is the decision as it was put to you. It is a significant win on small `WaitBuffer` results with no significant regression. What merging it changes:
    - **Adopters see two changes:** `Buffer.ID()` returns 0 for a result of 4 KiB or less, and `Stats().LiveBytes` stops counting these results.
      - The bytes now live on the Go heap, where `GOMEMLIMIT` and the GC already see them, so I1's two-heap accounting stays whole.
      - These results were never charged to `WithBufferBudget`; before G7, `waitBuffer` called `allocBuffer` with `budgeted` false. So the budget is unchanged.
@@ -146,18 +215,19 @@ Every PR went through implementation and review (Opus plus the Cursor and Codex 
      - With no Rust buffer for these results, "Close cannot finish first" no longer holds, so the assertion changed.
      - The rewritten test still forces the race and checks that the result is intact, lives in Go memory, and can be freed. Its comment explains the change.
    - **Where the decision is recorded:** the branch carries the godoc, `docs/adoption.md`, CHANGELOG and a DECISIONS row. It is not rebased on current main.
-3. **Benchmarking needs a quiet host.** Wave 2 found one quiet window, and five of eleven recordings were still refused. R8's CallResult arm is unrecorded, and R7 and R10 are not attempted.
-4. **Issue #4 and M2.** The nightlies on 2026-10-25 and 2026-10-26 were green on `d151fa3`. As of 07:08Z on 2026-10-27, the third has not run; it will run on `6fe980a`. Closing issue #4 is yours.
+3. **Benchmarking needs a quiet host.** Wave 2 found one quiet window, and five of eleven recordings were still refused. In wave 3, 15 attempts were refused before the seven Go recordings went through. R8's CallResult arm is still unrecorded; R7 and R10 were A/B'd in wave 3.
+4. **Issue #4 and M2.** The nightlies on 2026-10-25 and 2026-10-26 were green on `d151fa3`, and the third (40482856845, 2026-10-27, on `fa92246`) was green in every job. Closing issue #4, with a comment naming the fix commits, is yours.
 5. **Carried over:**
    - ft-415ddf1f: unpinned apk packages in the musl images, and `--default-toolchain stable` floating, which matches the "track stable" toolchain policy.
    - iceoryx2-go PR #1 size versus the IP-review threshold (AUDIT_REPORT decision 3).
 
 ## Remaining debt noticed, not filed
+- **Wave 3, a flake risk.** `TestWaitBuffer_AlignedResultCostsOnlyTheBufferHeader` (G7, on main since #36) allows one allocation of margin on `testing.AllocsPerRun`, which counts process-wide. A background allocation could red it. If it does, the owning card is ft-8a7cd8ef (Go test hygiene).
 - The `docs/choosing.md` SIMD section still says "about 1.4 GB/s" for the check-in-loop kernel. The section itself says none of it is regenerated.
 - `tools/benchplot` hard-coded the "18 goroutines" label, which goes wrong on a recording host with a different `GOMAXPROCS`. Fixed in wave 2 (#31).
 
 ## Worktrees
-The five agent worktrees were removed after their branches were pushed. All were clean; together they held 863 MB, mostly `target/`. The four A/B checkouts and the report worktrees were removed after the A/B. Wave 2's twelve A/B, baseline and branch-commit worktrees were removed after each was confirmed clean. One exception: the baseline checkout held the two recordings untracked, and both were byte-identical (`cmp`) to the files #34 merged. The worktree this report was written in is removed after it merges.
+The five agent worktrees were removed after their branches were pushed. All were clean; together they held 863 MB, mostly `target/`. The four A/B checkouts and the report worktrees were removed after the A/B. Wave 2's twelve A/B, baseline and branch-commit worktrees were removed after each was confirmed clean. One exception: the baseline checkout held the two recordings untracked, and both were byte-identical (`cmp`) to the files #34 merged. The worktree this report was written in is removed after it merges. Wave 3: the G7, R10, R7 and records worktrees and the six A/B checkouts were removed after each was confirmed clean and pushed.
 
 ## Tools
 - **GitPulse insights, start of session:** every facet `ok`, 2 worktrees, no collisions. The board was readable and writable; the 2026-10-24 schema refusals did not recur.
