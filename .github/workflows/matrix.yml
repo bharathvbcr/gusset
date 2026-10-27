@@ -539,6 +539,18 @@ jobs:
             echo "::error::an R14 scenario skipped"; exit 1
           fi
 
+      # run.sh prints the tail of a failed run's stderr, and keeps the whole file
+      # here: a runner is gone when the job ends. Both harness steps write under
+      # bench/r14/target/, and the artifact name carries the leg so the matrix
+      # does not collide.
+      - name: Keep the R14 harness stderr
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: r14-stderr-${{ matrix.os }}
+          path: bench/r14/target/**/*.stderr
+          if-no-files-found: ignore
+
   # x86_64-unknown-linux-musl is in the supported set. Same container and
   # toolchain setup as the musl job below.
   #
@@ -599,6 +611,17 @@ jobs:
           if grep -q '^SKIPPED' r14.txt; then
             echo "::error::an R14 scenario skipped"; exit 1
           fi
+
+      # run.sh prints the tail of a failed run's stderr, and keeps the whole file
+      # here: a runner is gone when the job ends. A container job's workspace is
+      # the checkout, so the path is the same as in the r14 job.
+      - name: Keep the R14 harness stderr
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: r14-musl-stderr
+          path: bench/r14/target/**/*.stderr
+          if-no-files-found: ignore
 
   musl:
     name: musl (I5, R8)

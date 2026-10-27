@@ -74,10 +74,11 @@ you are in the "don't" band and no amount of tuning fixes that.
 **Where raw cgo wins, and where Go does.** On a single call raw cgo wins by
 construction (see the top of this page); what the measurement adds is by how
 much, and from what size it stops mattering. The crossover table under "The
-measured numbers" gives, serial and with 18 goroutines, the work size from which
-Gusset is within 2x and within 1.1x of raw cgo, and lists any arm in which
-Gusset comes out ahead. It is generated from the committed recording, so read
-the answer there, not here. Under parallel load the lines sit at larger work
+measured numbers" gives, for a serial caller and for the parallel load its rows
+name, the work size from which Gusset comes within each of the table's ratio
+limits of raw cgo, and lists any arm in which Gusset comes out ahead. It is
+generated from the committed recording, so read the limits, the goroutine count
+and the answer there, not here. Under parallel load the lines sit at larger work
 sizes than serial, because the coordination caps Gusset's throughput while
 blocking cgo runs the calls side by side. The arms are the table's rows and
 nothing is interpolated between them, so a workload between two rows is
@@ -154,8 +155,9 @@ Across that sweep (32 → 2048 in-flight calls) reserved *virtual* address space
 <!-- BENCHPLOT:END -->
 
 Two things to read off the concurrency table. Blocking cgo's thread count tracks
-concurrency; Gusset's tracks its pool, which is why 2048 callers cost it ~21
-threads rather than ~370.
+concurrency; Gusset's tracks its pool, which is why the 2048 row costs Gusset
+far fewer peak threads than it costs blocking cgo. Read both counts off that
+row of the table; they are not typed here.
 
 The wall-clock columns are the ones to be careful with. Across the recordings
 taken while writing this page the two transports landed within about ten percent

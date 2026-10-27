@@ -431,6 +431,12 @@ func humanNanos(ns float64) string {
 // mustLoad parses a results file and refuses it unless it carries proof of the
 // conditions it was recorded under.
 func mustLoad(path string) map[string][]benchfile.Sample {
+	return mustLoadFile(path).ByName
+}
+
+// mustLoadFile is mustLoad for a caller that needs more than the samples, such
+// as the GOMAXPROCS the rows carry.
+func mustLoadFile(path string) *benchfile.File {
 	f, err := benchfile.Parse(path)
 	if err != nil {
 		fatal(err)
@@ -438,7 +444,7 @@ func mustLoad(path string) map[string][]benchfile.Sample {
 	if err := f.RequireProvenance(); err != nil {
 		fatal(err)
 	}
-	return f.ByName
+	return f
 }
 
 // crossoverChart plots Gusset's cost as a multiple of blocking cgo's, against
@@ -500,15 +506,51 @@ func crossoverChart(m map[string][]benchfile.Sample, works []workPoint) string {
 }
 
 // ratioLabel renders a ratio the way a reader would say it out loud.
+//
+// Rounding goes through clearRound, so a label never reads as a tie with a bar
+// its value is on one side of: 1.002 is "+0.2%", not "+0%", and 1.099 is
+// "+9.9%", not "+10%".
 func ratioLabel(r float64) string {
 	switch {
-	case r >= 1.1:
-		return fmt.Sprintf("%.2f×", r)
+	case r >= crossoverTight:
+		return clearRound(r, 2, ratioBars...) + "×"
 	case r >= 1:
-		return fmt.Sprintf("+%.0f%%", (r-1)*100)
+		return "+" + clearRound((r-1)*100, 0, 0, (crossoverTight-1)*100) + "%"
 	default:
-		return fmt.Sprintf("−%.0f%%", (1-r)*100)
+		return "−" + clearRound((1-r)*100, 0, 0) + "%"
 	}
+}
+
+// ratioBars are the values a printed ratio is read against: Gusset ahead of raw
+// cgo below 1, and the two limits the crossover table reports.
+var ratioBars = []float64{1, crossoverTight, crossoverLoose}
+
+// clearRound formats v with at least minDigits decimals, adding decimals until
+// the printed number is on the same side of every bar as v, and equal to a bar
+// only when v is. A fixed two-decimal format printed 0.998 as "1.00" (a win
+// shown as a tie), 1.104 as "1.10" (over the bar shown as on it) and 1.099 as
+// "1.10" (under shown as on). The digits are capped: past the last, the
+// shortest exact form is used, which is on the right side by construction.
+func clearRound(v float64, minDigits int, bars ...float64) string {
+	const maxDigits = 6
+	for d := minDigits; d <= maxDigits; d++ {
+		s := strconv.FormatFloat(v, 'f', d, 64)
+		printed, err := strconv.ParseFloat(s, 64)
+		if err == nil && sameSides(v, printed, bars) {
+			return s
+		}
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// sameSides reports whether a and b compare identically against every bar.
+func sameSides(a, b float64, bars []float64) bool {
+	for _, bar := range bars {
+		if (a < bar) != (b < bar) || (a > bar) != (b > bar) {
+			return false
+		}
+	}
+	return true
 }
 
 // threadChart plots peak OS threads against in-flight call count.
@@ -613,7 +655,8 @@ func main() {
 	scalingRaw := mustOne(resultsDir, "scaling-rawcgo-*.txt")
 	scalingGus := mustOne(resultsDir, "scaling-gusset-*.txt")
 
-	tm := mustLoad(transport)
+	transportFile := mustLoadFile(transport)
+	tm := transportFile.ByName
 	rm := mustLoad(scalingRaw)
 	gm := mustLoad(scalingGus)
 
@@ -633,6 +676,12 @@ func main() {
 		fatal(err)
 	}
 	if err := checkTransportOrdering(tm, works); err != nil {
+		fatal(err)
+	}
+	// The parallel arm's row label is a count of goroutines, and the recording
+	// is the only thing that knows it.
+	parallel, err := parallelGoroutines(transportFile)
+	if err != nil {
 		fatal(err)
 	}
 
@@ -655,7 +704,7 @@ func main() {
 	// measured 33/90/224/368 and a wall-clock ordering that had since reversed.
 	// A reader cannot tell a stale hand-typed number from a fresh one, and
 	// neither could `make docs-check`.
-	stale := writeDocTables(tm, rm, gm, works, concs, *check)
+	stale := writeDocTables(tm, rm, gm, works, concs, parallel, *check)
 	for name, body := range files {
 		path := filepath.Join(outDir, name)
 		old, err := os.ReadFile(path)
@@ -759,26 +808,42 @@ func discoverConcurrencies(m map[string][]benchfile.Sample) []int {
 // tools/benchdoc takes the same line, for the same reason: picking one silently
 // means the docs describe a platform nobody chose.
 func mustOne(dir, glob string) string {
-	hits, err := filepath.Glob(filepath.Join(dir, glob))
+	hit, err := resolveOne(dir, glob)
 	if err != nil {
 		fatal(err)
 	}
+	return hit
+}
+
+// resolveOne is mustOne's decision, returned rather than fatal so a test can
+// read the message.
+func resolveOne(dir, glob string) (string, error) {
+	hits, err := filepath.Glob(filepath.Join(dir, glob))
+	if err != nil {
+		return "", err
+	}
 	switch len(hits) {
 	case 1:
-		return hits[0]
+		return hits[0], nil
 	case 0:
-		fatal(fmt.Errorf("no %s in %s; run `make bench-crossover` and `make bench-scaling`", glob, dir))
-	default:
-		fatal(fmt.Errorf("found %d files matching %s in %s; pass one explicitly rather than "+
-			"letting the tool choose which platform the docs describe", len(hits), glob, dir))
+		return "", fmt.Errorf("no %s in %s; run `make bench-crossover` and `make bench-scaling`", glob, dir)
 	}
-	return ""
+	sort.Strings(hits)
+	names := make([]string, len(hits))
+	for i, h := range hits {
+		names[i] = filepath.Base(h)
+	}
+	return "", fmt.Errorf("found %d files matching %s in %s (%s); benchplot takes no file argument; "+
+		"its only flag is -check, and it will not choose which platform the docs describe. "+
+		"Keep exactly one: move the recording you do not want charted out of bench/results/ entirely "+
+		"(benchdoc also refuses a second recording there) or `git rm` it, then run again",
+		len(hits), glob, dir, strings.Join(names, ", "))
 }
 
 // writeDocTables regenerates the measured tables in docs/choosing.md, or in
 // -check mode reports whether they are stale. It returns true when stale.
-func writeDocTables(tm, rm, gm map[string][]benchfile.Sample, works []workPoint, concs []int, check bool) bool {
-	body := renderDocTables(tm, rm, gm, works, concs)
+func writeDocTables(tm, rm, gm map[string][]benchfile.Sample, works []workPoint, concs []int, parallel string, check bool) bool {
+	body := renderDocTables(tm, rm, gm, works, concs, parallel)
 
 	doc, err := os.ReadFile(docPath)
 	if err != nil {
@@ -803,26 +868,16 @@ func writeDocTables(tm, rm, gm map[string][]benchfile.Sample, works []workPoint,
 	return false
 }
 
-func renderDocTables(tm, rm, gm map[string][]benchfile.Sample, works []workPoint, concs []int) string {
+func renderDocTables(tm, rm, gm map[string][]benchfile.Sample, works []workPoint, concs []int, parallel string) string {
 	var b strings.Builder
 	b.WriteString("<!-- Generated by `make docs` (tools/benchplot). Do not edit by hand. -->\n")
 
 	b.WriteString("\n**Cost per call, by how much work the call does.** " +
 		"Both transports run a byte-identical Rust loop, so the difference is transport alone.\n\n")
-	b.WriteString("| work per call | cgo, serial | Gusset, serial | ratio | cgo, 18 goroutines | Gusset, 18 goroutines | ratio |\n")
-	b.WriteString("| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n")
-	for _, w := range works {
-		sr := medianByIters(tm, "BenchmarkCrossoverSerial/RawCgo/", w.iters, "ns/op")
-		sg := medianByIters(tm, "BenchmarkCrossoverSerial/Gusset/", w.iters, "ns/op")
-		pr := medianByIters(tm, "BenchmarkCrossoverParallel/RawCgo/", w.iters, "ns/op")
-		pg := medianByIters(tm, "BenchmarkCrossoverParallel/Gusset/", w.iters, "ns/op")
-		b.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s |\n",
-			w.label, fmtDur(sr), fmtDur(sg), tableRatio(sg/sr),
-			fmtDur(pr), fmtDur(pg), tableRatio(pg/pr)))
-	}
+	b.WriteString(renderCostTable(tm, works, parallel))
 
 	repLo, repHi := repetitions(tm, works)
-	b.WriteString(renderCrossover(crossoverArms(tm, works), repLo, repHi))
+	b.WriteString(renderCrossover(crossoverArms(tm, works), repLo, repHi, parallel))
 
 	b.WriteString("\n**Cost of concurrency.** Medians over the committed sweep, each transport in its own process.\n\n")
 	b.WriteString("| in-flight calls | peak threads, cgo | peak threads, Gusset | peak RSS, cgo | peak RSS, Gusset | wall clock, cgo | wall clock, Gusset |\n")
@@ -881,14 +936,18 @@ func fmtMiB(mib float64) string {
 // single annotation on a chart and badly as a column, where it puts "978.74×"
 // three rows above "+2%" and leaves the reader converting between two scales to
 // see that one number is the continuation of the other.
+//
+// The digits are the least that keep the printed number on the same side of
+// every bar as the value (see clearRound), because the cells beside it say
+// "ahead of" and "within 1.1×" and a rounded figure must not contradict them.
 func tableRatio(r float64) string {
 	switch {
 	case r >= 100:
-		return fmt.Sprintf("%.0f×", r)
+		return clearRound(r, 0, ratioBars...) + "×"
 	case r >= 10:
-		return fmt.Sprintf("%.1f×", r)
+		return clearRound(r, 1, ratioBars...) + "×"
 	default:
-		return fmt.Sprintf("%.2f×", r)
+		return clearRound(r, 2, ratioBars...) + "×"
 	}
 }
 

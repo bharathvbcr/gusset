@@ -153,6 +153,32 @@ func TestBug_PanicLocationWorkerThread(t *testing.T) {
 // result does not rest on Go's view alone: the engine reports the most jobs it ever
 // ran at once, and that must be 1 on a pool of 1.
 //
+// The caller leaves through the path the name claims: Wait with a context whose
+// deadline passes while the job runs, which is waitInternal's ctx-deadline
+// abandon branch (wait.go). The test used to abandon through Discard, a
+// different path, so a change to that branch that returned the permit early
+// passed here and was caught only by other tests. Planting
+// s.releaseSemLocked(ticket) in that branch now fails this test.
+//
+// The gauge is how the test knows the job is in the engine before the caller's
+// deadline starts. A Wait deadline reaches Rust as a cancel, and a job cancelled
+// before it starts never runs the engine and rightly gives its permit back, so
+// a deadline that could pass while the job is still queued would report an I4
+// breach that is not one (the flake the Discard version was written to avoid).
+// The gauge is process-wide, so a second handle reads it while the first
+// handle's only permit is held. If a stall of this process between that read and
+// the Wait lets the job finish first, the Wait returns nil and the scenario is
+// run again, up to three times, before the test skips (or fails under
+// GUSSET_REQUIRE_PROBES=1): one stall of a loaded host is not a verdict.
+//
+// A second caller then waits for a permit under a generous context, a hang
+// guard and not an expectation, and the permit must reach it no earlier than
+// the job's hold after the submit. That covers the job's whole time in the
+// engine: an immediate release, or one delayed by 60, 120 or 200 ms, admits it
+// early and fails the lower bound (and the engine's own peak). A short window
+// on caller 2 saw only the first tens of milliseconds. No upper bound on
+// when the permit arrives is asserted.
+//
 // This test used to log instead of failing, and took the log-only branch in every
 // run it was checked in. Every assertion here is a t.Fatal.
 func TestBug_SemaphoreInFlightBreachOnTimeout(t *testing.T) {
@@ -164,56 +190,82 @@ func TestBug_SemaphoreInFlightBreachOnTimeout(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 	defer h.Close()
-	_ = peakInEngine(t, h) // reset the gauge
+	probe, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open (gauge reader) failed: %v", err)
+	}
+	defer probe.Close()
+	_ = peakInEngine(t, probe) // reset the gauge
 
-	// Caller 1 submits the job and abandons its ticket with Discard.
-	//
-	// It used to abandon by a 20 ms context deadline. Go hands that deadline to
-	// Rust, so on a loaded host the job could still be queued when it passed;
-	// a job cancelled before it starts never runs the engine and rightly gives
-	// its permit back, so the second caller was admitted and the test reported
-	// an I4 breach that was not one. Discard does not cancel, so the job runs to
-	// its end and the permit has to stay with it.
+	// Caller 1 submits the job under a long context, so nothing but its own
+	// Wait deadline can cancel it, then leaves at a deadline once the engine
+	// reports the job is running.
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel1()
-	jobStart := time.Now()
-	t1, err := h.Submit(ctx1, holdInEngine(jobHold))
-	if err != nil {
-		t.Fatalf("caller 1: Submit: %v", err)
+	const tries = 3
+	var jobStart time.Time
+	left := false
+	for try := 0; try < tries && !left; try++ {
+		_ = peakInEngine(t, probe) // reset the gauge
+		jobStart = time.Now()
+		t1, err := h.Submit(ctx1, holdInEngine(jobHold))
+		if err != nil {
+			t.Fatalf("caller 1: Submit: %v", err)
+		}
+
+		// Wait until the engine reports the job has entered. A read that finds the
+		// job already gone still reports it: the gauge's peak is since the last read.
+		entered := false
+		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+			if peakInEngine(t, probe) >= 1 {
+				entered = true
+				break
+			}
+		}
+		if !entered {
+			t.Fatalf("the job never entered the engine within 10 s of its submit")
+		}
+
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		_, werr := h.Wait(waitCtx, t1)
+		cancelWait()
+		switch {
+		case werr == nil:
+			// The job finished before the deadline: this process stalled for more
+			// than the job's hold between the gauge read and the Wait. The ticket
+			// is collected and the permit is back; run the scenario again.
+			t.Logf("try %d: the job finished %v after its submit, before caller 1's deadline", try+1, time.Since(jobStart))
+		case errors.Is(werr, context.DeadlineExceeded):
+			left = true
+		default:
+			t.Fatalf("caller 1: Wait should have timed out against the running job, got %v", werr)
+		}
 	}
-	if err := h.Discard(t1); err != nil {
-		t.Fatalf("caller 1: Discard: %v", err)
+	if !left {
+		hostprobe.Skip(t, "the job finished before caller 1's deadline in each of %d tries: the deadline path never ran on this host", tries)
 	}
 
-	// The job runs for jobHold from some point after the submit. A second caller
-	// must NOT get a permit while it does. Admission less than jobHold after the
-	// submit is a breach whatever the load; admission later proves nothing.
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	// A second caller waits for a permit. The job holds the engine for jobHold
+	// from some point after the submit, so a permit handed out less than jobHold
+	// after the submit is a breach whatever the load; one handed out later is
+	// what a correct implementation does, so only the lower bound is asserted.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel2()
 	t2, err := h.Submit(ctx2, holdInEngine(1))
-	if err == nil {
-		admitted := time.Since(jobStart)
-		_ = h.Discard(t2) // not Wait: a breach may leave nothing to wait for
-		if admitted < jobHold*time.Millisecond {
-			t.Fatalf("a second job was admitted %v after a %d ms job was submitted, while it was still running in the engine (I4 breach)", admitted, jobHold)
-		}
-		hostprobe.Skip(t, "the probe ran %v after the submit, past the job's end: it proves nothing on this host", admitted)
+	admitted := time.Since(jobStart)
+	if err != nil {
+		t.Fatalf("caller 2 never got a permit after the abandoned job finished: %v", err)
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("caller 2 should have timed out waiting for a permit, got %v", err)
+	if admitted < jobHold*time.Millisecond {
+		t.Fatalf("a second job was admitted %v after a %d ms job was submitted, while it was still running in the engine (I4 breach)", admitted, jobHold)
 	}
-
-	// Once the first job really finishes the permit comes back and work flows.
 	ctx3, cancel3 := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel3()
-	if _, err := h.Call(ctx3, holdInEngine(1)); err != nil {
-		t.Fatalf("the permit was never returned after the abandoned job finished: %v", err)
-	}
-	if time.Since(jobStart) < jobHold*time.Millisecond {
-		t.Fatalf("caller 3 ran %v after submit, before the 250 ms job finished: the permit was released early (I4)", time.Since(jobStart))
+	if _, err := h.Wait(ctx3, t2); err != nil {
+		t.Fatalf("caller 2: Wait: %v", err)
 	}
 
-	if peak := peakInEngine(t, h); peak != poolSize {
+	if peak := peakInEngine(t, probe); peak != poolSize {
 		t.Fatalf("engine saw a peak of %d concurrent jobs on a pool of %d (I4)", peak, poolSize)
 	}
 }
