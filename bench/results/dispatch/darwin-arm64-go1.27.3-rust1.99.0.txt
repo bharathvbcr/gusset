@@ -1,0 +1,66 @@
+# gusset-bench: v1
+# gusset-bench-recorded: 2026-10-27T04:04:55Z
+# gusset-bench-host: Mac-7956.lan
+# gusset-bench-uname: Darwin 27.0.0 arm64
+# gusset-bench-package: . .
+# gusset-bench-commit: d1aa1b8ff1d7c11f04a073df2e307afb907f8200
+# gusset-bench-commit-modified: 0
+# gusset-bench-arms: cargo:gusset/dispatch
+# gusset-bench-benchtime: 1s
+# gusset-bench-count: 10
+# gusset-bench-cpu: default
+# gusset-bench-cpu-idle-before: 78.0
+# gusset-bench-cpu-idle-after: 76.96
+# gusset-bench-min-idle: 60
+# gusset-bench-exclusive: yes
+# gusset-bench-rust-order: 10 rounds after a discarded round 0; each round ran every arm once; order alternates (odd rounds as listed, even rounds reversed)
+# gusset-bench-rust-round-1: diagnostic_opcode0 registered_opcode0 diagnostic_opcode0_registry_loaded registered_nonzero
+# gusset-bench-rust-round-2: registered_nonzero diagnostic_opcode0_registry_loaded registered_opcode0 diagnostic_opcode0
+# gusset-bench-rust-round-3: diagnostic_opcode0 registered_opcode0 diagnostic_opcode0_registry_loaded registered_nonzero
+# gusset-bench-rust-round-4: registered_nonzero diagnostic_opcode0_registry_loaded registered_opcode0 diagnostic_opcode0
+# gusset-bench-rust-round-5: diagnostic_opcode0 registered_opcode0 diagnostic_opcode0_registry_loaded registered_nonzero
+# gusset-bench-rust-round-6: registered_nonzero diagnostic_opcode0_registry_loaded registered_opcode0 diagnostic_opcode0
+# gusset-bench-rust-round-7: diagnostic_opcode0 registered_opcode0 diagnostic_opcode0_registry_loaded registered_nonzero
+# gusset-bench-rust-round-8: registered_nonzero diagnostic_opcode0_registry_loaded registered_opcode0 diagnostic_opcode0
+# gusset-bench-rust-round-9: diagnostic_opcode0 registered_opcode0 diagnostic_opcode0_registry_loaded registered_nonzero
+# gusset-bench-rust-round-10: registered_nonzero diagnostic_opcode0_registry_loaded registered_opcode0 diagnostic_opcode0
+BenchmarkDispatch/diagnostic_opcode0	5000	2549.3 ns/op
+BenchmarkDispatch/diagnostic_opcode0	5000	2678.9 ns/op
+BenchmarkDispatch/diagnostic_opcode0	5000	2494.8 ns/op
+BenchmarkDispatch/diagnostic_opcode0	5000	2680.2 ns/op
+BenchmarkDispatch/diagnostic_opcode0	5000	3478.4 ns/op
+BenchmarkDispatch/diagnostic_opcode0	5000	2668.5 ns/op
+BenchmarkDispatch/diagnostic_opcode0	5000	2682.3 ns/op
+BenchmarkDispatch/diagnostic_opcode0	5000	2645.8 ns/op
+BenchmarkDispatch/diagnostic_opcode0	5000	2317.1 ns/op
+BenchmarkDispatch/diagnostic_opcode0	5000	2383.4 ns/op
+BenchmarkDispatch/registered_opcode0	5000	2304.4 ns/op
+BenchmarkDispatch/registered_opcode0	5000	2598.8 ns/op
+BenchmarkDispatch/registered_opcode0	5000	2854.7 ns/op
+BenchmarkDispatch/registered_opcode0	5000	2447.1 ns/op
+BenchmarkDispatch/registered_opcode0	5000	3866.8 ns/op
+BenchmarkDispatch/registered_opcode0	5000	2665.6 ns/op
+BenchmarkDispatch/registered_opcode0	5000	2568.0 ns/op
+BenchmarkDispatch/registered_opcode0	5000	2510.9 ns/op
+BenchmarkDispatch/registered_opcode0	5000	2510.8 ns/op
+BenchmarkDispatch/registered_opcode0	5000	2495.4 ns/op
+BenchmarkDispatch/diagnostic_opcode0_registry_loaded	5000	2701.3 ns/op
+BenchmarkDispatch/diagnostic_opcode0_registry_loaded	5000	2735.0 ns/op
+BenchmarkDispatch/diagnostic_opcode0_registry_loaded	5000	2524.3 ns/op
+BenchmarkDispatch/diagnostic_opcode0_registry_loaded	5000	2545.2 ns/op
+BenchmarkDispatch/diagnostic_opcode0_registry_loaded	5000	3893.6 ns/op
+BenchmarkDispatch/diagnostic_opcode0_registry_loaded	5000	2892.2 ns/op
+BenchmarkDispatch/diagnostic_opcode0_registry_loaded	5000	2786.1 ns/op
+BenchmarkDispatch/diagnostic_opcode0_registry_loaded	5000	2163.5 ns/op
+BenchmarkDispatch/diagnostic_opcode0_registry_loaded	5000	2349.7 ns/op
+BenchmarkDispatch/diagnostic_opcode0_registry_loaded	5000	2453.8 ns/op
+BenchmarkDispatch/registered_nonzero	5000	2884.2 ns/op
+BenchmarkDispatch/registered_nonzero	5000	3095.8 ns/op
+BenchmarkDispatch/registered_nonzero	5000	2474.9 ns/op
+BenchmarkDispatch/registered_nonzero	5000	2570.3 ns/op
+BenchmarkDispatch/registered_nonzero	5000	4076.4 ns/op
+BenchmarkDispatch/registered_nonzero	5000	3237.3 ns/op
+BenchmarkDispatch/registered_nonzero	5000	2244.9 ns/op
+BenchmarkDispatch/registered_nonzero	5000	2371.6 ns/op
+BenchmarkDispatch/registered_nonzero	5000	2403.8 ns/op
+BenchmarkDispatch/registered_nonzero	5000	2641.0 ns/op
