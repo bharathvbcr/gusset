@@ -17,6 +17,13 @@ Changes since v0.0.3. The C ABI layout is unchanged (17 exports, ABI layout vers
 - A second test catches a handle that reads its completion descriptor instead of taking it (`ft-3d60ee16`, criterion 11). Replacing the `swap(-1)` in `release_pipe_with` with a `load` was caught by one test, the close-count test. `a_second_release_cannot_close_the_descriptor_it_gave_up` finds it through the effect: the first release hands back the number without closing it, the second runs the real `close(2)`, and the descriptor must still carry a write to the read end. It never frees and re-acquires a number, so it cannot race the module's parallel tests. A second `libc::close` inside `close_fd` stays uncaught, by design (`sys.rs`, `close_fd`). Test-only; no production change.
 - `TestPitfall_OpenNilOptionIsRefusedNotPanicked`, `TestFFI_ArgumentRefusalsAreBadArg` and the Rust `argument_refusal_tests` pin the two changes above, and that the refusals outside the list stay `FFI_ERR`.
 
+### 2026-10-26 · A result-size sweep for the egress paths (card ft-8a8279f5, R8/G7 instrument)
+
+Benchmarks only; no runtime, export, ABI or public-surface change. No results are recorded here.
+
+#### Benchmarks
+- **`bench/result_size_test.go` measures the result egress paths across the size thresholds.** `BenchmarkGussetCallResult`, `BenchmarkGussetSubmitWaitResult` and `BenchmarkGussetWaitBufferResultSize` run the diagnostic echo at 0, 48, 49, 256, 1024 and 4096 bytes (and 4097 for the two that can submit it), straddling `INLINE_RESULT_MAX` (48) and the 4 KiB promotion threshold. Until now no benchmark returned a result between a no-op and 64 KiB, so the R8 (worker-side promotion) and G7 (heap-backed `WaitBuffer`) candidates had nothing to be A/B'd against.
+
 ### 2026-10-26 · `docs/integrations.md` records the Manvi and GitPulse survey (card ft-83151a08)
 
 Documentation and changelog only; no runtime, export, ABI or public-surface change (17 exports, 13 Go entry points). No I1 to I6 invariant is touched. The survey was read-only: nothing was built or run in Manvi or GitPulse, and `git` against those checkouts was refused to the session, so the files read are their working trees.
