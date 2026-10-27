@@ -18,6 +18,41 @@ Changes since v0.0.3. The C ABI layout is unchanged (17 exports, ABI layout vers
 - A second test catches a handle that reads its completion descriptor instead of taking it (`ft-3d60ee16`, criterion 11). Replacing the `swap(-1)` in `release_pipe_with` with a `load` was caught by one test, the close-count test. `a_second_release_cannot_close_the_descriptor_it_gave_up` finds it through the effect: the first release hands back the number without closing it, the second runs the real `close(2)`, and the descriptor must still carry a write to the read end. It never frees and re-acquires a number, so it cannot race the module's parallel tests. A second `libc::close` inside `close_fd` stays uncaught, by design (`sys.rs`, `close_fd`). Test-only; no production change.
 - `TestPitfall_OpenNilOptionIsRefusedNotPanicked`, `TestFFI_ArgumentRefusalsAreBadArg` and the Rust `argument_refusal_tests` pin the two changes above, and that the refusals outside the list stay `FFI_ERR`.
 
+### 2026-10-26 · Quiet-host baseline for the dispatch, deadline, Discard and Stats benchmarks (card ft-568a30e2, criterion 4)
+
+Recorded results only; no code, export, ABI or public-surface change, and the README's benchmark table is unchanged.
+
+#### Benchmarks
+- **`bench/results/dispatch/` holds the first recording of the benchmarks PR #17 added.** `make bench-dispatch` recorded the Rust dispatch pair (diagnostic vs registered engine on opcode 0, and a nonzero registered opcode) in interleaved rounds, and `make bench` recorded the Go suite including `BenchmarkDeadlineExpiry`, `BenchmarkDeadlineInFlight`, `BenchmarkDiscard` and `BenchmarkStats`. Both ran through `bench/record.sh` with its idle floor met before and after. The Go file sits in the subdirectory rather than replacing the file the README is generated from, because two of the README's rows came out noisier in this recording; the directory's README says which and why.
+
+### 2026-10-26 · A result-size sweep for the egress paths (card ft-8a8279f5, R8/G7 instrument)
+
+Benchmarks only; no runtime, export, ABI or public-surface change. No results are recorded here.
+
+#### Benchmarks
+- **`bench/result_size_test.go` measures the result egress paths across the size thresholds.** `BenchmarkGussetCallResult`, `BenchmarkGussetSubmitWaitResult` and `BenchmarkGussetWaitBufferResultSize` run the diagnostic echo at 0, 48, 49, 256, 1024 and 4096 bytes (and 4097 for the two that can submit it), straddling `INLINE_RESULT_MAX` (48) and the 4 KiB promotion threshold. Until now no benchmark returned a result between a no-op and 64 KiB, so the R8 (worker-side promotion) and G7 (heap-backed `WaitBuffer`) candidates had nothing to be A/B'd against.
+
+### 2026-10-26 · `docs/integrations.md` records the Manvi and GitPulse survey (card ft-83151a08)
+
+Documentation and changelog only; no runtime, export, ABI or public-surface change (17 exports, 13 Go entry points). No I1 to I6 invariant is touched. The survey was read-only: nothing was built or run in Manvi or GitPulse, and `git` against those checkouts was refused to the session, so the files read are their working trees.
+
+#### Documentation
+- **Manvi's `gusset-check` is read and recorded as inferred, not run.** It wraps DevCouncil's `gussetfn.SelfTest` behind a `gusset.MaxPoolSize` guard (`manvi/gussetcheck/check_cgo.go`), so it is the same check the page already describes for DevCouncil. It is a gate in Manvi's `verify.sh` and release build. Every `gusset.` identifier `gussetfn` uses exists in this tree and `internal/ffi/exports.txt` is unchanged since Manvi's pin (`320c56c`, 142 commits behind), so it should still print `ok`; running it needs a cgo build and was not done.
+- **GitPulse's Go-to-Rust surface is one check program.** `go/` holds the same check behind a `gusset` build tag; the product (`src-tauri`) is Rust and reaches Go and Rust through a `manvi serve` stdio child, the `devmap` binary and vendored `devmap-*` crates. Neither repository has `import "C"` or `#cgo` in its Go. GitPulse's CI pin (`92c2056`) is 309 commits behind.
+- **Manvi does run `devmap` from long-lived Go processes, and the page's earlier conclusion changes in one place.** The agent harness and `manvi serve` start one `devmap` process per query, up to 26 for one `graph_context` call, through DevCouncil's `dc/devmap`. A warm pool would therefore have a repeated-query caller, and would belong in `dc/devmap`. The page does not recommend building it: no measurement of real sessions exists, and Manvi deliberately reads `status` once per call, which a warm process must keep. DevCouncil's own paths and the verdict on running `devmap` through Gusset are unchanged.
+- **The pending list is rewritten item by item**: two items done, one surveyed and not run, one still pending (is the pool worth building), and the pins in both apps reported as behind and left alone. Section headers keep their 2026-09-27 timings; the new sections say they were surveyed on 2026-10-26.
+
+### 2026-10-26 · The parallel crossover rows are labelled with the recorded GOMAXPROCS, not a typed "18 goroutines"
+
+Docs tooling and tests; no runtime, export, ABI or public-surface change. No I1 to I6 invariant is touched: this protects R15 (every number in docs is generated). `make docs-check` is clean and `docs/choosing.md` is byte-identical, because the committed recording was made at GOMAXPROCS 18.
+
+#### Changed
+- **`tools/benchplot` reads the parallel arm's goroutine count off the recording.** The table header and the crossover table's row were the literal `18 goroutines`. `BenchmarkCrossoverParallel` is `b.RunParallel` with the default parallelism (`bench/seed/go/crossover_test.go` never calls `SetParallelism`), so it runs GOMAXPROCS goroutines, and `go test` writes that GOMAXPROCS on every benchmark name as the `-N` suffix. A recording from a host with another core count would have been labelled 18 and passed `make docs-check`, which compares the generated block only with itself. `benchfile.Row` now keeps the suffix it used to discard (`Procs`), `File.ProcsOf` returns the one value a prefix's rows share, and `benchplot` builds both labels from it. It refuses, naming the lines, a recording whose parallel rows disagree, have no suffix (`go test` omits it at GOMAXPROCS 1, and a hand-edited file looks the same), or are absent.
+- The cost-per-call table moved from `renderDocTables` into `renderCostTable`, so the label has one owner and the table can be tested without the scaling recordings.
+
+#### Tests
+- `TestParallelLabelFollowsTheRecordedGOMAXPROCS` renders both generated tables from a recording with `-8` suffixes and asserts `8 goroutines` appears and `18 goroutines` does not. `TestParallelLabelRefusesMixedGOMAXPROCS`, `TestParallelLabelRefusesRowsWithoutASuffix` and `TestParallelLabelRefusesARecordingWithoutTheParallelArm` pin the refusals. `TestParallelLabelOfTheCommittedRecordingIs18` pins the committed data. Against a `parallelGoroutines` that returns the typed `18 goroutines`, the first four fail and the fifth passes.
+
 ### 2026-10-26 · A failed R14 harness run leaves its stderr in the job log and as an artifact
 
 Harness script, workflow and tests; no runtime, export, ABI or public-surface change. No I1 to I6 invariant is touched: this is R14 evidence, so that the next red R14 job says why.
