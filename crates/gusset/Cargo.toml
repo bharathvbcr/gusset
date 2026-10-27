@@ -97,3 +97,10 @@ path = "../../tests/rust_counting_flip.rs"
 name = "dispatch"
 path = "benches/dispatch.rs"
 harness = false
+
+# The allocator accounting counters under parallel load (R10 instrument): only
+# count_buffer_alloc and count_buffer_dealloc, from 1 to 8 threads.
+[[bench]]
+name = "alloc_counters"
+path = "benches/alloc_counters.rs"
+harness = false

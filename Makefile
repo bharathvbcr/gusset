@@ -1,4 +1,4 @@
-.PHONY: all linked-target-dir build test bench bench-crossover bench-scaling bench-dispatch lint alloc-gate ci-local docs docs-check cross fuzz clean install install-build uninstall
+.PHONY: all linked-target-dir build test bench bench-crossover bench-scaling bench-dispatch bench-alloc-counters lint alloc-gate ci-local docs docs-check cross fuzz clean install install-build uninstall
 
 export PATH := $(PATH):$(shell go env GOPATH)/bin
 
@@ -230,6 +230,17 @@ bench-scaling: linked-target-dir
 bench-dispatch:
 	RECORD_DIR=. bench/record.sh bench/results/dispatch/$(CROSS_SUFFIX) 1s $(BENCH_COUNT) \
 		cargo:gusset/dispatch
+
+# The allocator accounting counters under parallel load,
+# crates/gusset/benches/alloc_counters.rs: count_buffer_alloc and
+# count_buffer_dealloc from 1, 2, 4 and 8 threads. The same kind of cargo arm as
+# bench-dispatch, so the same notes apply. The Go side of this measurement is
+# BenchmarkBufferAllocParallel, recorded by `make bench`; to A/B a change to the
+# counters, record that one with RECORD_VARIANTS instead (a cargo arm cannot be a
+# variant arm).
+bench-alloc-counters:
+	RECORD_DIR=. bench/record.sh bench/results/alloc-counters/$(CROSS_SUFFIX) 1s $(BENCH_COUNT) \
+		cargo:gusset/alloc_counters
 
 # Supported platform set, compile-verified. Gusset is unix-only by construction
 # (POSIX pipe, sigaltstack, pthread stack accounting); lib.rs fails the build on a
