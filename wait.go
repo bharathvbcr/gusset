@@ -62,6 +62,9 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 		if !s.enterCgo() {
 			return nil, ErrClosed
 		}
+		if testHookBeforeTakeView != nil {
+			testHookBeforeTakeView(s)
+		}
 		out := make([]byte, len(res.data))
 		copy(out, res.data)
 		s.cgoMu.RUnlock()
@@ -75,6 +78,14 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 // result is copied into the Go-heap Buffer WaitBuffer builds for it.
 var testHookBeforeResultFill func(*handleState)
 
+// testHookBeforeTakeView runs, when set by a test, with cgoMu held for reading,
+// just before Wait copies a take buffer out of Rust memory or WaitBuffer wraps
+// it. Those are the two places the library still reads a Rust result that
+// reached the waiter (a result over 4 KiB, which the worker promoted onto a
+// buffer). Close frees that buffer under cgoMu held exclusively (I1), so a
+// Close started here must not be able to finish until the hook returns.
+var testHookBeforeTakeView func(*handleState)
+
 func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, error) {
 	res, takeID, err := s.waitInternal(ctx, ticket)
 	if err != nil {
@@ -87,6 +98,9 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 		if !s.enterCgo() {
 			s.discardTake(takeID)
 			return nil, ErrClosed
+		}
+		if testHookBeforeTakeView != nil {
+			testHookBeforeTakeView(s)
 		}
 		buf := newBufferFromRaw(s, takeID, res.data)
 		s.cgoMu.RUnlock()
