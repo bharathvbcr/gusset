@@ -162,7 +162,8 @@ func BenchmarkGussetSubmitWaitResult(b *testing.B) {
 
 // BenchmarkGussetWaitBufferResultSize is Submit then WaitBuffer then Free at
 // each result size: the zero-copy egress, where a result already in a Rust
-// buffer is wrapped and one still in Go memory is copied into a new buffer.
+// buffer is wrapped and one in Go memory is adopted when 64-byte aligned and
+// copied into a new buffer otherwise.
 func BenchmarkGussetWaitBufferResultSize(b *testing.B) {
 	for _, n := range resultSizes {
 		b.Run(fmt.Sprintf("%dB", n), func(b *testing.B) {
