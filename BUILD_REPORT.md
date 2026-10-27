@@ -19,7 +19,11 @@ Asked for as "Commit and merge all branches and next wave". End: `main` @ `8cf85
 - No PR was open.
 - The only branches not in main are the five rejected `perf/*` branches, which you chose in wave 3 to keep off main.
 
-**Merged.** Codex and Cursor Bugbot each reviewed the PR and found nothing; Cursor's security and approval agents also completed. Every CI check passed on its final head.
+**Merged.** On the PR's final head `e740f99`:
+- Codex's review state reads `has_any_findings: false`.
+- The Cursor Bugbot check run's summary reads "Bugbot completed review - no issues found".
+- The Cursor security and approval agent check runs say only "run completed successfully". This report does not count them as reviews.
+- Every CI check passed.
 
 | PR | Merge | Card | What | Main Matrix / adopter after merge |
 | --- | --- | --- | --- | --- |
