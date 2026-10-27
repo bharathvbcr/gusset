@@ -1,6 +1,6 @@
 # BUILD_REPORT
 
-Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End of wave 1: `main` @ `a9cb808`. End of wave 2: `main` @ `6fe980a`. End of wave 3: `main` @ `8ef9659`. "Wave 3" and "Wave 2" supersede the scope lines below. The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
+Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End of wave 1: `main` @ `a9cb808`. End of wave 2: `main` @ `6fe980a`. End of wave 3: `main` @ `8ef9659`. End of wave 4: `main` @ `8cf859f`. "Wave 4", "Wave 3" and "Wave 2" supersede the scope lines below. The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
 
 **Scope.** The ask was "work on major optimizations and bugs, pull all changes and merge".
 - Bugs and gate defects: four PRs merged, each with a passing Matrix run on main after merge.
@@ -9,6 +9,50 @@ Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`,
 **Gates.**
 - `.devcouncil/config.yaml` has `gates.mode: off`, so no `dev verify` gate ran.
 - Done was not requested for any card. Every card that moved went to `review`, `gitpulse_complete_task` returned `verification: null`, and `held_for_review` was false.
+
+## Wave 4 (2026-10-27)
+
+Asked for as "Commit and merge all branches and next wave". End: `main` @ `8cf859f`. Where wave 4 changed a conclusion in the sections below, this section supersedes it.
+
+**Commit and merge.** Nothing was left to commit or merge:
+- The main checkout was clean apart from another session's untracked `.cursor/hooks/`.
+- No PR was open.
+- The only branches not in main are the five rejected `perf/*` branches, which you chose in wave 3 to keep off main.
+
+**Merged.** On the PR's final head `e740f99`:
+- Codex's review state reads `has_any_findings: false`.
+- The Cursor Bugbot check run's summary reads "Bugbot completed review - no issues found".
+- The Cursor security and approval agent check runs say only "run completed successfully". This report does not count them as reviews.
+- Every CI check passed.
+
+| PR | Merge | Card | What | Main Matrix / adopter after merge |
+| --- | --- | --- | --- | --- |
+| #40 | `8cf859f` | ft-197f6d41 | DevMap's MCP entry no longer pins the main checkout; the agent guide names `devmap gap-record` | 40564999024 / 40564998709 |
+
+**ft-197f6d41, the agent tooling gaps: each of the seven items re-checked in this session.**
+
+| # | Gap | Now | Where it went |
+| --- | --- | --- | --- |
+| 1 | DevMap MCP answers only for the main checkout | Reproduced. The cause was this repository's own `.mcp.json`, `.claude/mcp.json` and `.cursor/mcp.json`, which passed `--root /Users/bharath/Code/devtools/gusset`. The pinned server refuses a worktree's `repo_path`. Unpinned, probed over stdio, it answered from the worktree's own store and from main's store, and refused an unindexed worktree rather than answering from main. | **Fixed** in #40 |
+| 2 | DevMap does not index YAML, Markdown, shell or the Makefile | Narrower than reported. Shell and Markdown are indexed. Makefile targets and workflow YAML are not: a `yaml` language filter is refused with the list of indexed languages. | DevCouncil ft-6c759bc0, and a `gap-record` entry |
+| 3 | Go method receivers come back as a lower bound | Reproduced. `devmap_impact NewBuffer` binds only package-internal callers and lists the rest as `uninferred_receiver` namesakes, wherever `h := gusset.Open(...)` sits in another package. | DevCouncil ft-e221de3c (the Go receiver-typing card), with gusset's case in ft-6c759bc0 and a `gap-record` entry |
+| 4 | The guide says to write `gaps.jsonl`, and the write gate refuses that path | Reproduced: `devcouncil_policy_check_write` still denies it (`path.restricted`, hard). DevCouncil has since shipped `devmap gap-record`, a writer the tool owns. `devmap build --manifest --guides` regenerated CLAUDE.md and `.cursor/rules/devmap.mdc` to name it, and it recorded the two gaps above. | **Fixed** in #40 |
+| 5 | GitPulse insights deferred for hours under the spawn limit | Not reproduced: insights answered in about a second, with every facet `ok`, on a single-worktree repository. | Existing GitPulse ft-f815889e and ft-da85cd55 |
+| 6 | The advisory API drops `vulnerable_functions` | Still `[]` on GHSA-9w4m-4vr2-xcvx. | GitHub's API; no board of ours owns it |
+| 7 | The shell gate blocks `cd`, `git -C`, heredocs and similar | In this session's posture the gate reports "could not judge" and leaves the call to permission rules; nothing was blocked. | GitPulse ft-d3bd46c0 |
+
+DevCouncil's `integrate` still writes the devcouncil server's `DEVCOUNCIL_PROJECT_ROOT` as an absolute path. That is the same shape as gap 1, but the devcouncil tools take no `repo_path`, so #40 leaves it alone and ft-6c759bc0 records it. The card moved to review.
+
+**ft-8a8279f5, the perf card: one of its two open criteria is now met.**
+- **Nightly on this main: met.** Nightly 40561859391 was started by hand (`workflow_dispatch`) on `a460275` rather than waiting for the scheduled run. It is not one of the scheduled nightlies M2 counts. It ran on `a460275`, which carries G7 and R10. Every job concluded success: Miri, Go fuzz (long), both chaos hammers, cargo-fuzz, ASan and the Step 5 snippet. #40 merged afterwards and changed only agent configuration.
+- **Crossover 1 µs and 10 µs data: not recorded.** An idle gate in the worktree `bench/crossover-1us-10us` waits for three consecutive samples at or above 70% idle (bounded to 12 h), then runs `make bench-crossover`. The gate sits above `record.sh`'s 60% floor because the target's two cargo builds run before `record.sh` checks. In the samples logged before this report was written, the host never reached 70% idle; other sessions' Go builds and test binaries held it.
+- **For the PR that lands the data.** `CROSS_SUFFIX` now reads `go1.27.3`, and `benchplot`'s `mustOne` requires exactly one `transport-*` and one `threads-*` file. The new files must therefore replace the `go1.27.2` ones. The card stays in_progress.
+
+**Process.** Every item in this wave was a re-check, a config change or a recording, with no library code to attack. So the Sonnet implement-and-attack lanes were not used: the checks ran inline, and Codex and CI reviewed #40.
+
+**Still yours.** These were carried from wave 3 and are unanswered:
+- the libc 0.2.191 bump (ft-d3d3888d);
+- closing issue #4 with a comment naming the fix commits. The dispatched nightly 40561859391 also passed.
 
 ## Wave 3 (2026-10-27)
 
