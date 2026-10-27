@@ -74,8 +74,9 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	return res.data, nil
 }
 
-// testHookBeforeResultFill runs, when set by a test, just before an inline
-// result is copied into the Go-heap Buffer WaitBuffer builds for it.
+// testHookBeforeResultFill runs, when set by a test, just before WaitBuffer
+// builds the Go-heap Buffer for an inline result: it copies the result, or
+// adopts it when it is already 64-byte aligned (adoptHeapBuffer).
 var testHookBeforeResultFill func(*handleState)
 
 // testHookBeforeTakeView runs, when set by a test, with cgoMu held for reading,
@@ -127,7 +128,30 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 	if testHookBeforeResultFill != nil {
 		testHookBeforeResultFill(s)
 	}
-	return newHeapBuffer(s, res.data), nil
+	// Adopt the result's own backing array when it is 64-byte aligned, rather
+	// than copy it a second time. That is safe only because nothing else holds
+	// res.data once waitBuffer has it (takeID == 0 here, so it is Go memory):
+	//
+	//   - Both producers of an id-0 result make it fresh for this one completion
+	//     and keep no reference: drainPipe's inline branch (make + copy of the
+	//     record's bytes, which alias the reader's buffer and are reused) and
+	//     its default branch (make + copy of take()'s Rust view, whose buffer
+	//     it frees). A result still in Rust memory always has takeID != 0: the
+	//     owned flag is only set on an id of at least 1 (buffer ids start at 1,
+	//     pool/mod.rs ID_CEILING), and a Rust view with no flag over 4 KiB takes
+	//     the same take path. So a Rust-owned slice, which is 64-byte aligned by
+	//     design, cannot reach this line to be mistaken for Go memory.
+	//   - The callResult is moved, not shared: deliver sends it down one
+	//     waiter's channel (a receive clears the slot, so a recycled channel
+	//     keeps no reference) or stores it in completed, from which claimLocked
+	//     deletes it as it returns it. takeUnclaimedLocked drops the map's
+	//     entries. A ticket has one claimant (pending refuses a second waiter,
+	//     the entry leaves completed or the ticket is abandoned), and Discard
+	//     claims through the same function, so a result goes to Wait, WaitBuffer
+	//     or Discard, never two of them.
+	//   - Wait already returns res.data to its caller with no copy, so this
+	//     hands WaitBuffer's caller the same ownership Wait's caller has.
+	return adoptHeapBuffer(s, res.data), nil
 }
 
 // claimLocked is the front half of Wait and Discard, the two ways a ticket's

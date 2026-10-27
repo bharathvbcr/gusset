@@ -171,21 +171,45 @@ func newBufferCharged(s *handleState, id uint64, slice []byte, charge int64) *Bu
 	return buf
 }
 
+// heapBufferAlign is the alignment of every Buffer, Rust-owned or Go-owned (R16).
+const heapBufferAlign = 64
+
 // newHeapBuffer copies an inline result into 64-byte aligned Go memory.
 //
 // Id 0: nothing to free in Rust, and submit sends its bytes inline. A result
 // reaches here only within the 4 KiB inline limit, which is also all Submit
 // accepts back from an id-0 Buffer.
 func newHeapBuffer(s *handleState, data []byte) *Buffer {
-	const align = 64
-	backing := make([]byte, len(data)+align-1)
+	backing := make([]byte, len(data)+heapBufferAlign-1)
 	off := 0
-	if rem := int(uintptr(unsafe.Pointer(unsafe.SliceData(backing))) % align); rem != 0 {
-		off = align - rem
+	if rem := int(uintptr(unsafe.Pointer(unsafe.SliceData(backing))) % heapBufferAlign); rem != 0 {
+		off = heapBufferAlign - rem
 	}
 	view := backing[off : off+len(data) : off+len(data)]
 	copy(view, data)
 	return &Buffer{state: s, data: view}
+}
+
+// adoptHeapBuffer is newHeapBuffer without the copy when data can serve as the
+// Buffer's own backing: an id-0 Buffer over data itself when its first byte is
+// already 64-byte aligned, and newHeapBuffer's copy otherwise.
+//
+// The caller hands data over: after this returns, nothing else may read or
+// write it. waitBuffer is the one caller, and it holds that for the reasons
+// given at its call. The alignment is tested on every call, at run time.
+// Whether Go's allocator tends to place a result of a given size on a 64-byte
+// boundary (the size classes that are multiples of 64 do, since their spans are
+// page aligned) is an observed property that decides only whether the fast path
+// is taken, never whether the Buffer is correct: an unaligned slice is copied.
+//
+// The view is data[:n:n]. Bytes returns it as is, so a caller's append
+// reallocates rather than writing past the result.
+func adoptHeapBuffer(s *handleState, data []byte) *Buffer {
+	n := len(data)
+	if n > 0 && uintptr(unsafe.Pointer(unsafe.SliceData(data)))%heapBufferAlign == 0 {
+		return &Buffer{state: s, data: data[:n:n]}
+	}
+	return newHeapBuffer(s, data)
 }
 
 // releaseForgottenBuffer frees a buffer whose Go owner became unreachable
