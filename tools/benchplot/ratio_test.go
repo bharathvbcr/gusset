@@ -190,7 +190,7 @@ func TestChartAndCrossoverBlockRenderTheOneAndTenMicrosecondArms(t *testing.T) {
 		}
 	}
 	lo, hi := repetitions(m, works)
-	out := renderCrossover(crossoverArms(m, works), lo, hi)
+	out := renderCrossover(crossoverArms(m, works), lo, hi, "18 goroutines")
 	if !strings.Contains(out, "noop, 708 ns, 990 ns, 7 µs, 10 µs, 70 µs and 709 µs, 3 repetitions each.") {
 		t.Errorf("block does not name all seven arms:\n%s", out)
 	}

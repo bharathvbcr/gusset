@@ -94,7 +94,7 @@ func TestCrossoverArmsAndBlockFromARecording(t *testing.T) {
 	if lo != 3 || hi != 4 {
 		t.Fatalf("repetitions = %d..%d, want 3..4", lo, hi)
 	}
-	out := renderCrossover(arms, lo, hi)
+	out := renderCrossover(arms, lo, hi, "18 goroutines")
 	for _, want := range []string{
 		"| serial | from 7 µs (1.20×); not at noop (10.0×) |",
 		"| 18 goroutines | no arm; the largest, 7 µs, is 6.00× |",
