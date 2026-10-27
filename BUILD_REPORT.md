@@ -18,10 +18,10 @@ Asked for as "Next wave", then "Commit and merge all branches and next wave". En
 - **G7:** taken as the owner's go on the decision wave 2 left pending.
 - **PR #25:** merged (license text).
 - **R6, R11, G8 and R8:** these A/B'd without a win (R8 with a `Wait` regression), so they were put to you. You chose to keep their code off main and land only their records (#37).
-- **Branches already contained in main:** deleted, eleven at the start of the wave and four more after the merges.
+- **Branches already contained in main:** deleted, eleven at the start of the wave, `docs/license-copyright` after #25, and four more after the merges.
 - **Branches still on the remote:** the five rejected perf branches (`perf/r6-*`, `perf/r7-*`, `perf/r8-*`, `perf/g8-*`, `perf/r11-*`), each carrying its A/B records.
 
-**Merged.** Each PR merged only after every CI check passed on its final head and every bot finding was addressed. Cursor's bots did not run on #37 or #38 because of a usage limit, and on #36 Codex never reviewed the final head; both are noted on the PRs.
+**Merged.** Each PR merged only after every CI check passed on its final head and every bot finding was addressed. Cursor's bots did not run on the wave-3 PRs because of a usage limit, and on #36 Codex never reviewed the final head; both are noted on the PRs.
 
 | PR | Merge | Card | What | Main Matrix / adopter after merge |
 | --- | --- | --- | --- | --- |
@@ -51,7 +51,7 @@ Asked for as "Next wave", then "Commit and merge all branches and next wave". En
 | Candidate | Records | Verdict |
 | --- | --- | --- |
 | G7 (`perf/g7-waitbuffer-heap`, merged) | `bench/results/gp-feat-001/g7-*-vs-main-*` against main `0c639a7`, plus the PR benchgate | **Landed.** Locally, `WaitBufferResultSize` was significantly faster at 49 B, 256 B and 1 KiB, `~` elsewhere, with wide intervals: the arm started at the idle floor. allocs/op fell from 4 to 2 from 48 B to 4 KiB. `SubmitWaitResult` (`Wait`) and `CallResult` (`Call`) were `~` at every size. |
-| R10 (`perf/r10-alloc-counters`, merged) | `r10-*` against the instrument base `c972b34` | **Landed.** `BufferAllocParallel` significantly faster (p=0.000), with tight intervals; `GussetCallParallel` `~`. |
+| R10 (`perf/r10-alloc-counters`, merged) | `r10-*` against the instrument base `c972b34` | **Landed.** `BufferAllocParallel` significantly faster, with tight intervals; `GussetCallParallel` `~`. |
 | R7 (`perf/r7-engine-cache`, not merged) | `r7-*` on the branch, against its instrument base `f88ac08` | **Rejected.** `GussetCallParallel` and `GussetCallNoop` are `~`. On the Rust dispatch bench, three serial arms are significantly slower with the cache, and registered opcode 0 and the three parallel arms are `~`. `record.sh` will not run a `cargo:` arm as variants, so the two builds were alternated by hand: six runs of 10 rounds, in base, cand, cand, base, base, cand order, each gated on 60% idle, giving n=30 per arm. |
 
 The R7 adversarial pass found two regressions against main, both demonstrated by scratch tests:
@@ -74,7 +74,10 @@ R7 is rejected on the A/B, so neither is fixed; both are recorded in the branch'
 **Cards moved in wave 3.**
 - **ft-0dde896c (release):** moved to review. Every criterion is met; the last PENDING line was the advisory, GHSA-9w4m-4vr2-xcvx, published 2026-10-25.
 - **ft-97faf4f4 (main-green tracker):** moved to review. M2's three consecutive green scheduled main nightlies are 40179055849, 40303616113 and 40482856845, and every job of the third concluded success. Closing issue #4 waits for your go.
-- **ft-8a8279f5 (perf):** stays in_progress. G7 and R10 landed and R7 is rejected. Still unrecorded or untried: R8's CallResult arm and N2 items 2, 4 and 6.
+- **ft-8a8279f5 (perf):** stays in_progress. G7 and R10 landed and R7 is rejected, so every named candidate is now decided. R8's unrecorded CallResult arm cannot change R8's rejection. Two acceptance criteria remain open:
+  - the committed crossover data still lacks the 1 µs and 10 µs arms that #26 added, which needs a quiet-host `make bench-crossover` and a `make docs` PR;
+  - the nightly hammer has not yet run on this main.
+  One deviation: the card asks for R7 to be A/B'd against #34's baseline. It was A/B'd against its interleaved instrument base instead, which is the stronger comparison.
 
 ## Wave 2 (2026-10-26 evening to 2026-10-27)
 
@@ -219,6 +222,7 @@ Every PR went through implementation and review (Opus plus the Cursor and Codex 
    - iceoryx2-go PR #1 size versus the IP-review threshold (AUDIT_REPORT decision 3).
 
 ## Remaining debt noticed, not filed
+- **Wave 3, a flake risk.** `TestWaitBuffer_AlignedResultCostsOnlyTheBufferHeader` (G7, on main since #36) allows one allocation of margin on `testing.AllocsPerRun`, which counts process-wide. A background allocation could red it. If it does, the owning card is ft-8a7cd8ef (Go test hygiene).
 - The `docs/choosing.md` SIMD section still says "about 1.4 GB/s" for the check-in-loop kernel. The section itself says none of it is regenerated.
 - `tools/benchplot` hard-coded the "18 goroutines" label, which goes wrong on a recording host with a different `GOMAXPROCS`. Fixed in wave 2 (#31).
 

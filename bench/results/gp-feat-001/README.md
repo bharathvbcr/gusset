@@ -221,6 +221,38 @@ done
   Its `CallResult` arm was refused three times by `record.sh`'s idle floor and
   is not recorded.
 
+### Landed in wave 3: G7 and R10 (2026-10-27)
+
+| candidate | PR | base | files |
+| --- | --- | --- | --- |
+| G7, `WaitBuffer` carries a bytes result of 4 KiB or less in Go memory, adopting `drainPipe`'s slice when it is 64-byte aligned | #36 (`9c9ba1e`) | main `0c639a7`; earlier, the instrument `dbecd5c` | `g7-*-vs-main-*.txt`, `g7-gussetwaitbuffer-*.txt` |
+| R10, the allocator counters add with a bounded `fetch_add` on their own cache lines | #38 (`8ef9659`) | the instrument `c972b34` | `r10-*.txt` |
+
+Each verdict is what `benchstat -ignore ld -col 'variant@(base cand)' -filter '.unit:sec/op'` prints for the file:
+
+- **G7:** `GussetWaitBufferResultSize` is significantly faster at 49 B, 256 B
+  and 1024 B and `~` elsewhere. That arm ran at the idle floor, so its
+  intervals are wide. `GussetSubmitWaitResult` (`Wait`) and `GussetCallResult`
+  (`Call`) are `~` at every size. The PR's own benchgate, a second interleaved
+  run on Linux, found every size from 48 B to 4096 B faster and every other
+  row `~`.
+- **R10:** `BufferAllocParallel` is significantly faster, and
+  `GussetCallParallel` is `~`.
+
+### Rejected in wave 3: R7, a per-worker engine cache (2026-10-27)
+
+R7 was measured against its interleaved instrument base `f88ac08`, the
+stronger comparison, not against the separate-session baseline in
+`../dispatch/`. Its records are on `perf/r7-engine-cache` @ `12d6178`, not
+here:
+
+- Go `GussetCallParallel` and `GussetCallNoop` are `~`.
+- On the Rust dispatch bench, `diagnostic_opcode0`,
+  `diagnostic_opcode0_registry_loaded` and `registered_nonzero` are
+  significantly slower, and the rest are `~`. `record.sh` refuses `cargo:` arms
+  under `RECORD_VARIANTS`, so those runs alternated the two builds by hand
+  (base, cand, cand, base, base, cand), n=30 per arm.
+
 ## Next
 
 In profile order, each needing its own A/B:
@@ -230,7 +262,9 @@ In profile order, each needing its own A/B:
   goroutines or threads are runnable but waiting, and where.
 - **Rust `cancel_flags`**: a per-submit insert and a per-job remove on one
   mutex. A slab sized to the queue (`pool_size * 2`) is the audit's candidate.
-- **R11 / `JobQueue::push`**: now visible at 114 samples.
+- **`JobQueue::push`**: now visible at 114 samples. R11's padding of it
+  measured `~` (above): padding alone did not relieve it at this host's
+  resolution.
 - The serial floor at 1 µs is not reachable by any of these: it needs fewer
   cross-thread handoffs, for example a lone waiter reading the ring itself
   instead of being handed its result by the drain reader.
