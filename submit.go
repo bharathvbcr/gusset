@@ -76,7 +76,7 @@ func (h *Handle) CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error) {
 // finished job returns its pool permit before anyone Waits (DECISIONS
 // 2026-09-30), so a caller that never collects is not slowed down: its results
 // accumulate on the handle until Wait, Discard or Close, without bound. A
-// result over 4 KiB is held as Rust memory, which Go's GC pacer and
+// result over 48 bytes is held as Rust memory, which Go's GC pacer and
 // GOMEMLIMIT do not see, so a fire-and-forget loop can exhaust memory long
 // before the Go heap looks large.
 func (h *Handle) Submit(ctx context.Context, in any) (uint64, error) {

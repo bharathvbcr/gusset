@@ -575,7 +575,28 @@ pub fn check_submit(header_bytes: &[u8], payload: &[u8], with_ring: bool) {
             match rig.handle.take(ticket) {
                 Ok(JobResult::Ok(out)) => {
                     assert!(diag, "ran without an engine");
+                    assert!(
+                        out.len() <= INLINE_RESULT_MAX,
+                        "a {}-byte echo was stored unpromoted",
+                        out.len()
+                    );
                     assert_eq!(out, input, "stored echo differs");
+                }
+                Ok(JobResult::Buffer(id)) => {
+                    assert!(diag, "ran without an engine");
+                    assert!(
+                        input.len() > INLINE_RESULT_MAX,
+                        "a {}-byte echo was promoted",
+                        input.len()
+                    );
+                    let Ok((ptr, len)) = rig.handle.buf_get(id) else {
+                        panic!("promoted buffer {id} is not live");
+                    };
+                    // SAFETY: `buf_get` returned this buffer's live pointer and
+                    // length, and the buffer is freed only after this read.
+                    let out = unsafe { std::slice::from_raw_parts(ptr, len) };
+                    assert_eq!(out, &input[..], "promoted echo differs");
+                    assert!(rig.handle.buf_free(id).is_ok(), "free promoted buffer");
                 }
                 Ok(JobResult::Err(e)) => {
                     assert!(!diag, "diagnostic echo failed: {e}");

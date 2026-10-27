@@ -542,7 +542,7 @@ Things worth knowing before you hit them:
   hook, and `clear_engine_handlers` removes it (the recipe is in step 2).
 - **A `Submit` nobody waits on does not hold a permit.** The permit returns when
   the reader stores the result; the result stays until `Wait`, `Discard` or
-  `Close`. Nothing bounds how many pile up, and one over 4 KiB is Rust memory
+  `Close`. Nothing bounds how many pile up, and one over 48 bytes is Rust memory
   the Go GC cannot see, so a fire-and-forget caller must `Discard` each ticket
   it will not `Wait` on. `Discard` drops the result only; the work still runs.
 - **A ticket has exactly one waiter.** `Wait` on an unknown ticket returns

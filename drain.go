@@ -115,7 +115,12 @@ func drainPipe(s *handleState) {
 			}
 			res = callResult{err: takeErr}
 		case (bufID&ffi.TakeOwnedFlag) != 0 || (bufID > 0 && len(outBytes) > inlineResultBytes):
-			// Keep take()'s Rust buffer until a waiter consumes it. WaitBuffer
+			// Keep take()'s Rust buffer until a waiter consumes it. The worker
+			// promotes every result over the inline record limit (48 bytes), so
+			// this is the path for all of them, whatever their size: the flag
+			// is the signal. The size test beside it is the older guard, kept
+			// for a stored result over the egress limit that was not promoted,
+			// which the worker no longer produces. WaitBuffer
 			// wraps with no Go copy; Wait copies out and frees. Wrapping here
 			// forced every Wait of a large result to allocate a *Buffer it
 			// immediately destroyed. The id lives in takeIDs, not callResult,

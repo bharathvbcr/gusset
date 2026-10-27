@@ -2,7 +2,7 @@
 
 use super::sys::{self, RawBuffer};
 use super::{
-    lock_recover, reserve_id, Handle, JobResult, PoolError, MAX_BUFFER_BYTES, MAX_INLINE_INPUT,
+    lock_recover, reserve_id, Handle, JobResult, PoolError, INLINE_RESULT_MAX, MAX_BUFFER_BYTES,
     NEXT_BUFFER_ID,
 };
 use std::sync::atomic::Ordering;
@@ -103,14 +103,18 @@ impl Handle {
 
     /// Copies `data` into a new buffer and returns its id and pointer.
     ///
-    /// The memcpy runs on the calling thread. Workers use this to promote a
-    /// large `JobResult::Ok` off the cgo take path, and `gusset_take` uses it for
-    /// the small results it still copies (R16 egress).
+    /// The memcpy runs on the calling thread. Workers use this to promote every
+    /// `JobResult::Ok` too large for a completion record off the cgo take path.
+    /// `gusset_take` still uses it for the results it copies itself: those of at
+    /// most [`INLINE_RESULT_MAX`] bytes that were not carried in a record
+    /// (the caller did not ask for inline records, or the pipe was not sized
+    /// for them) (R16 egress).
     ///
     /// Deliberately not poison-checked, unlike [`Handle::buf_alloc`]. Poison
     /// refuses new work (I2); this carries out a result that already exists. A
     /// check here lost a sibling's finished result the moment another job
     /// panicked, and only for results small enough not to have been promoted.
+    /// `INLINE_RESULT_MAX` is that bound.
     pub(crate) fn buf_from_bytes(&self, data: &[u8]) -> Result<(u64, *mut u8), String> {
         self.register(|| RawBuffer::from_bytes(data).map(BufferSlot::output))
     }
@@ -213,8 +217,15 @@ impl Handle {
     }
 }
 
-/// Moves a large `JobResult::Ok` onto a Buffer so `gusset_take` does not
-/// memcpy on the cgo thread.
+/// Moves a `JobResult::Ok` too large for a completion record onto a Buffer so
+/// `gusset_take` does not allocate and memcpy on the cgo thread.
+///
+/// The bound is [`INLINE_RESULT_MAX`], not the 4 KiB submit limit: a result up
+/// to that size can travel whole in a record, and anything over it was already
+/// going to be stored and fetched with `gusset_take`, whose copy this moves to
+/// the worker. Go keeps the promoted buffer's id until a waiter consumes it
+/// (`takeIDs`): `WaitBuffer` wraps it with no copy, `Wait` copies it out and
+/// frees it.
 ///
 /// The worker holds an upgraded `Arc`, not `&self`, so this is a function on
 /// `&Handle` rather than a method.
@@ -225,7 +236,7 @@ pub(super) fn materialize_result(handle: &Handle, result: JobResult) -> JobResul
             data.len(),
             MAX_BUFFER_BYTES
         )),
-        JobResult::Ok(data) if data.len() > MAX_INLINE_INPUT => {
+        JobResult::Ok(data) if data.len() > INLINE_RESULT_MAX => {
             match handle.buf_from_bytes(&data) {
                 Ok((id, _)) => JobResult::Buffer(id),
                 Err(e) => JobResult::Err(e),

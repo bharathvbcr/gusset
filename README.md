@@ -263,7 +263,7 @@ Gusset exports strictly 17 C ABI functions from `libgusset.a` (enforced by `test
 - `(*Handle).CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error)` — the zero-copy round trip. `Call` refuses `[]byte` over 4 KiB, so the payloads zero-copy is for are the ones it cannot carry.
 - `(*Handle).Submit(ctx context.Context, in any) (uint64, error)`
 - `(*Handle).Wait(ctx context.Context, ticket uint64) ([]byte, error)` (and `WaitBuffer` for zero-copy egress)
-- `(*Handle).Discard(ticket uint64) error` — gives up a ticket's result without waiting. A result nobody collects is otherwise kept, as Rust memory the Go GC cannot see when it is over 4 KiB, until `Close`. Discard frees a stored result at once and a running job's result when it lands; it does not cancel the work.
+- `(*Handle).Discard(ticket uint64) error` — gives up a ticket's result without waiting. A result nobody collects is otherwise kept, as Rust memory the Go GC cannot see when it is over 48 bytes, until `Close`. Discard frees a stored result at once and a running job's result when it lands; it does not cancel the work.
 - `(*Handle).NewBuffer(n int) (*Buffer, error)` (with `(*Buffer).Free() error`)
 - `gusset.Shutdown(drain time.Duration) error` — process-wide, one-way, budgeted drain. Returns non-nil when work was still in flight at the deadline rather than reporting a success the caller cannot rely on.
 - `gusset.Stats() AllocStats`

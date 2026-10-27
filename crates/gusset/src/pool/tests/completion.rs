@@ -247,11 +247,26 @@ fn inline_completion_records_carry_small_results_only_when_asked() {
         let rec = read_exact_fd(r, 8);
         assert_eq!(word(&rec), ticket, "expected a bare ticket");
     };
-    // One byte over the limit: stored, bare ticket.
+    // One byte over the limit: a bare ticket, and the result was promoted onto
+    // a Buffer by the worker rather than left for `take` to copy.
     let big = vec![0u8; INLINE_RESULT_MAX + 1];
     let t = submit(inline, &big);
     bare(t);
-    assert!(matches!(handle.take(t), Ok(JobResult::Ok(ref v)) if v == &big));
+    match handle.take(t) {
+        Ok(JobResult::Buffer(id)) => {
+            let (ptr, len) = handle.buf_get(id).must("promoted buffer is live");
+            // SAFETY: `buf_get` returned this buffer's live pointer and length,
+            // and nothing frees it before the read.
+            assert_eq!(unsafe { std::slice::from_raw_parts(ptr, len) }, &big[..]);
+            handle.buf_free(id).must("free promoted buffer");
+        }
+        Ok(JobResult::Ok(v)) => panic!(
+            "a {}-byte result was stored unpromoted; the worker promotes everything over INLINE_RESULT_MAX",
+            v.len()
+        ),
+        Ok(other) => panic!("unexpected result {:?}", std::mem::discriminant(&other)),
+        Err(e) => panic!("take failed: {e}"),
+    }
     // Without the flag, even a one-byte result is a bare ticket.
     let t = submit(plain, &[0]);
     bare(t);

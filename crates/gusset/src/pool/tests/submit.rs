@@ -250,6 +250,86 @@ fn large_ok_result_is_promoted_off_the_cgo_thread() {
     }
 }
 
+/// The worker promotes a successful result onto a Buffer exactly when it is
+/// too large for a completion record: `INLINE_RESULT_MAX` stays `Ok`, one byte
+/// more is a `Buffer`, and 4096 / 4097 (the old threshold) are both a `Buffer`.
+/// A caller that never asked for inline records is used so every size is
+/// stored and the boundary is the promotion rule, not the record rule. Freeing
+/// each taken result returns the registry to empty: a promoted buffer is owned
+/// by the result and leaks only if nobody frees it.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn results_are_promoted_exactly_above_the_inline_record_limit() {
+    use crate::pool::INLINE_RESULT_MAX;
+    let _serialise = lock_recover(&INJECT_LOCK);
+    let (r, w) = make_pipe();
+    let handle = match Handle::open(1, w) {
+        Ok(h) => h,
+        Err(e) => panic!("open failed: {}", e),
+    };
+    let header = CallHeader {
+        flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+        ..Default::default()
+    };
+
+    for len in [
+        INLINE_RESULT_MAX,
+        INLINE_RESULT_MAX + 1,
+        MAX_INLINE_INPUT,
+        MAX_INLINE_INPUT + 1,
+    ] {
+        // Mode 0 echoes its input, mode byte included.
+        let echo: Vec<u8> = (0..len).map(|i| if i == 0 { 0 } else { i as u8 }).collect();
+        let (input, buffer_id): (&[u8], u64) = if len <= MAX_INLINE_INPUT {
+            (&echo, 0)
+        } else {
+            let (id, ptr) = handle.buf_alloc(len).must("alloc input");
+            // SAFETY: `ptr` is `len` writable bytes owned by buffer `id`.
+            unsafe { std::ptr::copy_nonoverlapping(echo.as_ptr(), ptr, len) };
+            (&[], id)
+        };
+        let ticket = handle.submit(header, input, buffer_id).must("submit");
+        assert_eq!(read_ticket(r), ticket, "len {len}");
+
+        match handle.take(ticket).must("take") {
+            JobResult::Ok(data) => {
+                assert!(
+                    len <= INLINE_RESULT_MAX,
+                    "a {len}-byte result was stored unpromoted"
+                );
+                assert_eq!(data, echo, "len {len}");
+            }
+            JobResult::Buffer(id) => {
+                assert!(
+                    len > INLINE_RESULT_MAX,
+                    "a {len}-byte result was promoted, but fits a record"
+                );
+                assert_ne!(id, buffer_id, "echo must not alias its input");
+                let (ptr, got) = handle.buf_get(id).must("promoted buffer is live");
+                assert_eq!(got, len);
+                // SAFETY: `buf_get` gave this buffer's live pointer and length.
+                assert_eq!(unsafe { std::slice::from_raw_parts(ptr, got) }, &echo[..]);
+                handle.buf_free(id).must("free promoted buffer");
+            }
+            other => panic!("len {len}: unexpected {:?}", std::mem::discriminant(&other)),
+        }
+        if buffer_id != 0 {
+            handle.buf_free(buffer_id).must("free input");
+        }
+        assert_eq!(
+            lock_recover(&handle.buffers).len(),
+            0,
+            "len {len}: a buffer outlived its result"
+        );
+    }
+
+    handle.close().must("close");
+    // SAFETY: the read end is still owned by this test.
+    unsafe {
+        libc::close(r);
+    }
+}
+
 /// `NewBuffer` reaches Rust through `gusset_buf_alloc`. That export, not
 /// `Handle::buf_alloc`, is what must mark the slot caller-held: an engine
 /// returning the id is otherwise accepted, and the waiter's free releases

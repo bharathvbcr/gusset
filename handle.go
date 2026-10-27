@@ -94,12 +94,19 @@ type handleState struct {
 	takeIDs map[uint64]uint64
 }
 
-// inlineResultBytes is the egress twin of the 4 KiB submit copy limit (R16).
-// Results this size and under are copied onto the Go heap in drainPipe so a
-// one-byte Call does not pay a Buffer wrapper and AddCleanup. Larger results
-// keep take()'s Rust buffer id until a waiter consumes it: WaitBuffer wraps
-// with no Go copy, Wait copies out and frees. Wrapping in drainPipe taxed
-// Wait with a Buffer object it immediately destroyed (6 allocs/op vs 3).
+// inlineResultBytes is the 4 KiB submit copy limit (R16): the largest []byte
+// input copied during gusset_submit, and the largest Go-heap input a Buffer
+// result may be rebuilt from.
+//
+// It was also the egress threshold, and is no longer. The worker promotes every
+// result over ffi.InlineResultMax (48 bytes, the completion record's payload)
+// onto a Rust buffer, and drainPipe keeps that buffer's id until a waiter
+// consumes it: WaitBuffer wraps it with no Go copy, Wait copies out and frees.
+// Wrapping in drainPipe taxed Wait with a Buffer object it immediately
+// destroyed (6 allocs/op vs 3), so the id waits in takeIDs instead. Only a
+// result of at most 48 bytes that did not fit a record (a caller without
+// inline completion) is copied onto the Go heap in drainPipe, so a one-byte
+// Call does not pay a Buffer wrapper and AddCleanup.
 const inlineResultBytes = 4096
 
 // Handle represents an active Gusset runtime session (I4).

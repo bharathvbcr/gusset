@@ -15,10 +15,15 @@ import (
 // and then copy into it with no lock held. Close takes cgoMu exclusively and
 // frees every Rust buffer of the handle, so a Close landing in that gap
 // finished first and the copy wrote the result into freed allocator memory: a
-// write-after-free of up to inlineResultBytes into the C heap, on a size class
-// the next posix_memalign of the same size walks (the 2026-09-30 hammer
-// SIGSEGV was a 973-byte request in the 992-byte class finding a corrupted
-// tcache next pointer). The hook stands in for a preemption at that point: it
+// write-after-free into the C heap, on a size class the next posix_memalign of
+// the same size walks (the 2026-09-30 hammer SIGSEGV was a 973-byte request in
+// the 992-byte class finding a corrupted tcache next pointer). The fill path
+// then covered every result up to inlineResultBytes. The worker now promotes
+// every result over the 48-byte record limit onto a take buffer, which
+// WaitBuffer wraps and never fills, so only a result carried whole in a
+// completion record reaches the fill: this test sends 40 bytes, not 973. The
+// take-buffer window against Close is TestPitfall_WaitBufferOfLargeResultDoesNotDangleAcrossClose
+// (tests/pitfalls). The hook stands in for a preemption at that point: it
 // starts Close and waits for it. Close must not be able to finish while the
 // fill is pending.
 func TestWaitBuffer_CloseCannotFreeTheResultBeingFilled(t *testing.T) {
@@ -26,7 +31,7 @@ func TestWaitBuffer_CloseCannotFreeTheResultBeingFilled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := make([]byte, 973) // inline (<= inlineResultBytes): WaitBuffer allocates and fills
+	in := make([]byte, 40) // inline record (<= ffi.InlineResultMax): WaitBuffer allocates and fills
 	for i := 1; i < len(in); i++ {
 		in[i] = byte(i*7 + 3)
 	}
