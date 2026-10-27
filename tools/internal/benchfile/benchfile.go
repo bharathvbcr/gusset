@@ -46,6 +46,7 @@ type Sample map[string]float64
 // Row is one benchmark line, kept in file order so interleaving is detectable.
 type Row struct {
 	Name   string // GOMAXPROCS suffix stripped
+	Procs  int    // the stripped suffix; 0 when the name carried none
 	Arm    string // shape and transport, without the work size
 	Sample Sample
 	Line   int // 1-based, for error messages that point at the damage
@@ -169,10 +170,12 @@ func parseRow(line string, lineNo int) (Row, error) {
 	}
 
 	name := strings.TrimSuffix(fields[0], ":")
-	// Strip the trailing -GOMAXPROCS suffix so names are stable across machines.
+	// Strip the trailing -GOMAXPROCS suffix so names are stable across machines,
+	// and keep it: it is the only record of how many procs the run had.
+	procs := 0
 	if i := strings.LastIndex(name, "-"); i > 0 {
-		if _, err := strconv.Atoi(name[i+1:]); err == nil {
-			name = name[:i]
+		if n, err := strconv.Atoi(name[i+1:]); err == nil {
+			name, procs = name[:i], n
 		}
 	}
 
@@ -189,7 +192,43 @@ func parseRow(line string, lineNo int) (Row, error) {
 		return Row{}, fmt.Errorf("no (value, unit) pairs: %s", truncate(line))
 	}
 
-	return Row{Name: name, Arm: Arm(name), Sample: s, Line: lineNo}, nil
+	return Row{Name: name, Procs: procs, Arm: Arm(name), Sample: s, Line: lineNo}, nil
+}
+
+// ProcsOf returns the GOMAXPROCS every row whose name starts with prefix ran
+// at, read from the -N suffix `go test` puts on each benchmark name.
+//
+// It refuses rather than guesses. No row under the prefix, a row with no
+// suffix (`go test` omits it at GOMAXPROCS 1, and a hand-edited file has none
+// either, so the two cannot be told apart) and rows that disagree (a file
+// recorded with -cpu, or spliced from two hosts) each have no single answer,
+// and a caller that prints the number as a label would be inventing it.
+func (f *File) ProcsOf(prefix string) (int, error) {
+	procs, first := 0, 0
+	for _, row := range f.Rows {
+		if !strings.HasPrefix(row.Name, prefix) {
+			continue
+		}
+		if row.Procs == 0 {
+			return 0, fmt.Errorf("%s:%d: %s has no -GOMAXPROCS suffix, so the number of procs "+
+				"it ran with is not recorded (`go test` omits the suffix at GOMAXPROCS 1). "+
+				"Re-record it", f.Path, row.Line, row.Name)
+		}
+		if procs == 0 {
+			procs, first = row.Procs, row.Line
+			continue
+		}
+		if row.Procs != procs {
+			return 0, fmt.Errorf("%s: rows under %s ran with more than one GOMAXPROCS: -%d on "+
+				"line %d but -%d on line %d. One recording describes one host at one setting, "+
+				"so there is no single count to report. Re-record it without -cpu, on one machine",
+				f.Path, prefix, procs, first, row.Procs, row.Line)
+		}
+	}
+	if procs == 0 {
+		return 0, fmt.Errorf("%s: no rows under %s, so there is no GOMAXPROCS to read", f.Path, prefix)
+	}
+	return procs, nil
 }
 
 // checkSingleWriter rejects a results file that two benchmark processes wrote

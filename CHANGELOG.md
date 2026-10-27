@@ -17,6 +17,17 @@ Changes since v0.0.3. The C ABI layout is unchanged (17 exports, ABI layout vers
 - A second test catches a handle that reads its completion descriptor instead of taking it (`ft-3d60ee16`, criterion 11). Replacing the `swap(-1)` in `release_pipe_with` with a `load` was caught by one test, the close-count test. `a_second_release_cannot_close_the_descriptor_it_gave_up` finds it through the effect: the first release hands back the number without closing it, the second runs the real `close(2)`, and the descriptor must still carry a write to the read end. It never frees and re-acquires a number, so it cannot race the module's parallel tests. A second `libc::close` inside `close_fd` stays uncaught, by design (`sys.rs`, `close_fd`). Test-only; no production change.
 - `TestPitfall_OpenNilOptionIsRefusedNotPanicked`, `TestFFI_ArgumentRefusalsAreBadArg` and the Rust `argument_refusal_tests` pin the two changes above, and that the refusals outside the list stay `FFI_ERR`.
 
+### 2026-10-26 · The parallel crossover rows are labelled with the recorded GOMAXPROCS, not a typed "18 goroutines"
+
+Docs tooling and tests; no runtime, export, ABI or public-surface change. No I1 to I6 invariant is touched: this protects R15 (every number in docs is generated). `make docs-check` is clean and `docs/choosing.md` is byte-identical, because the committed recording was made at GOMAXPROCS 18.
+
+#### Changed
+- **`tools/benchplot` reads the parallel arm's goroutine count off the recording.** The table header and the crossover table's row were the literal `18 goroutines`. `BenchmarkCrossoverParallel` is `b.RunParallel` with the default parallelism (`bench/seed/go/crossover_test.go` never calls `SetParallelism`), so it runs GOMAXPROCS goroutines, and `go test` writes that GOMAXPROCS on every benchmark name as the `-N` suffix. A recording from a host with another core count would have been labelled 18 and passed `make docs-check`, which compares the generated block only with itself. `benchfile.Row` now keeps the suffix it used to discard (`Procs`), `File.ProcsOf` returns the one value a prefix's rows share, and `benchplot` builds both labels from it. It refuses, naming the lines, a recording whose parallel rows disagree, have no suffix (`go test` omits it at GOMAXPROCS 1, and a hand-edited file looks the same), or are absent.
+- The cost-per-call table moved from `renderDocTables` into `renderCostTable`, so the label has one owner and the table can be tested without the scaling recordings.
+
+#### Tests
+- `TestParallelLabelFollowsTheRecordedGOMAXPROCS` renders both generated tables from a recording with `-8` suffixes and asserts `8 goroutines` appears and `18 goroutines` does not. `TestParallelLabelRefusesMixedGOMAXPROCS`, `TestParallelLabelRefusesRowsWithoutASuffix` and `TestParallelLabelRefusesARecordingWithoutTheParallelArm` pin the refusals. `TestParallelLabelOfTheCommittedRecordingIs18` pins the committed data. Against a `parallelGoroutines` that returns the typed `18 goroutines`, the first four fail and the fifth passes.
+
 ### 2026-10-26 · A failed R14 harness run leaves its stderr in the job log and as an artifact
 
 Harness script, workflow and tests; no runtime, export, ABI or public-surface change. No I1 to I6 invariant is touched: this is R14 evidence, so that the next red R14 job says why.
