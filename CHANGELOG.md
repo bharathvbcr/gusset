@@ -22,7 +22,7 @@ Changes since v0.0.3. The C ABI layout is unchanged (17 exports, ABI layout vers
 Recorded results only; no code, export, ABI or public-surface change.
 
 #### Benchmarks
-- **`bench/results/gp-feat-001/` now holds the interleaved A/B records behind four rejected candidates.** R6, R11 and G8 show no significant difference on `GussetCallNoop` or `GussetCallParallel`. R8 makes `WaitBuffer` faster from 49 B to 4 KiB but plain `Wait` 7-16% slower, past the 5% bar. Their code stays on the `perf/*` branches the README names, by the owner's decision of 2026-10-27; the README carries each verdict and the command that reproduces it.
+- **`bench/results/gp-feat-001/` now holds the interleaved A/B records behind four rejected candidates.** R6, R11 and G8 show no significant difference on `GussetCallNoop` or `GussetCallParallel`. R8 makes `WaitBuffer` faster from 49 B to 4 KiB but plain `Wait` slower over the same sizes, past the 5% bar. Their code stays on the `perf/*` branches the README names, by the owner's decision of 2026-10-27; the README carries each verdict and the command that reproduces it.
 
 ### 2026-10-26 · Quiet-host baseline for the dispatch, deadline, Discard and Stats benchmarks (card ft-568a30e2, criterion 4)
 
