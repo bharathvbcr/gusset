@@ -187,6 +187,52 @@ reading as open. Today every waiter retakes mu, so nothing on this branch can
 reach it; the reorder is in `archive/g6-rejected-bprime-recycle` for anyone who
 builds on that path.
 
+### Rejected: R6, R11, G8 and R8 (2026-10-26/27)
+
+These records are kept here as evidence; none of the code landed. Each
+candidate stays on its pushed branch, and the owner chose on 2026-10-27 to keep
+it off main. Every file is `bench/record.sh` in variant mode, 10 ABBA rounds of
+`-benchtime=1s`, with `base` = the tree named below and `cand` = the branch.
+
+| candidate | branch @ head | base | files |
+| --- | --- | --- | --- |
+| R6, `take_panic_location` answered from an atomic count | `perf/r6-panic-location-fastpath` @ `11bfac7` | `d151fa3` | `r6-*.txt` |
+| R11, cache-line padding in `JobQueue` | `perf/r11-queue-padding` @ `af24b33` | `d151fa3` | `r11-*.txt` |
+| G8, submit header ids copied as arrays | `perf/g8-header-copy` @ `2bf92e1` | `d151fa3` | `g8-*.txt` |
+| R8, promote every result over 48 B on the worker | `perf/r8-promote-midsize` @ `9bf6c52` | `9224a7f` (result-size instrument) | `r8-*.txt` |
+
+```
+for f in r6-*.txt r11-*.txt g8-*.txt r8-*.txt; do
+  benchstat -ignore ld -col 'variant@(base cand)' -filter '.unit:sec/op' "$f"
+done
+```
+
+| candidate | arm | base | cand | change |
+| --- | --- | ---: | ---: | --- |
+| R6 | GussetCallNoop | 1.854µ ± 17% | 1.558µ ± 15% | ~ (p=0.105) |
+| R6 | GussetCallParallel | 3.565µ ± 11% | 3.565µ ± 18% | ~ (p=0.424) |
+| R11 | GussetCallNoop | 1.660µ ± 57% | 2.031µ ± 20% | ~ (p=0.353) |
+| R11 | GussetCallParallel | 3.399µ ± 10% | 3.655µ ± 15% | ~ (p=0.143) |
+| G8 | GussetCallNoop | 1.444µ ± 22% | 1.440µ ± 8% | ~ (p=0.631) |
+| G8 | GussetCallParallel | 3.511µ ± 13% | 3.524µ ± 4% | ~ (p=0.739) |
+| R8 | GussetSubmitWaitResult/49B | 1.871µ ± 7% | 2.170µ ± 9% | +15.95% (p=0.001) |
+| R8 | GussetSubmitWaitResult/256B | 2.159µ ± 6% | 2.426µ ± 6% | +12.37% (p=0.001) |
+| R8 | GussetSubmitWaitResult/1024B | 2.740µ ± 13% | 2.926µ ± 18% | +6.79% (p=0.050) |
+| R8 | GussetSubmitWaitResult/4096B | 3.072µ ± 5% | 3.337µ ± 22% | +8.61% (p=0.000) |
+| R8 | GussetWaitBufferResultSize/49B | 2.359µ ± 6% | 2.195µ ± 5% | -6.95% (p=0.002) |
+| R8 | GussetWaitBufferResultSize/256B | 2.667µ ± 2% | 2.478µ ± 12% | -7.11% (p=0.014) |
+| R8 | GussetWaitBufferResultSize/1024B | 3.356µ ± 12% | 2.837µ ± 12% | -15.46% (p=0.000) |
+| R8 | GussetWaitBufferResultSize/4096B | 3.940µ ± 3% | 2.768µ ± 25% | -29.73% (p=0.000) |
+
+The R8 rows not shown (0 B, 48 B and 4097 B on both arms) are `~`.
+
+- **R6, R11, G8:** no significant difference on either arm, so the change does
+  not earn its code. R11 trended slower on both arms, but not significantly.
+- **R8:** `WaitBuffer` is faster from 49 B to 4 KiB, but plain `Wait` is 7-16%
+  slower over the same range: a regression beyond the 5% bar. Its `CallResult`
+  arm was refused three times by `record.sh`'s idle floor and is not recorded.
+  G7 (PR #36) takes the `WaitBuffer` gain without touching `Wait`.
+
 ## Next
 
 In profile order, each needing its own A/B:
