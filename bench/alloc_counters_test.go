@@ -10,8 +10,8 @@ import (
 // BenchmarkBufferAllocParallel allocates and frees a small Rust-owned buffer from
 // GOMAXPROCS goroutines at once, each on a handle of its own.
 //
-// It exists to put the process-wide allocator counters (LIVE_BYTES, PEAK_BYTES and
-// ALLOC_COUNT in crates/gusset/src/ffi/alloc.rs) under parallel load. Every
+// It exists to put the process-wide allocator counters (COUNTERS, the live total,
+// allocation count and peak in crates/gusset/src/ffi/alloc.rs) under parallel load. Every
 // NewBuffer adds to the live total and the allocation count and every Free takes
 // the bytes back, whichever handle made them, so goroutines that share nothing
 // else still share those atomics. No other benchmark does that: CallParallel

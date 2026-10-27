@@ -110,6 +110,14 @@ const SATURATED: usize = usize::MAX >> 1;
 /// larger adds take the compare-and-swap path.
 const FAST_ADD_MAX: usize = usize::MAX >> 26;
 
+// The headroom `add_saturating` relies on: 2^25 adders each landing one
+// `FAST_ADD_MAX` add past `SATURATED` still leave the stored value below
+// `usize::MAX`. Changing either constant so that this fails is a compile error.
+const _: () = assert!(match (1usize << 25).checked_mul(FAST_ADD_MAX) {
+    Some(headroom) => SATURATED.checked_add(headroom).is_some(),
+    None => false,
+});
+
 /// What a reader sees for a stored value: `usize::MAX` once it has saturated.
 #[inline]
 fn reported(stored: usize) -> usize {
