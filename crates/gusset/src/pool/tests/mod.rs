@@ -5,6 +5,7 @@
 
 mod completion;
 mod engine;
+mod engine_cache;
 mod respawn;
 mod submit;
 pub(super) use respawn::{

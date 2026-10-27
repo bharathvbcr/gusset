@@ -1,7 +1,7 @@
 //! Worker threads: running a unit behind its firewall, and respawning (I2, I4, I5).
 
 use super::buffers::materialize_result;
-use super::engine::default_dispatch;
+use super::engine::EngineCache;
 use super::{lock_recover, sys, Handle, JobOutput, JobResult, TaskPayload, WorkUnit};
 use crate::ffi::guard::{drop_panic_payload, extract_panic_payload, take_panic_location};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -34,7 +34,12 @@ pub(super) struct Startup {
 ///
 /// The worker calls this under a second `catch_unwind`, so the unit — and the
 /// input payload it owns — is consumed and dropped in here, inside that firewall.
-fn execute_unit(weak: &Weak<Handle>, mut unit: WorkUnit) -> JobResult {
+///
+/// `engines` is the calling worker's own cache of resolved engines (R7). It is
+/// only ever touched inside the engine firewall below, so a handler dropped
+/// when the cache refreshes unwinds into the same `catch_unwind` as a handler
+/// that panics.
+fn execute_unit(weak: &Weak<Handle>, engines: &mut EngineCache, mut unit: WorkUnit) -> JobResult {
     unit.ctx.mark_dequeued();
 
     // Check cancellation before starting
@@ -53,7 +58,7 @@ fn execute_unit(weak: &Weak<Handle>, mut unit: WorkUnit) -> JobResult {
     // `resume_unwind` (rayon, cross-thread joins) never runs the hook, so the
     // stale entry was reported as this job's panic site.
     let _ = take_panic_location();
-    let dispatch_res = catch_unwind(AssertUnwindSafe(|| default_dispatch(&unit.ctx, slice)));
+    let dispatch_res = catch_unwind(AssertUnwindSafe(|| engines.dispatch(&unit.ctx, slice)));
 
     match dispatch_res {
         Ok(Ok(JobOutput::Bytes(out))) => JobResult::Ok(out),
@@ -388,6 +393,11 @@ impl Handle {
                         }
                     }
 
+                    // The engines this worker has resolved (R7). Local to the
+                    // thread, so a respawned worker starts with none, and
+                    // dropped with it below.
+                    let mut engines = EngineCache::default();
+
                     loop {
                         // Spin briefly, then park (see pool::queue). None once
                         // the handle closed and the queue is drained.
@@ -415,7 +425,7 @@ impl Handle {
                         // duplicate the ticket), so that ticket may stay
                         // uncompleted until Close or its deadline.
                         let result = match catch_unwind(AssertUnwindSafe(|| {
-                            execute_unit(&weak_clone, unit)
+                            execute_unit(&weak_clone, &mut engines, unit)
                         })) {
                             Ok(r) => r,
                             Err(payload) => caught_panic(&weak_clone, payload, |msg| {
@@ -462,6 +472,15 @@ impl Handle {
                         if kill_me {
                             break;
                         }
+                    }
+
+                    // Dropping the cache can run an adopter handler's `Drop`
+                    // (the last reference to a cleared handler), and that can
+                    // panic. Nothing above this frame catches it, so it is
+                    // caught here and discarded, as a panic payload is
+                    // everywhere else a worker meets one outside a job.
+                    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(engines))) {
+                        drop_panic_payload(payload);
                     }
                 })
                 .map_err(|e| format!("failed to spawn worker thread: {}", e))?;

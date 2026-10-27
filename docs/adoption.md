@@ -230,6 +230,12 @@ two parts, and an opcode picks between them (`WithOpcode` on `Open`, or
   (`DECISIONS.md`, 2026-09-30).
 - **`register_engine` refuses a duplicate opcode, and opcode 0.** Check the
   `Result` at startup. To swap a handler, call `clear_engine_handlers` first.
+- **A cleared or replaced handler is dropped when each worker that ran it next
+  takes a job or exits.** Each worker keeps the engines it has run, so a job
+  submitted after `clear_engine_handlers` or `set_engine_handler` returns never
+  runs the removed handler, but its closure (and what it captured) is released
+  late on a worker that stays idle. `Close` joins the workers, so the recipe
+  below releases it.
 - **The global engine serves opcode 0 only.** A handle opened with
   `WithOpcode(100)` never reaches it. Opcode 100 with no `register_engine(100, _)`
   is refused with `gusset: no engine handler registered for opcode 100 (submission

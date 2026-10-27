@@ -3,6 +3,7 @@
 use super::diagnostic::{diagnostic_allocated, diagnostic_dispatch, DIAG_MODE_ALLOCATED};
 use super::{IdMap, JobOutput};
 use crate::header::{JobContext, GUSSET_FLAG_DIAGNOSTIC_ENGINE};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Engine handler function type.
@@ -11,6 +12,38 @@ pub type EngineFn =
 
 static GLOBAL_ENGINE: RwLock<Option<EngineFn>> = RwLock::new(None);
 static ENGINE_REGISTRY: RwLock<Option<IdMap<u32, EngineFn>>> = RwLock::new(None);
+
+/// Counts every mutation of [`GLOBAL_ENGINE`] and [`ENGINE_REGISTRY`] (R7).
+///
+/// A worker keeps the engines it resolved in an [`EngineCache`] and trusts them
+/// for as long as this still reads the value they were resolved under, so that a
+/// job costs one load of this counter instead of a process-wide read lock and an
+/// `Arc` clone that every worker bounces between cores. The rules that keep that
+/// sound, each held by the code below:
+///
+/// - Every write to either registry bumps it, by [`publish_mutation`], while the
+///   write guard is still held and after the write itself. A reader that sees
+///   the new value therefore finds the new contents: the bump is a `Release`
+///   store the reader's `Acquire` load pairs with, and the writer holds the lock
+///   for both.
+/// - A reader tags what it resolves with the value read *under the registry's
+///   read lock*, never a value read before or after it, so an entry is never
+///   labelled with a newer generation than the map it was copied from.
+/// - It only ever grows, so a cache that reads a value equal to its own has seen
+///   no mutation since it resolved.
+static REGISTRY_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Publishes a registry write. Called with the write guard still held, as the
+/// last step of the mutation (see [`REGISTRY_GENERATION`]).
+fn publish_mutation() {
+    REGISTRY_GENERATION.fetch_add(1, Ordering::Release);
+}
+
+/// The current registry generation, for the tests that pin which calls bump it.
+#[cfg(test)]
+pub(super) fn registry_generation() -> u64 {
+    REGISTRY_GENERATION.load(Ordering::Acquire)
+}
 
 /// Sets the global engine execution handler: the one engine opcode 0 runs.
 ///
@@ -25,6 +58,11 @@ static ENGINE_REGISTRY: RwLock<Option<IdMap<u32, EngineFn>>> = RwLock::new(None)
 /// The handler serves opcode 0 only. A job whose `ctx.opcode()` is nonzero is
 /// looked up in the opcode registry and never reaches this handler; with no
 /// entry there it is refused (see [`default_dispatch`]).
+///
+/// A worker caches the handler it last ran, so the replaced one is released
+/// when its last holder drops it: at once when no worker has run it, otherwise
+/// when each worker that did next dispatches a job or exits. A job that
+/// reaches a worker after this call returns runs the new handler.
 ///
 /// The handler is process-global, shared by every handle. A panic in it poisons
 /// the handle that ran it and leaves it installed, so a handle opened after
@@ -42,6 +80,7 @@ where
 {
     let mut w = GLOBAL_ENGINE.write().unwrap_or_else(|e| e.into_inner());
     *w = Some(Arc::new(move |ctx, input| f(ctx, input).map(Into::into)));
+    publish_mutation();
 }
 
 /// Registers an engine execution handler for a specific opcode (R9).
@@ -85,6 +124,7 @@ where
         opcode,
         Arc::new(move |ctx, input| f(ctx, input).map(Into::into)),
     );
+    publish_mutation();
     Ok(())
 }
 
@@ -96,11 +136,23 @@ where
 /// handler registered` (an error result, not a crash). It clears every opcode,
 /// not the one that panicked, so the adopter reinstalls all of them. Tests use
 /// it too.
+///
+/// Once this returns, a job that reaches a worker runs no cleared handler. A
+/// job a worker is already running is not interrupted. The handlers' memory is
+/// not necessarily released by the time this returns: a worker keeps the
+/// handlers it has run in a cache and drops them when it next dispatches a job
+/// (the cache notices the clear then) or exits, so a worker that stays idle
+/// holds its last handler until then. `Close` joins the workers, so the
+/// recovery recipe above (`Close`, clear, reinstall, `Open`) releases them.
 pub fn clear_engine_handlers() {
     let mut g = GLOBAL_ENGINE.write().unwrap_or_else(|e| e.into_inner());
     *g = None;
     let mut reg = ENGINE_REGISTRY.write().unwrap_or_else(|e| e.into_inner());
     *reg = None;
+    // One bump with both guards held: a reader of either slot is blocked on its
+    // lock until this returns, so none can pair a cleared slot with the old
+    // generation.
+    publish_mutation();
 }
 
 /// Reports whether an adopter engine handler is currently registered.
@@ -119,7 +171,131 @@ pub fn has_engine_handler() -> bool {
     }
 }
 
-/// Dispatches one work unit (R9).
+/// What a worker has resolved of the opcode 0 slot.
+#[derive(Default)]
+enum GlobalSlot {
+    /// Not looked up since the cache was last reset.
+    #[default]
+    Unresolved,
+    /// Looked up and empty: caching it keeps the fail-closed and diagnostic
+    /// paths off the lock too.
+    Absent,
+    Handler(EngineFn),
+}
+
+/// The engines one worker has resolved, trusted while [`REGISTRY_GENERATION`]
+/// still reads the value they were resolved under (R7).
+///
+/// Owned by the worker's thread and passed down by `&mut`, not kept in a
+/// `thread_local!`: `clippy.toml` bans that macro for this crate, and a plain
+/// local also dies with the worker, so a respawned worker starts empty and
+/// nothing outlives the thread that built it.
+///
+/// Bounded by the registry: it holds at most the global handler and one entry
+/// per registered opcode, and a miss for an opcode that is not registered is
+/// not remembered, so a caller cycling through arbitrary opcodes cannot grow it.
+#[derive(Default)]
+pub(super) struct EngineCache {
+    generation: u64,
+    global: GlobalSlot,
+    by_opcode: IdMap<u32, EngineFn>,
+}
+
+impl EngineCache {
+    /// How many nonzero opcodes are cached, for the test that pins the bound.
+    #[cfg(test)]
+    pub(super) fn cached_opcodes(&self) -> usize {
+        self.by_opcode.len()
+    }
+
+    /// Forgets everything resolved under another generation.
+    fn adopt(&mut self, generation: u64) {
+        if self.generation != generation {
+            self.generation = generation;
+            self.global = GlobalSlot::Unresolved;
+            self.by_opcode.clear();
+        }
+    }
+
+    fn is_current(&self) -> bool {
+        self.generation == REGISTRY_GENERATION.load(Ordering::Acquire)
+    }
+
+    /// The handler registered for nonzero `opcode`: from the cache while no
+    /// registry write has happened since it was resolved, else from the registry.
+    fn registered(&mut self, opcode: u32) -> Option<&EngineFn> {
+        if !(self.is_current() && self.by_opcode.contains_key(&opcode)) {
+            let (found, generation) = {
+                let reg = ENGINE_REGISTRY.read().unwrap_or_else(|e| e.into_inner());
+                let generation = REGISTRY_GENERATION.load(Ordering::Acquire);
+                (
+                    reg.as_ref().and_then(|map| map.get(&opcode).cloned()),
+                    generation,
+                )
+            };
+            self.adopt(generation);
+            if let Some(engine) = found {
+                self.by_opcode.insert(opcode, engine);
+            }
+        }
+        self.by_opcode.get(&opcode)
+    }
+
+    /// The opcode 0 handler, with the same cache rule as [`Self::registered`].
+    fn global(&mut self) -> Option<&EngineFn> {
+        if !(self.is_current() && !matches!(self.global, GlobalSlot::Unresolved)) {
+            let (found, generation) = {
+                let slot = GLOBAL_ENGINE.read().unwrap_or_else(|e| e.into_inner());
+                (slot.clone(), REGISTRY_GENERATION.load(Ordering::Acquire))
+            };
+            self.adopt(generation);
+            self.global = match found {
+                Some(engine) => GlobalSlot::Handler(engine),
+                None => GlobalSlot::Absent,
+            };
+        }
+        match &self.global {
+            GlobalSlot::Handler(engine) => Some(engine),
+            GlobalSlot::Unresolved | GlobalSlot::Absent => None,
+        }
+    }
+
+    /// [`default_dispatch`] through this cache: the same resolution order and
+    /// the same refusals, with the registry consulted only when it has changed.
+    pub(super) fn dispatch(&mut self, ctx: &JobContext, input: &[u8]) -> Result<JobOutput, String> {
+        let opcode = ctx.opcode();
+        if opcode != 0 {
+            return match self.registered(opcode) {
+                Some(engine) => engine(ctx, input),
+                None => Err(format!(
+                    "gusset: no engine handler registered for opcode {} (submission refused)",
+                    opcode
+                )),
+            };
+        }
+
+        // 2. Opcode 0: Check global registration
+        if let Some(engine) = self.global() {
+            return engine(ctx, input);
+        }
+
+        // 3. Diagnostic engine fallback (only for opcode 0)
+        if ctx.header().flags & GUSSET_FLAG_DIAGNOSTIC_ENGINE != 0 {
+            if input.first() == Some(&DIAG_MODE_ALLOCATED) {
+                return diagnostic_allocated(ctx, input);
+            }
+            return diagnostic_dispatch(ctx, input).map(JobOutput::Bytes);
+        }
+
+        Err(
+            "gusset: no engine handler registered; call gusset::set_engine_handler() before \
+             submitting work (submission refused rather than run against a built-in engine)"
+                .to_string(),
+        )
+    }
+}
+
+/// Dispatches one work unit (R9), looking the engine up in the registries afresh.
 ///
 /// Resolution order, and why it is this order. It depends on `ctx.opcode()`.
 ///
@@ -142,42 +318,10 @@ pub fn has_engine_handler() -> bool {
 /// 3. Otherwise fail closed. Running an implicit echo-or-panic engine because
 ///    registration was forgotten, or lost a startup race, is how a payload's
 ///    first byte comes to select `panic!` in a production process.
+///
+/// Workers do not call this: each dispatches through its own `EngineCache`, which
+/// returns what this returns and reads the registries only after a registration
+/// or a clear. This is that lookup without a cache to carry between calls.
 pub fn default_dispatch(ctx: &JobContext, input: &[u8]) -> Result<JobOutput, String> {
-    let opcode = ctx.opcode();
-    if opcode != 0 {
-        let engine = {
-            let reg = ENGINE_REGISTRY.read().unwrap_or_else(|e| e.into_inner());
-            reg.as_ref().and_then(|map| map.get(&opcode).cloned())
-        };
-        if let Some(engine) = engine {
-            return engine(ctx, input);
-        }
-        return Err(format!(
-            "gusset: no engine handler registered for opcode {} (submission refused)",
-            opcode
-        ));
-    }
-
-    // 2. Opcode 0: Check global registration
-    let global_engine = {
-        let r = GLOBAL_ENGINE.read().unwrap_or_else(|e| e.into_inner());
-        r.clone()
-    };
-    if let Some(engine) = global_engine {
-        return engine(ctx, input);
-    }
-
-    // 3. Diagnostic engine fallback (only for opcode 0)
-    if ctx.header().flags & GUSSET_FLAG_DIAGNOSTIC_ENGINE != 0 {
-        if input.first() == Some(&DIAG_MODE_ALLOCATED) {
-            return diagnostic_allocated(ctx, input);
-        }
-        return diagnostic_dispatch(ctx, input).map(JobOutput::Bytes);
-    }
-
-    Err(
-        "gusset: no engine handler registered; call gusset::set_engine_handler() before \
-         submitting work (submission refused rather than run against a built-in engine)"
-            .to_string(),
-    )
+    EngineCache::default().dispatch(ctx, input)
 }
