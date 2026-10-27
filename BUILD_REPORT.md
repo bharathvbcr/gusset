@@ -4,7 +4,7 @@ Date: 2026-10-26. Base: `main` @ `d151fa3`, after the main checkout was fast-for
 
 **Scope.** The ask was "work on major optimizations and bugs, pull all changes and merge".
 - Bugs and gate defects: four PRs merged, each with a passing Matrix run on main after merge.
-- Optimizations: three candidates are implemented, adversarially tested, pushed and A/B'd, and **none is merged**. The house rule is that a speedup lands only with an interleaved `bench/record.sh` A/B. `record.sh` refuses to record below 60% CPU idle, and this host sat at 0–37% idle the whole session, from other repositories' workloads and GitPulse.app (about 140% CPU). The host went quiet at the end of the session; the A/Bs then ran and none of the three showed a significant difference, so none is merged (see "Benchmarks").
+- Optimizations: three candidates are implemented, adversarially tested, pushed and A/B'd, and **none is merged**. The house rule is that a speedup lands only with an interleaved `bench/record.sh` A/B. `record.sh` refuses to record below 60% CPU idle, and this host sat at 0–37% idle until about 18:10, from other repositories' workloads and GitPulse.app (about 140% CPU). The host went quiet at the end of the session; the A/Bs then ran and none of the three showed a significant difference, so none is merged (see "Benchmarks").
 
 **Gates.**
 - `.devcouncil/config.yaml` has `gates.mode: off`, so no `dev verify` gate ran.
