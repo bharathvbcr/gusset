@@ -1,6 +1,6 @@
 //! Dispatch cost of the diagnostic engine versus a registered handler.
 //!
-//! Two comparisons, both through the public pool API (no new C export, and this
+//! Three comparisons, all through the public pool API (no new C export, and this
 //! binary is not a staticlib):
 //!
 //! * opcode 0 on the diagnostic engine versus opcode 0 on a handler registered
@@ -11,6 +11,27 @@
 //!   a nonzero opcode is registered, is the control for it: it separates "the
 //!   registry being non-empty slows opcode 0" from "the registry lookup costs
 //!   something".
+//! * each of the engine states above again with several threads dispatching at
+//!   once (the `_parallel` arms, below).
+//!
+//! # Parallel arms
+//!
+//! The serial arms run one submitter against one worker, so the engine
+//! registries are never contended: they show what one dispatch costs, not what
+//! it costs when every worker resolves its engine at the same moment. A
+//! `_parallel` arm starts several lanes (default [`PARALLEL_THREADS`],
+//! `--threads N`), each a thread with its own [`Handle`] of one
+//! worker and its own completion pipe, and releases them together on a barrier.
+//! Each thread keeps [`PARALLEL_DEPTH`] jobs in flight so its worker stays busy.
+//! Separate handles on purpose: the only state the threads then share is the
+//! process-global engine registry (and the allocator), which is what the arm
+//! exists to load. One handle with several workers would add its single job
+//! queue to the same measurement.
+//!
+//! A parallel arm's figure is the wall time of the slowest thread divided by the
+//! round trips each thread ran, so it reads as one round trip's latency with
+//! every thread running, comparable to the serial arm of the same engine state.
+//! With no contention the two are equal; the gap is the cost of sharing.
 //!
 //! # Interleaving
 //!
@@ -34,6 +55,7 @@
 //! ```text
 //! cargo bench -p gusset --bench dispatch                  # 10 rounds
 //! cargo bench -p gusset --bench dispatch -- --rounds 20
+//! cargo bench -p gusset --bench dispatch -- --threads 8   # parallel arms only
 //! ```
 //!
 //! Record it through `bench/record.sh` (`make bench-dispatch`), not by hand:
@@ -44,6 +66,8 @@ use gusset::header::{
 };
 use gusset::pool::{Handle, INLINE_RECORD_FLAG};
 use gusset::{clear_engine_handlers, register_engine, set_engine_handler};
+use std::collections::VecDeque;
+use std::sync::Barrier;
 use std::time::{Duration, Instant};
 
 /// Round-trips timed per sample, unless `--iters` overrides it.
@@ -54,6 +78,20 @@ const MIN_ROUNDS: u32 = 10;
 
 /// The nonzero opcode the registry arms install.
 const NONZERO_OPCODE: u32 = 7;
+
+/// Threads a `_parallel` arm runs, unless `--threads` overrides it. Each is a
+/// submitter plus a worker, so the default is eight busy threads: it fits an
+/// 8-core host without oversubscribing it, and a smaller host should pass a
+/// lower N.
+const PARALLEL_THREADS: usize = 4;
+
+/// The most threads `--threads` accepts; a typo of 400 would otherwise open 400
+/// handles and report the scheduler's cost as the registry's.
+const MAX_PARALLEL_THREADS: usize = 64;
+
+/// Jobs each parallel thread keeps queued or running. A handle of one worker
+/// queues two, so this stays inside that bound with a job always waiting.
+const PARALLEL_DEPTH: usize = 2;
 
 fn fail(msg: &str) -> ! {
     eprintln!("dispatch bench: {msg}");
@@ -172,6 +210,90 @@ fn time_roundtrips(h: &Handle, fd: i32, header: CallHeader, iters: u32) -> Durat
     started.elapsed()
 }
 
+/// Submits `iters` jobs through `h` with [`PARALLEL_DEPTH`] always in flight and
+/// drains them in order. A handle of one worker completes in submission order,
+/// so `drain_one` keeps its exact-ticket check: an out-of-order completion fails
+/// the run instead of being matched loosely.
+fn pipelined_roundtrips(h: &Handle, fd: i32, header: CallHeader, iters: u32) {
+    let payload = [0u8];
+    let submit = |queue: &mut VecDeque<u64>| match h.submit(header, &payload, 0) {
+        Ok(ticket) => queue.push_back(ticket),
+        Err(err) => fail(&err),
+    };
+    let mut queue = VecDeque::with_capacity(PARALLEL_DEPTH);
+    for _ in 0..PARALLEL_DEPTH.min(iters as usize) {
+        submit(&mut queue);
+    }
+    let mut submitted = queue.len() as u32;
+    while let Some(ticket) = queue.pop_front() {
+        drain_one(h, fd, ticket);
+        if submitted < iters {
+            submit(&mut queue);
+            submitted += 1;
+        }
+    }
+}
+
+/// One thread's (handle, completion read fd) per parallel thread.
+type Lane = (std::sync::Arc<Handle>, i32);
+
+fn open_lanes(threads: usize) -> Vec<Lane> {
+    (0..threads)
+        .map(|_| {
+            let (read_fd, write_fd) = open_pipe();
+            match Handle::open(1, write_fd) {
+                Ok(handle) => (handle, read_fd),
+                Err(err) => fail(&err),
+            }
+        })
+        .collect()
+}
+
+fn close_lanes(lanes: Vec<Lane>) {
+    for (handle, read_fd) in lanes {
+        if let Err(err) = handle.close() {
+            fail(&err);
+        }
+        // SAFETY: read_fd is the pipe read end from open_pipe, still open.
+        unsafe {
+            libc::close(read_fd);
+        }
+    }
+}
+
+/// Runs every lane at once and returns the slowest lane's time for `iters` jobs.
+///
+/// Each lane warms up for 32 jobs, then all lanes meet on a barrier, so the timed
+/// loops overlap for their whole length instead of the first thread finishing
+/// before the last has started. The slowest lane is the one that was contended
+/// for longest, which is the figure a throughput claim has to answer to.
+fn time_parallel(lanes: &[Lane], header: CallHeader, iters: u32) -> Duration {
+    let start = Barrier::new(lanes.len());
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = lanes
+            .iter()
+            .map(|(handle, fd)| {
+                let start = &start;
+                scope.spawn(move || {
+                    pipelined_roundtrips(handle, *fd, header, 32);
+                    start.wait();
+                    let started = Instant::now();
+                    pipelined_roundtrips(handle, *fd, header, iters);
+                    started.elapsed()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| match worker.join() {
+                Ok(elapsed) => elapsed,
+                Err(_) => fail("a parallel lane panicked"),
+            })
+            .max()
+            .unwrap_or_default()
+    })
+}
+
 /// One measured configuration. Each arm installs the engine state it needs from
 /// scratch (the registries are process-global and dispatch prefers a registered
 /// engine to the diagnostic flag), so an arm cannot inherit what the arm before
@@ -182,13 +304,19 @@ enum Arm {
     RegisteredOpcode0,
     DiagnosticOpcode0RegistryLoaded,
     RegisteredNonzero,
+    DiagnosticOpcode0Parallel,
+    RegisteredOpcode0Parallel,
+    RegisteredNonzeroParallel,
 }
 
-const ARMS: [Arm; 4] = [
+const ARMS: [Arm; 7] = [
     Arm::DiagnosticOpcode0,
     Arm::RegisteredOpcode0,
     Arm::DiagnosticOpcode0RegistryLoaded,
     Arm::RegisteredNonzero,
+    Arm::DiagnosticOpcode0Parallel,
+    Arm::RegisteredOpcode0Parallel,
+    Arm::RegisteredNonzeroParallel,
 ];
 
 impl Arm {
@@ -198,16 +326,32 @@ impl Arm {
             Arm::RegisteredOpcode0 => "registered_opcode0",
             Arm::DiagnosticOpcode0RegistryLoaded => "diagnostic_opcode0_registry_loaded",
             Arm::RegisteredNonzero => "registered_nonzero",
+            Arm::DiagnosticOpcode0Parallel => "diagnostic_opcode0_parallel",
+            Arm::RegisteredOpcode0Parallel => "registered_opcode0_parallel",
+            Arm::RegisteredNonzeroParallel => "registered_nonzero_parallel",
         }
+    }
+
+    /// Whether the arm runs several threads at once instead of one round trip at
+    /// a time.
+    fn is_parallel(self) -> bool {
+        matches!(
+            self,
+            Arm::DiagnosticOpcode0Parallel
+                | Arm::RegisteredOpcode0Parallel
+                | Arm::RegisteredNonzeroParallel
+        )
     }
 
     /// Leaves exactly this arm's engines installed.
     fn install(self) {
         clear_engine_handlers();
         match self {
-            Arm::DiagnosticOpcode0 => {}
-            Arm::RegisteredOpcode0 => set_engine_handler(echo),
-            Arm::DiagnosticOpcode0RegistryLoaded | Arm::RegisteredNonzero => {
+            Arm::DiagnosticOpcode0 | Arm::DiagnosticOpcode0Parallel => {}
+            Arm::RegisteredOpcode0 | Arm::RegisteredOpcode0Parallel => set_engine_handler(echo),
+            Arm::DiagnosticOpcode0RegistryLoaded
+            | Arm::RegisteredNonzero
+            | Arm::RegisteredNonzeroParallel => {
                 if let Err(err) = register_engine(NONZERO_OPCODE, echo) {
                     fail(&err);
                 }
@@ -221,15 +365,17 @@ impl Arm {
             // The diagnostic flag is what routes opcode 0 to the built-in engine;
             // a registered global handler would win over it, which is why
             // `install` clears the registries first.
-            Arm::DiagnosticOpcode0 | Arm::DiagnosticOpcode0RegistryLoaded => CallHeader {
+            Arm::DiagnosticOpcode0
+            | Arm::DiagnosticOpcode0RegistryLoaded
+            | Arm::DiagnosticOpcode0Parallel => CallHeader {
                 flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE | inline,
                 ..CallHeader::default()
             },
-            Arm::RegisteredOpcode0 => CallHeader {
+            Arm::RegisteredOpcode0 | Arm::RegisteredOpcode0Parallel => CallHeader {
                 flags: inline,
                 ..CallHeader::default()
             },
-            Arm::RegisteredNonzero => CallHeader {
+            Arm::RegisteredNonzero | Arm::RegisteredNonzeroParallel => CallHeader {
                 flags: inline,
                 reserved: NONZERO_OPCODE,
                 ..CallHeader::default()
@@ -241,6 +387,7 @@ impl Arm {
 struct Config {
     rounds: u32,
     iters: u32,
+    threads: usize,
 }
 
 fn positive(flag: &str, value: Option<String>) -> u32 {
@@ -250,7 +397,7 @@ fn positive(flag: &str, value: Option<String>) -> u32 {
     }
 }
 
-/// Reads `--rounds N` and `--iters N`. cargo appends `--bench` when it runs a
+/// Reads `--rounds N`, `--iters N` and `--threads N`. cargo appends `--bench` when it runs a
 /// bench target, so that one is accepted and ignored; anything else is refused
 /// rather than skipped, because a typo'd flag would otherwise run the defaults
 /// and look like the run that was asked for.
@@ -258,6 +405,7 @@ fn parse_args() -> Config {
     let mut cfg = Config {
         rounds: MIN_ROUNDS,
         iters: DEFAULT_ITERS,
+        threads: PARALLEL_THREADS,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -265,8 +413,9 @@ fn parse_args() -> Config {
             "--bench" => {}
             "--rounds" => cfg.rounds = positive("--rounds", args.next()),
             "--iters" => cfg.iters = positive("--iters", args.next()),
+            "--threads" => cfg.threads = positive("--threads", args.next()) as usize,
             other => fail(&format!(
-                "unknown argument {other}; usage: dispatch [--rounds N] [--iters N]"
+                "unknown argument {other}; usage: dispatch [--rounds N] [--iters N] [--threads N]"
             )),
         }
     }
@@ -275,6 +424,12 @@ fn parse_args() -> Config {
             "--rounds {} is below the floor of {MIN_ROUNDS}: fewer rounds cannot separate an \
              order effect from a difference between arms",
             cfg.rounds
+        ));
+    }
+    if cfg.threads > MAX_PARALLEL_THREADS {
+        fail(&format!(
+            "--threads {} is above the ceiling of {MAX_PARALLEL_THREADS}",
+            cfg.threads
         ));
     }
     cfg
@@ -298,11 +453,20 @@ fn main() {
         Err(err) => fail(&err),
     };
 
+    let lanes = open_lanes(cfg.threads);
+    let measure = |arm: Arm| {
+        if arm.is_parallel() {
+            time_parallel(&lanes, arm.header(), cfg.iters)
+        } else {
+            time_roundtrips(&handle, read_fd, arm.header(), cfg.iters)
+        }
+    };
+
     // Round 0: every arm once, discarded. An idle machine is not yet at a steady
     // clock, and the first arm to run would otherwise pay for the ramp.
     for arm in ARMS {
         arm.install();
-        let _ = time_roundtrips(&handle, read_fd, arm.header(), cfg.iters);
+        let _ = measure(arm);
     }
 
     let mut samples: Vec<Vec<Duration>> = vec![Vec::new(); ARMS.len()];
@@ -316,12 +480,13 @@ fn main() {
         ));
         for arm in order {
             arm.install();
-            let elapsed = time_roundtrips(&handle, read_fd, arm.header(), cfg.iters);
+            let elapsed = measure(arm);
             samples[arm as usize].push(elapsed);
         }
     }
     clear_engine_handlers();
 
+    close_lanes(lanes);
     if let Err(err) = handle.close() {
         fail(&err);
     }
