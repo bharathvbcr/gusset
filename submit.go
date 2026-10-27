@@ -33,7 +33,8 @@ func (s *handleState) call(ctx context.Context, in []byte) ([]byte, error) {
 
 // CallBuffer is Call for a Rust-owned input buffer, returning an output buffer:
 // the whole zero-copy round trip in one call. The output is Rust-owned when it
-// is over 4 KiB and 64-byte aligned Go memory otherwise, as for WaitBuffer.
+// is over 4 KiB or is the engine's own buffer, and 64-byte aligned Go memory
+// otherwise, as for WaitBuffer.
 //
 // Call cannot express this. Its input is a []byte, and a []byte over 4 KiB is
 // refused precisely because copying it would run on the cgo thread — so the

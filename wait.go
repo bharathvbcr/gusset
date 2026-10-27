@@ -25,10 +25,12 @@ func (h *Handle) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
 // WaitBuffer waits for completion of an asynchronously submitted job ticket,
 // returning a *Buffer that holds the result.
 //
-// A result larger than 4 KiB is a zero-copy *Buffer backed by Rust-owned
-// memory (ID is non-zero). A result of 4 KiB or less is carried in 64-byte
-// aligned Go memory (ID is 0): it owns nothing in Rust, so it is not counted
-// in Stats, and passing it to Submit or CallBuffer sends its bytes inline.
+// A result of 4 KiB or less that the engine returned as bytes is carried in
+// 64-byte aligned Go memory (ID is 0): it owns nothing in Rust, so it is not
+// counted in Stats, and passing it to Submit or CallBuffer sends its bytes
+// inline. A result over 4 KiB, or one the engine returned in a Rust buffer
+// of its own (JobOutput::Buffer or JobOutput::Allocated, whatever its size),
+// is a zero-copy *Buffer backed by Rust-owned memory (ID is non-zero).
 // Bytes, Free and the closed-handle behaviour are the same for both.
 //
 // The caller is responsible for calling buf.Free() when done. For a
@@ -83,7 +85,7 @@ var testHookBeforeResultFill func(*handleState)
 // just before Wait copies a take buffer out of Rust memory or WaitBuffer wraps
 // it. Those are the two places the library still reads a Rust result that
 // reached the waiter (a result over 4 KiB, which the worker promoted onto a
-// buffer). Close frees that buffer under cgoMu held exclusively (I1), so a
+// buffer, or an engine's own buffer of any size). Close frees that buffer under cgoMu held exclusively (I1), so a
 // Close started here must not be able to finish until the hook returns.
 var testHookBeforeTakeView func(*handleState)
 

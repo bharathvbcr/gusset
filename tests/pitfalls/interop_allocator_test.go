@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math/rand"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -81,6 +82,20 @@ func TestInterop_AllocatorBackedOutputAllPaths(t *testing.T) {
 		checkPattern(t, "WaitBuffer", b, n, seed+1)
 		if !aligned64(b) {
 			t.Fatalf("WaitBuffer %d: result not 64-byte aligned", n)
+		}
+		// Which memory carries the result depends on how the engine returned
+		// it, not on its size alone: an output adopted from BufferAlloc is the
+		// engine's own Rust buffer at every size, while the same bytes returned
+		// as a plain vector are Go memory up to 4 KiB (WaitBuffer's godoc).
+		switch os.Getenv("GUSSET_EXPECT_ALLOCATOR_API") {
+		case "1":
+			if buf.ID() == 0 {
+				t.Fatalf("WaitBuffer %d: an engine-owned output came back as Go memory (ID 0)", n)
+			}
+		case "0":
+			if wantGo := n <= 4096; wantGo != (buf.ID() == 0) {
+				t.Fatalf("WaitBuffer %d: ID() = %d, want Go memory (ID 0) = %v", n, buf.ID(), wantGo)
+			}
 		}
 		runtime.KeepAlive(buf)
 		if err := buf.Free(); err != nil {

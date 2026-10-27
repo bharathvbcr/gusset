@@ -18,8 +18,8 @@ import (
 const MaxBufferBytes = 1 << 30
 
 // Buffer wraps a 64-byte aligned buffer (R16): Rust-owned memory (ID is
-// non-zero), or, for a result of 4 KiB or less from WaitBuffer or CallBuffer,
-// Go memory (ID is 0).
+// non-zero), or, for a WaitBuffer or CallBuffer result of 4 KiB or less that
+// the engine returned as bytes, Go memory (ID is 0).
 type Buffer struct {
 	// mu covers freed and data together. Free writes both; Bytes reads both.
 	// An atomic on freed alone still races the slice header: Bytes can load
