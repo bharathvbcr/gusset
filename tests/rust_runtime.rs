@@ -588,8 +588,14 @@ fn shared_ticket_reader_reassembles_a_split_ticket_and_refuses_a_torn_one() {
 ///
 /// Diagnostic mode 5 checks once per 10 ms unit and runs `input[1]` units: 200
 /// units is 2 s of work against a 60 ms deadline. The result must be
-/// `Cancelled(DeadlineExceeded)`, delivered within one unit of the deadline,
-/// not after the job ran out.
+/// `Cancelled(DeadlineExceeded)`, not the `Ok` of a job that ran out.
+///
+/// This test asserts no upper bound on the elapsed time: a wall-clock margin is
+/// a statement about the host, and a stall longer than it failed a correct
+/// implementation. How promptly the deadline is noticed is judged by what the
+/// engine ran, in `tests/rust_deadline.rs`
+/// (`a_deadline_stops_a_multi_unit_job_between_units`), which counts the units
+/// a deadline lets start and so cannot be pushed over its bound by load.
 #[test]
 fn deadline_alone_stops_a_multi_unit_job_within_one_unit() {
     use gusset::header::CancelReason;
@@ -619,11 +625,6 @@ fn deadline_alone_stops_a_multi_unit_job_within_one_unit() {
         elapsed >= DEADLINE,
         "stopped after {elapsed:?}, before the {DEADLINE:?} deadline"
     );
-    // One 10 ms unit past the deadline plus scheduler slack; the full job is 2 s.
-    assert!(
-        elapsed < DEADLINE + Duration::from_millis(400),
-        "took {elapsed:?} to notice a {DEADLINE:?} deadline: the deadline is not enforced in Rust (I3)"
-    );
     assert!(handle.close().is_ok());
     unsafe { libc::close(r) };
 }
@@ -644,10 +645,12 @@ fn deadline_edges_expire_at_once_or_never_early() {
         flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
         ..Default::default()
     };
-    let started = Instant::now();
+    // Refused before any unit runs is judged by whether the engine was entered,
+    // in `tests/rust_deadline.rs` (`an_expired_deadline_never_enters_the_engine`),
+    // not by an elapsed-time bound that a stalled host can exceed. The result
+    // here is `Cancelled(DeadlineExceeded)` either way.
     let t1 = handle.submit(expired, &[5, 200], 0).must("submit expired");
     assert_eq!(read_ticket_within(r, Duration::from_secs(5)), Some(t1));
-    assert!(started.elapsed() < Duration::from_millis(400));
     assert!(matches!(
         handle.take(t1).must("take"),
         JobResult::Cancelled(CancelReason::DeadlineExceeded)

@@ -50,6 +50,12 @@ path = "../../tests/constants_match.rs"
 name = "rust_runtime"
 path = "../../tests/rust_runtime.rs"
 
+# Separate binary: registers engines in the process-global opcode registry,
+# which rust_runtime promises never to touch.
+[[test]]
+name = "rust_deadline"
+path = "../../tests/rust_deadline.rs"
+
 # Separate binary: registers a process-global engine handler whose panic
 # payloads panic again on drop.
 [[test]]
