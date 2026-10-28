@@ -1,6 +1,6 @@
 # BUILD_REPORT
 
-Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End of wave 1: `main` @ `a9cb808`. End of wave 2: `main` @ `6fe980a`. End of wave 3: `main` @ `8ef9659`. End of wave 4: `main` @ `8cf859f`. "Wave 4", "Wave 3" and "Wave 2" supersede the scope lines below. The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
+Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End of wave 1: `main` @ `a9cb808`. End of wave 2: `main` @ `6fe980a`. End of wave 3: `main` @ `8ef9659`. End of wave 4: `main` @ `8cf859f`. End of wave 5: `main` @ `1f92e09`. "Wave 5", "Wave 4", "Wave 3" and "Wave 2" supersede the scope lines below. The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
 
 **Scope.** The ask was "work on major optimizations and bugs, pull all changes and merge".
 - Bugs and gate defects: four PRs merged, each with a passing Matrix run on main after merge.
@@ -9,6 +9,97 @@ Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`,
 **Gates.**
 - `.devcouncil/config.yaml` has `gates.mode: off`, so no `dev verify` gate ran.
 - Done was not requested for any card. Every card that moved went to `review`, `gitpulse_complete_task` returned `verification: null`, and `held_for_review` was false.
+
+## Wave 5 (2026-10-27 to 2026-10-28)
+
+Asked for as "commit and merge all branches and delete old and stale branches", then "bump and close issue", then "Next". End: `main` @ `1f92e09`. Where wave 5 changed a conclusion in the sections below, this section supersedes it.
+
+**Branches.**
+- Nothing was left to merge: no PR was open, and main at `41fd0f8` was green.
+- The five rejected `perf/*` branches were the only old ones. You chose to tag them and then delete them. Each tag was checked with `git ls-remote` to point at its branch's tip before anything was deleted:
+
+  | Tag | Commit |
+  | --- | --- |
+  | `archive/perf/g8-header-copy` | `2bf92e1` |
+  | `archive/perf/r11-queue-padding` | `af24b33` |
+  | `archive/perf/r6-panic-location-fastpath` | `11bfac7` |
+  | `archive/perf/r7-engine-cache` | `12d6178` |
+  | `archive/perf/r8-promote-midsize` | `9bf6c52` |
+
+- Remote heads after the wave: `main` only.
+- `bench/crossover-1us-10us` is kept. It is the local worktree for the crossover recording, has no commits of its own, and has never been pushed.
+
+**Merged.** Each PR's final head passed all 27 checks, and Codex's review state reads `has_any_findings: false`.
+
+| PR | Merge | Card | What | Main Matrix / adopter after merge |
+| --- | --- | --- | --- | --- |
+| #42 | `e561435` | ft-d3d3888d | libc 0.2.191 in both lockfiles; `pool::sys` uses `libc::F_SETNOSIGPIPE` and `libc::F_GETNOSIGPIPE` | 40593860133 / 40593860031 |
+| #43 | `1f92e09` | ft-a0485e94 | The deadline and shutdown-drain tests judge what the engine did, not a wall-clock margin | 40623838124 / 40623838214 |
+
+- **#42.** You approved the bump this wave.
+  - `Cargo.lock` moves from 0.2.189 and `fuzz/Cargo.lock` from 0.2.190. Both `Cargo.toml` files still say `"0.2"`.
+  - libc 0.2.191 defines both Apple constants with the values gusset had hard-coded, 73 and 74 (`src/unix/bsd/apple/mod.rs:2658-2659`), so the local copies are gone.
+  - No behaviour changes, so no new test. The existing `pool::sys` tests (17 on macOS) cover the path.
+  - `cargo deny` passed on both workspaces.
+  - Cursor posted an APPROVED review on `5b6c4a4` that reads: "Approved. Cursor Bugbot completed successfully with no findings that require human review, and no approval policy requires extra review." #43 got no Cursor review; only its check runs passed.
+- **#43.** Items 2 and 4 of ft-a0485e94.
+  - The Rust deadline test now counts engine units (at most `deadline / unit`). A stall can only lower that count.
+  - The shutdown-drain tests treat the instant before `Submit`, plus diagnostic mode 17's 250 ms hold, as a lower bound on how long the job runs. An unexpected answer before that point fails. After it, Rust reruns the attempt, and Go calls `hostprobe.Skip`, which is fatal in CI.
+  - Each new test fails on a planted mutation. Two of those mutations passed the old tests: a deadline noticed one unit late, and a removed pre-start check.
+  - A separate adversarial pass found one narrow false pass, which no change inside the test can close. A stall of about 230 ms or more inside `Shutdown` can let an unclamped call pass the Go clamp check. It is now written down as an accepted gap, and `boundary_inputs_internal_test.go` stays the deterministic check on the clamp.
+  - Items 1, 3, 5 and 7 were already on main; item 6 belongs to ft-c689767b.
+
+**Issue #4: closed as completed, on your go.**
+- The closing comment maps each failed nightly job to its fix commit: d78c6bc, 7e48959, 7c6aded, de70bd4, 8a456f1 and ca5759d (#10), and 4c9c9ba (#12).
+- It cites three consecutive scheduled main nightlies: 40179055849, 40303616113 and 40482856845. Each was checked job by job: all seven jobs succeeded, including both heap-hammer legs, and only "Open an issue on failure" was skipped, as designed.
+- No open GitHub issues remain.
+
+**Board.**
+- **ft-d3d3888d and ft-a0485e94** moved to review.
+- **Evidence sweep.** Eight review or in-progress cards had criteria still marked PENDING or PARTIAL, waiting on evidence that now exists. Each now cites the run id or commit:
+
+  | Card | Criteria now met |
+  | --- | --- |
+  | ft-97faf4f4 | M2 nightlies; issue #4 |
+  | ft-987c804c | Miri bounded and 8 min; heap legs |
+  | gs-boundary-defence-in-depth | cargo-fuzz ×3 |
+  | ft-7e821586 | stderr tail and upload (#28) |
+  | ft-c9335ebc | both items |
+  | ft-83151a08 | survey (#32); gusset-check not run, with the reason recorded |
+  | ft-197f6d41 | all three, except gap 6, which is GitHub's |
+  | ft-8a8279f5 | candidate A/Bs, R8, invariants, R7 ordering |
+
+- **Left open, as written on each card:**
+  - ft-7e821586: the three-week asan-rust window ends 2026-11-16.
+  - ft-987c804c: the planted-cancel report and the 2026-10-18 crash cause.
+  - ft-83151a08: no test or counter yet proves the macOS reader parks in kqueue. The doc's evidence is that the jobs run.
+  - ft-8a8279f5: the crossover data.
+- **New card ft-b58e1c66 (`gs-record-test-cleanup-race`).** On this report's own PR (#44, docs only), "Unit & Pitfalls (ubuntu-24.04-arm)" failed in the benchmark recorder self-test.
+  - Every case passed, then `rm -rf` of the scratch tree failed with "Directory not empty" (run 40637572850, job 122647965034).
+  - `cleanup()` in `bench/record_test.sh` signals helper processes it never waits for, then removes the tree they may still write to.
+  - The job was rerun. The card is in backlog.
+- **Statuses:** no card was moved to done. Done is Manvi's evidence gate, and `gates.mode` is off.
+
+**ft-8a8279f5 crossover: still not recorded.**
+- The idle gate started at 18:39 UTC on 2026-10-27 and needs three consecutive samples at or above 70% idle.
+- It saw one such sample (76.6% at 02:38 UTC) and no run of three.
+- Its 12-hour limit ends at about 06:39 UTC on 2026-10-28.
+- The PR that lands the data must replace the `go1.27.2` files (see wave 4).
+
+**Process.**
+- #43 went through the brief's full loop: a Sonnet implementing lane, a separate Sonnet adversarial pass, then my review.
+- #42 was a lockfile bump with no behaviour change, and had no separate adversarial lane.
+- GitPulse warned that its write gate would refuse edits under `.claude/worktrees/`, the path where agent worktrees live. The review fix to `DECISIONS.md` in #43's worktree went through only because the session runs in bypass mode. Agent worktrees belong outside the protected path.
+- This session's DevMap MCP server was started before #40 and still has the old `--root` pin, so it refused the worktree path. The fix takes effect when a session starts.
+
+**The main checkout has someone else's uncommitted work.**
+- Between 21:05 and 21:07 CDT on 2026-10-27, something other than this session edited `BUILD_REPORT.md` (a separate "Wave 5" section), `CHANGELOG.md`, `DECISIONS.md` and `docs/benchmarks.md`.
+- GitPulse saw no other agent session in this repository.
+- On your instruction those edits are untouched. So the main checkout stays at `e561435` until they are committed or set aside, and their `BUILD_REPORT.md` change will conflict with this section.
+
+**Still yours.**
+- ft-6867f957, the iceoryx2 Go binding follow-up, assigned to you: its due date (2026-10-26) has passed.
+- Carried over: ft-415ddf1f, the apk pins and the floating toolchain.
 
 ## Wave 4 (2026-10-27)
 
@@ -250,7 +341,7 @@ Every PR went through implementation and review (Opus plus the Cursor and Codex 
    - #24's adversarial pass was the same.
 
 ## Owner decisions pending
-1. **libc bump (ft-d3d3888d).** libc 0.2.191 (2026-10-16) ships Apple `F_SETNOSIGPIPE` (rust-lang/libc#5609, merged 2026-10-11), so the card's first criterion is met; the card now records this (revision 4, still backlog). The card says "dependency change: ask first". The change is `Cargo.lock` 0.2.189 → 0.2.191, use `libc::F_SETNOSIGPIPE`, and drop the local constant in `pool/sys.rs`.
+1. **libc bump (ft-d3d3888d): resolved in wave 5.** You approved it and it merged as #42; what follows is the decision as it was put to you. libc 0.2.191 (2026-10-16) ships Apple `F_SETNOSIGPIPE` (rust-lang/libc#5609, merged 2026-10-11), so the card's first criterion is met; the card now records this (revision 4, still backlog). The card says "dependency change: ask first". The change is `Cargo.lock` 0.2.189 → 0.2.191, use `libc::F_SETNOSIGPIPE`, and drop the local constant in `pool/sys.rs`.
 2. **G7 (wave 2): resolved in wave 3.** You approved it and it merged as #36; the text below is the decision as it was put to you. It is a significant win on small `WaitBuffer` results with no significant regression. What merging it changes:
    - **Adopters see two changes:** `Buffer.ID()` returns 0 for a result of 4 KiB or less, and `Stats().LiveBytes` stops counting these results.
      - The bytes now live on the Go heap, where `GOMEMLIMIT` and the GC already see them, so I1's two-heap accounting stays whole.
@@ -260,7 +351,7 @@ Every PR went through implementation and review (Opus plus the Cursor and Codex 
      - The rewritten test still forces the race and checks that the result is intact, lives in Go memory, and can be freed. Its comment explains the change.
    - **Where the decision is recorded:** the branch carries the godoc, `docs/adoption.md`, CHANGELOG and a DECISIONS row. It is not rebased on current main.
 3. **Benchmarking needs a quiet host.** Wave 2 found one quiet window, and five of eleven recordings were still refused. In wave 3, 15 attempts were refused before the seven Go recordings went through. R8's CallResult arm is still unrecorded; R7 and R10 were A/B'd in wave 3.
-4. **Issue #4 and M2.** The nightlies on 2026-10-25 and 2026-10-26 were green on `d151fa3`, and the third (40482856845, 2026-10-27, on `fa92246`) was green in every job. Closing issue #4, with a comment naming the fix commits, is yours.
+4. **Issue #4 and M2: resolved in wave 5.** You gave the go and the issue is closed; what follows is as it was put to you. The nightlies on 2026-10-25 and 2026-10-26 were green on `d151fa3`, and the third (40482856845, 2026-10-27, on `fa92246`) was green in every job. Closing issue #4, with a comment naming the fix commits, is yours.
 5. **Carried over:**
    - ft-415ddf1f: unpinned apk packages in the musl images, and `--default-toolchain stable` floating, which matches the "track stable" toolchain policy.
    - iceoryx2-go PR #1 size versus the IP-review threshold (AUDIT_REPORT decision 3).
