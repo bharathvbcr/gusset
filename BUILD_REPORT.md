@@ -80,10 +80,19 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
   - The job was rerun. The card is in backlog.
 - **Statuses:** no card was moved to done. Done is Manvi's evidence gate, and `gates.mode` is off.
 
-**ft-8a8279f5 crossover: still not recorded.**
-- The idle gate started at 18:39 UTC on 2026-10-27 and needs three consecutive samples at or above 70% idle.
-- It saw one such sample (76.6% at 02:38 UTC) and no run of three.
-- Its 12-hour limit ends at about 06:39 UTC on 2026-10-28.
+**ft-8a8279f5 crossover: not recorded. The gate ran out of attempts.**
+- The idle gate started at 18:39 UTC on 2026-10-27. It needs three consecutive samples at or above 70% idle, then runs `make bench-crossover`, at most four times.
+- **Correction (2026-10-28).** This section first said the gate never saw three quiet samples in a row. That was wrong: it was written from the end of the gate log only. The gate fired four times, and `record.sh` refused each run:
+
+  | Attempt | Gate fired (UTC) | Why `record.sh` refused it |
+  | --- | --- | --- |
+  | 1 | 23:46 | 40.65% idle after the last arm, below its 60% floor |
+  | 2 | 00:24 | 28.58% idle after the last arm |
+  | 3 | 04:05 | another benchmark was running before the start: another session's GitPulse `cargo bench --bench alerts_worker_throughput` |
+  | 4 | 06:20 | 54.92% idle after the last arm |
+
+- The gate then stopped with "FAILED 4 attempts". Nothing was recorded, and the worktree is unchanged.
+- Three quiet minutes before a run do not keep the host quiet for its length. Recording needs a window with the other workloads paused, not a longer gate.
 - The PR that lands the data must replace the `go1.27.2` files (see wave 4).
 
 **Process.**
