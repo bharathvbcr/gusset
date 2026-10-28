@@ -74,6 +74,10 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
   - ft-987c804c: the planted-cancel report and the 2026-10-18 crash cause.
   - ft-83151a08: no test or counter yet proves the macOS reader parks in kqueue. The doc's evidence is that the jobs run.
   - ft-8a8279f5: the crossover data.
+- **New card ft-b58e1c66 (`gs-record-test-cleanup-race`).** On this report's own PR (#44, docs only), "Unit & Pitfalls (ubuntu-24.04-arm)" failed in the benchmark recorder self-test.
+  - Every case passed, then `rm -rf` of the scratch tree failed with "Directory not empty" (run 40637572850, job 122647965034).
+  - `cleanup()` in `bench/record_test.sh` signals helper processes it never waits for, then removes the tree they may still write to.
+  - The job was rerun. The card is in backlog.
 - **Statuses:** no card was moved to done. Done is Manvi's evidence gate, and `gates.mode` is off.
 
 **ft-8a8279f5 crossover: still not recorded.**
