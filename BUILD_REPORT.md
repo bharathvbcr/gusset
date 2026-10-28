@@ -1,6 +1,6 @@
 # BUILD_REPORT
 
-Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End of wave 1: `main` @ `a9cb808`. End of wave 2: `main` @ `6fe980a`. End of wave 3: `main` @ `8ef9659`. End of wave 4: `main` @ `8cf859f`. End of wave 5: `main` @ `326e002`. "Wave 5", "Wave 4", "Wave 3" and "Wave 2" supersede the scope lines below. The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
+Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End of wave 1: `main` @ `a9cb808`. End of wave 2: `main` @ `6fe980a`. End of wave 3: `main` @ `8ef9659`. End of wave 4: `main` @ `8cf859f`. End of wave 5: `main` @ `52745db`. "Wave 5", "Wave 4", "Wave 3" and "Wave 2" supersede the scope lines below. The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
 
 **Scope.** The ask was "work on major optimizations and bugs, pull all changes and merge".
 - Bugs and gate defects: four PRs merged, each with a passing Matrix run on main after merge.
@@ -12,7 +12,7 @@ Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`,
 
 ## Wave 5 (2026-10-27 to 2026-10-28)
 
-Asked for as "commit and merge all branches and delete old and stale branches", then "bump and close issue", then "Next". End: `main` @ `326e002`. Where wave 5 changed a conclusion in the sections below, this section supersedes it.
+Asked for as "commit and merge all branches and delete old and stale branches", then "bump and close issue", then "Next". End: `main` @ `52745db`. Where wave 5 changed a conclusion in the sections below, this section supersedes it.
 
 **Branches.**
 - Nothing was left to merge: no PR was open, and main at `41fd0f8` was green.
@@ -38,6 +38,7 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
 | #44 | `has_any_findings: false` on `e117274`, the first head; nothing on the two later docs commits | none posted; Bugbot's inline finding is fixed and answered |
 | #45 | none posted | APPROVED: "Approved. Cursor Bugbot completed successfully with no findings that need human review, and no approval policy requires a human reviewer. This automation had no prior approval on the current head." |
 | #46 | "We couldn't complete this review." The account had reached its Codex usage limit; the state field nevertheless reads `has_any_findings: true` | APPROVED: "Approved. Cursor Bugbot completed successfully and reported no findings that need human review; no approval policy requires a human pass on these test-harness and changelog changes." |
+| #48 | "We couldn't complete this review." Same usage limit; the state field reads `has_any_findings: true` | APPROVED: "Approved. Cursor Bugbot completed successfully on the current head with no review comment findings, and no approval policy requires human review. This automation had no prior approval to keep or dismiss." |
 
 | PR | Merge | Card | What | Main Matrix / adopter after merge |
 | --- | --- | --- | --- | --- |
@@ -45,6 +46,7 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
 | #43 | `1f92e09` | ft-a0485e94 | The deadline and shutdown-drain tests judge what the engine did, not a wall-clock margin | 40623838124 / 40623838214 |
 | #44, #45 | `3d3f73f`, `5fff810` | — | This report, then a correction of its crossover section | #44: 40640847299 / 40640847215; #45: 40645801390 / 40645801584 |
 | #46 | `326e002` | ft-b58e1c66 | `record_test.sh` cleanup reaps what it started, and only what it started, before removing its scratch tree | 40648589935 / 40648589918. The Matrix's first attempt failed in macOS Unit & Pitfalls on an `internal/isolate` test that #46 does not touch (filed as ft-735a4757); attempt 2 passed |
+| #48 | `52745db` | ft-735a4757 | The steady-frames read test tells a host stall from a lost frame | 40658526056 / 40658526577 |
 
 - **#42.** You approved the bump this wave.
   - `Cargo.lock` moves from 0.2.189 and `fuzz/Cargo.lock` from 0.2.190. Both `Cargo.toml` files still say `"0.2"`.
@@ -67,8 +69,25 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
     - A per-pid `forget_pid` replaces the `PIDS=` resets, which ends a leak of two `python3` processes per `zombie_case` run.
   - **Adversarial pass.** It found five breaks in the first fix, including a KILL escalation that could hit a reused pid. All five went back to the lane and were fixed. My review added one more fix: `note_pid` no longer fails on a process that exits between its two reads.
   - **Main CI after the merge.** The first Matrix attempt (run 40648589935) failed in "Unit & Pitfalls (macos-latest)" on `TestRead_SteadyFramesAfterTheProbeAreAllDelivered`: ticket 1 arrived, and tickets 2–20 all got "worker process exited (read |0: i/o timeout)". It is the only failure of that test in the last 60 failed Matrix runs. The rerun passed.
-    - Either a host stall or a probe that doesn't restart on progress fits the log. The investigation is filed as ft-735a4757 (priority 1) and is in progress.
+    - Either a host stall or a probe that doesn't restart on progress fits the log. It was filed as ft-735a4757 (priority 1) and fixed in #48 (see below).
   - **Tests.** Four new self-test cases, each failing on the cleanup it replaces. The full suite passed 7 of 7 locally (33 `ok` lines) with 0 leftover helpers, and passed in both Linux CI legs.
+- **#48.** ft-735a4757, the `internal/isolate` failure on main after #46.
+  - **Cause: a host stall, not a product bug.**
+    - The failing run ended at 0.07 s with only frame 1 delivered; a passing run takes 0.12–0.14 s. A probe that is never re-armed would still let about 9 frames through.
+    - A harness that froze the test binary with SIGSTOP for 70 ms every 1.3 s reproduced CI's signature in 28 of 400 runs. CPU burners alone did not.
+  - **Fix: test only.** The test now records when each write began and when the reader finished, and classifies each attempt:
+    - **Rerun as a host stall:** the writer's own gap was at least half a probe, or a whole probe of silence followed the final frame. After 10 stalled attempts the test calls `hostprobe.Skip`, which fails in CI.
+    - **Fail:** mid-stream silence with the writer on schedule, or the reader dying inside a probe.
+  - **Adversarial pass.** One break went back to the lane. The first version excused mid-stream silence as a stall, which hid an intermittent reader stall: 60/60 passed before the fix, and 20–25 of 60 fail after it.
+  - **Known limit,** stated in the test and the CHANGELOG: a re-arm window shortened to about 12–50 ms is invisible, as it was to the old test.
+  - **Runs:**
+
+    | Run | Result |
+    | --- | --- |
+    | `-count=300` | 300/300 pass |
+    | `-race` | 50/50 pass |
+    | Freeze harness | 400/400 pass, 36 writer-gap reruns |
+    | Re-arm-deleted mutant | 100/100 fail |
 
 **Issue #4: closed as completed, on your go.**
 - The closing comment maps each failed nightly job to its fix commit: d78c6bc, 7e48959, 7c6aded, de70bd4, 8a456f1 and ca5759d (#10), and 4c9c9ba (#12).
