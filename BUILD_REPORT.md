@@ -40,7 +40,8 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
   - `Cargo.lock` moves from 0.2.189 and `fuzz/Cargo.lock` from 0.2.190. Both `Cargo.toml` files still say `"0.2"`.
   - libc 0.2.191 defines both Apple constants with the values gusset had hard-coded, 73 and 74 (`src/unix/bsd/apple/mod.rs:2658-2659`), so the local copies are gone.
   - No behaviour changes, so no new test. The existing `pool::sys` tests (17 on macOS) cover the path.
-  - `cargo deny` passed on both workspaces. Cursor approved.
+  - `cargo deny` passed on both workspaces.
+  - Cursor posted an APPROVED review on `5b6c4a4` that reads: "Approved. Cursor Bugbot completed successfully with no findings that require human review, and no approval policy requires extra review." #43 got no Cursor review; only its check runs passed.
 - **#43.** Items 2 and 4 of ft-a0485e94.
   - The Rust deadline test now counts engine units (at most `deadline / unit`). A stall can only lower that count.
   - The shutdown-drain tests treat the instant before `Submit`, plus diagnostic mode 17's 250 ms hold, as a lower bound on how long the job runs. An unexpected answer before that point fails. After it, Rust reruns the attempt, and Go calls `hostprobe.Skip`, which is fatal in CI.
