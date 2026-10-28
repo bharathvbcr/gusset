@@ -1,6 +1,6 @@
 # BUILD_REPORT
 
-Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End of wave 1: `main` @ `a9cb808`. End of wave 2: `main` @ `6fe980a`. End of wave 3: `main` @ `8ef9659`. End of wave 4: `main` @ `8cf859f`. End of wave 5: `main` @ `1f92e09`. "Wave 5", "Wave 4", "Wave 3" and "Wave 2" supersede the scope lines below. The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
+Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End of wave 1: `main` @ `a9cb808`. End of wave 2: `main` @ `6fe980a`. End of wave 3: `main` @ `8ef9659`. End of wave 4: `main` @ `8cf859f`. End of wave 5: `main` @ `326e002`. "Wave 5", "Wave 4", "Wave 3" and "Wave 2" supersede the scope lines below. The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
 
 **Scope.** The ask was "work on major optimizations and bugs, pull all changes and merge".
 - Bugs and gate defects: four PRs merged, each with a passing Matrix run on main after merge.
@@ -12,7 +12,7 @@ Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`,
 
 ## Wave 5 (2026-10-27 to 2026-10-28)
 
-Asked for as "commit and merge all branches and delete old and stale branches", then "bump and close issue", then "Next". End: `main` @ `1f92e09`. Where wave 5 changed a conclusion in the sections below, this section supersedes it.
+Asked for as "commit and merge all branches and delete old and stale branches", then "bump and close issue", then "Next". End: `main` @ `326e002`. Where wave 5 changed a conclusion in the sections below, this section supersedes it.
 
 **Branches.**
 - Nothing was left to merge: no PR was open, and main at `41fd0f8` was green.
@@ -27,14 +27,16 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
   | `archive/perf/r8-promote-midsize` | `9bf6c52` |
 
 - Remote heads after the wave: `main` only.
-- `bench/crossover-1us-10us` is kept. It is the local worktree for the crossover recording, has no commits of its own, and has never been pushed.
+- `bench/crossover-1us-10us`, the local worktree for the crossover recording, was removed with its branch after the gate stopped. It had no commits of its own and was never pushed.
 
-**Merged.** Each PR's final head passed all 27 checks, and Codex's review state reads `has_any_findings: false`.
+**Merged.** Every PR's final head passed all its CI checks. Codex reviewed #42 and #43 with no findings, and #44's first head (`e117274`) also with no findings. It posted nothing on #44's two later docs commits or on #45. On #46 its review failed, "We couldn't complete this review", because the account reached its Codex usage limit, so #46 had Cursor's approval and CI, not Codex.
 
 | PR | Merge | Card | What | Main Matrix / adopter after merge |
 | --- | --- | --- | --- | --- |
 | #42 | `e561435` | ft-d3d3888d | libc 0.2.191 in both lockfiles; `pool::sys` uses `libc::F_SETNOSIGPIPE` and `libc::F_GETNOSIGPIPE` | 40593860133 / 40593860031 |
 | #43 | `1f92e09` | ft-a0485e94 | The deadline and shutdown-drain tests judge what the engine did, not a wall-clock margin | 40623838124 / 40623838214 |
+| #44, #45 | `3d3f73f`, `5fff810` | — | This report, then a correction of its crossover section | #44: 40640847299 / 40640847215; #45: 40645801390 / 40645801584 |
+| #46 | `326e002` | ft-b58e1c66 | `record_test.sh` cleanup reaps what it started, and only what it started, before removing its scratch tree | 40648589935 / 40648589918 |
 
 - **#42.** You approved the bump this wave.
   - `Cargo.lock` moves from 0.2.189 and `fuzz/Cargo.lock` from 0.2.190. Both `Cargo.toml` files still say `"0.2"`.
@@ -48,6 +50,15 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
   - Each new test fails on a planted mutation. Two of those mutations passed the old tests: a deadline noticed one unit late, and a removed pre-start check.
   - A separate adversarial pass found one narrow false pass, which no change inside the test can close. A stall of about 230 ms or more inside `Shutdown` can let an unclamped call pass the Go clamp check. It is now written down as an accepted gap, and `boundary_inputs_internal_test.go` stays the deterministic check on the clamp.
   - Items 1, 3, 5 and 7 were already on main; item 6 belongs to ft-c689767b.
+- **#46.** ft-b58e1c66, the recorder self-test flake that #44's first CI run hit.
+  - **Root cause.** `mutant_case` runs `signal_case` in a subshell, so the stat feed it started was registered only in the subshell's copy of `$EXTRA`. The main shell's `cleanup` never signalled that feed, and it kept writing into its `sigTERM.*` directory while `rm -rf` ran. A `ps` dump confirmed the feed was alive at `rm` time. That it caused the CI failure is inferred.
+  - **The fix.**
+    - Processes are registered in a file, together with their start time (`ps -o lstart=`).
+    - `cleanup` sends TERM, waits up to 5 s, sends KILL, and waits up to 5 s again before removing the tree. It signals a pid only while that pid's start time still matches, so a reused pid is never signalled.
+    - A second signal can no longer abort cleanup. Malformed registry lines are skipped, and an earlier non-zero status is kept.
+    - A per-pid `forget_pid` replaces the `PIDS=` resets, which ends a leak of two `python3` processes per `zombie_case` run.
+  - **Adversarial pass.** It found five breaks in the first fix, including a KILL escalation that could hit a reused pid. All five went back to the lane and were fixed. My review added one more fix: `note_pid` no longer fails on a process that exits between its two reads.
+  - **Tests.** Four new self-test cases, each failing on the cleanup it replaces. The full suite passed 7 of 7 locally (33 `ok` lines) with 0 leftover helpers, and passed in both Linux CI legs.
 
 **Issue #4: closed as completed, on your go.**
 - The closing comment maps each failed nightly job to its fix commit: d78c6bc, 7e48959, 7c6aded, de70bd4, 8a456f1 and ca5759d (#10), and 4c9c9ba (#12).
@@ -77,7 +88,7 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
 - **New card ft-b58e1c66 (`gs-record-test-cleanup-race`).** On this report's own PR (#44, docs only), "Unit & Pitfalls (ubuntu-24.04-arm)" failed in the benchmark recorder self-test.
   - Every case passed, then `rm -rf` of the scratch tree failed with "Directory not empty" (run 40637572850, job 122647965034).
   - `cleanup()` in `bench/record_test.sh` signals helper processes it never waits for, then removes the tree they may still write to.
-  - The job was rerun. The card is in backlog.
+  - Fixed in #46 (`326e002`); the card is in review. Details under "#46" below.
 - **Statuses:** no card was moved to done. Done is Manvi's evidence gate, and `gates.mode` is off.
 
 **ft-8a8279f5 crossover: not recorded. The gate ran out of attempts.**
@@ -91,12 +102,14 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
   | 3 | 04:05 | another benchmark was running before the start: another session's GitPulse `cargo bench --bench alerts_worker_throughput` |
   | 4 | 06:20 | 54.92% idle after the last arm |
 
-- The gate then stopped with "FAILED 4 attempts". Nothing was recorded, and the worktree is unchanged.
+- The gate then stopped with "FAILED 4 attempts". Nothing was recorded. The worktree and its local branch, which had no commits of its own, were removed afterwards.
 - Three quiet minutes before a run do not keep the host quiet for its length. Recording needs a window with the other workloads paused, not a longer gate.
 - The PR that lands the data must replace the `go1.27.2` files (see wave 4).
 
 **Process.**
 - #43 went through the brief's full loop: a Sonnet implementing lane, a separate Sonnet adversarial pass, then my review.
+- #46 went through the same loop, and one round went back to the lane: the adversarial pass broke its first version (8036e72) five ways.
+- The #46 lane ran in a worktree under the scratchpad, not `.claude/worktrees/`, so the write-gate warning did not recur.
 - #42 was a lockfile bump with no behaviour change, and had no separate adversarial lane.
 - GitPulse warned that its write gate would refuse edits under `.claude/worktrees/`, the path where agent worktrees live. The review fix to `DECISIONS.md` in #43's worktree went through only because the session runs in bypass mode. Agent worktrees belong outside the protected path.
 - This session's DevMap MCP server was started before #40 and still has the old `--root` pin, so it refused the worktree path. The fix takes effect when a session starts.
@@ -107,6 +120,7 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
 - On your instruction those edits are untouched. So the main checkout stays at `e561435` until they are committed or set aside, and their `BUILD_REPORT.md` change will conflict with this section.
 
 **Still yours.**
+- **Crossover data (ft-8a8279f5).** An idle gate can't record it on this shared host. It needs about 30 minutes with the other workloads (other sessions' builds and benchmarks) paused. That is the last open criterion on the perf card.
 - ft-6867f957, the iceoryx2 Go binding follow-up, assigned to you: its due date (2026-10-26) has passed.
 - Carried over: ft-415ddf1f, the apk pins and the floating toolchain.
 
