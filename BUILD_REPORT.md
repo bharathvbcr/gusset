@@ -29,14 +29,22 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
 - Remote heads after the wave: `main` only.
 - `bench/crossover-1us-10us`, the local worktree for the crossover recording, was removed with its branch after the gate stopped. It had no commits of its own and was never pushed.
 
-**Merged.** Every PR's final head passed all its CI checks. Codex reviewed #42 and #43 with no findings, and #44's first head (`e117274`) also with no findings. It posted nothing on #44's two later docs commits or on #45. On #46 its review failed, "We couldn't complete this review", because the account reached its Codex usage limit, so #46 had Cursor's approval and CI, not Codex.
+**Merged.** Every PR's final head passed all its CI checks. Passing checks are not a review. What each review bot left, quoted:
+
+| PR | Codex review state | Cursor review |
+| --- | --- | --- |
+| #42 | `has_any_findings: false` on `5b6c4a4` | APPROVED: "Approved. Cursor Bugbot completed successfully with no findings that require human review, and no approval policy requires extra review." |
+| #43 | `has_any_findings: false` on `884dfdf` | none posted |
+| #44 | `has_any_findings: false` on `e117274`, the first head; nothing on the two later docs commits | none posted; Bugbot's inline finding is fixed and answered |
+| #45 | none posted | APPROVED: "Approved. Cursor Bugbot completed successfully with no findings that need human review, and no approval policy requires a human reviewer. This automation had no prior approval on the current head." |
+| #46 | "We couldn't complete this review." The account had reached its Codex usage limit; the state field nevertheless reads `has_any_findings: true` | APPROVED: "Approved. Cursor Bugbot completed successfully and reported no findings that need human review; no approval policy requires a human pass on these test-harness and changelog changes." |
 
 | PR | Merge | Card | What | Main Matrix / adopter after merge |
 | --- | --- | --- | --- | --- |
 | #42 | `e561435` | ft-d3d3888d | libc 0.2.191 in both lockfiles; `pool::sys` uses `libc::F_SETNOSIGPIPE` and `libc::F_GETNOSIGPIPE` | 40593860133 / 40593860031 |
 | #43 | `1f92e09` | ft-a0485e94 | The deadline and shutdown-drain tests judge what the engine did, not a wall-clock margin | 40623838124 / 40623838214 |
 | #44, #45 | `3d3f73f`, `5fff810` | — | This report, then a correction of its crossover section | #44: 40640847299 / 40640847215; #45: 40645801390 / 40645801584 |
-| #46 | `326e002` | ft-b58e1c66 | `record_test.sh` cleanup reaps what it started, and only what it started, before removing its scratch tree | 40648589935 / 40648589918 |
+| #46 | `326e002` | ft-b58e1c66 | `record_test.sh` cleanup reaps what it started, and only what it started, before removing its scratch tree | 40648589935 / 40648589918. The Matrix's first attempt failed in macOS Unit & Pitfalls on an `internal/isolate` test that #46 does not touch (filed as ft-735a4757); attempt 2 passed |
 
 - **#42.** You approved the bump this wave.
   - `Cargo.lock` moves from 0.2.189 and `fuzz/Cargo.lock` from 0.2.190. Both `Cargo.toml` files still say `"0.2"`.
@@ -58,6 +66,8 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
     - A second signal can no longer abort cleanup. Malformed registry lines are skipped, and an earlier non-zero status is kept.
     - A per-pid `forget_pid` replaces the `PIDS=` resets, which ends a leak of two `python3` processes per `zombie_case` run.
   - **Adversarial pass.** It found five breaks in the first fix, including a KILL escalation that could hit a reused pid. All five went back to the lane and were fixed. My review added one more fix: `note_pid` no longer fails on a process that exits between its two reads.
+  - **Main CI after the merge.** The first Matrix attempt (run 40648589935) failed in "Unit & Pitfalls (macos-latest)" on `TestRead_SteadyFramesAfterTheProbeAreAllDelivered`: ticket 1 arrived, and tickets 2–20 all got "worker process exited (read |0: i/o timeout)". It is the only failure of that test in the last 60 failed Matrix runs. The rerun passed.
+    - Either a host stall or a probe that doesn't restart on progress fits the log. The investigation is filed as ft-735a4757 (priority 1) and is in progress.
   - **Tests.** Four new self-test cases, each failing on the cleanup it replaces. The full suite passed 7 of 7 locally (33 `ok` lines) with 0 leftover helpers, and passed in both Linux CI legs.
 
 **Issue #4: closed as completed, on your go.**
