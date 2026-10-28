@@ -32,6 +32,22 @@ fn serial() -> MutexGuard<'static, ()> {
     guard
 }
 
+/// Diagnostic mode 18: the peak of the engine's in-flight gauge since the last
+/// read. A read resets the peak to the current level, so a read taken while no
+/// mode 17 job is in the engine zeroes it.
+fn read_engine_gauge_peak() -> u64 {
+    let ctx = JobContext::new(CallHeader::default(), Arc::new(AtomicBool::new(false)));
+    pool::diagnostic_dispatch(&ctx, &[18u8])
+        .must("read the engine gauge")
+        .get(..8)
+        .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+        .unwrap_or(0)
+}
+
+/// How long diagnostic mode 17 holds a job at least: `input[1]` is a u8, so 250
+/// ms is the most one job can hold.
+const HOLD: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// How long to wait for the engine to take a job before the test gives up.
 const ENGINE_START_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -43,15 +59,9 @@ const ENGINE_START_WAIT: std::time::Duration = std::time::Duration::from_secs(10
 /// test thread, so it needs no free worker. Bounded: a job that never starts
 /// fails the test with a message instead of hanging it.
 fn wait_until_the_engine_is_running() {
-    let ctx = JobContext::new(CallHeader::default(), Arc::new(AtomicBool::new(false)));
     let deadline = Instant::now() + ENGINE_START_WAIT;
     loop {
-        let peak = pool::diagnostic_dispatch(&ctx, &[18u8])
-            .must("read the engine gauge")
-            .get(..8)
-            .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
-            .unwrap_or(0);
-        if peak >= 1 {
+        if read_engine_gauge_peak() >= 1 {
             return;
         }
         assert!(
@@ -193,41 +203,78 @@ fn shutdown_reports_non_cooperative_work_that_outlives_its_budget() {
     let (r, w) = make_pipe();
     let handle = Handle::open(1, w).must("open");
 
-    // Mode 17 holds 250 ms (the most its u8 allows) without ever calling
-    // `ctx.check()`, and counts itself in the engine's in-flight gauge: far past
-    // the 10 ms budget, short enough to wait out.
-    let ticket = handle
-        .submit(diagnostic_header(), &[17u8, 250u8], 0)
-        .must("submit");
-    assert!(handle.in_flight() > 0, "the job must be in flight");
+    // The job can only be reported as outliving the budget while it is in the
+    // engine, and the engine holds it for `HOLD` at the very least (a sleep is
+    // never shorter than asked), counted from some instant after the submit. So
+    // a drain that returns before `submitted + HOLD` met a job that was still
+    // running, on any host: if it reported none, shutdown is wrong. One that
+    // returns later may have met a job a stalled host let finish, and says
+    // nothing about shutdown. That attempt is discarded and run again (the
+    // runtime re-arms, so this can be repeated), instead of failing a correct
+    // shutdown or, by holding the budget wider, passing on a job that was gone.
+    // Every attempt unproven is a failure: the check could not run.
+    const MAX_ATTEMPTS: usize = 20;
+    let mut observed = false;
+    for attempt in 1..=MAX_ATTEMPTS {
+        // A previous attempt's job left its peak in the gauge, which would pass
+        // for this job having started. Reading it at rest zeroes it.
+        read_engine_gauge_peak();
 
-    // Shutdown only meets a job the engine is running. A unit still queued when
-    // it sets its cancel flag is cancelled before the engine runs and drains at
-    // once, which would make this a test of queueing. Wait for the engine's own
-    // signal rather than a guess.
-    wait_until_the_engine_is_running();
+        // Mode 17 holds `HOLD` (the most its u8 allows) without ever calling
+        // `ctx.check()`, and counts itself in the engine's in-flight gauge: far
+        // past the 10 ms budget, short enough to wait out.
+        let submitted = Instant::now();
+        let ticket = handle
+            .submit(diagnostic_header(), &[17u8, 250u8], 0)
+            .must("submit");
 
-    let remaining = pool::shutdown(std::time::Duration::from_millis(10));
+        // Shutdown only meets a job the engine is running. A unit still queued
+        // when it sets its cancel flag is cancelled before the engine runs and
+        // drains at once, which would make this a test of queueing. Wait for the
+        // engine's own signal rather than a guess.
+        wait_until_the_engine_is_running();
+
+        let remaining = pool::shutdown(std::time::Duration::from_millis(10));
+        assert!(
+            pool::is_shutting_down(),
+            "an incomplete drain still latches"
+        );
+
+        // The export maps the same outcome to FFI_ERR, which Go reads as
+        // ErrShutdownIncomplete. Nothing about the job has changed in between.
+        // SAFETY: no pointer arguments.
+        let rc = unsafe { gusset_shutdown(10) };
+        // Taken after both drains returned, so each of them read the job before
+        // this instant.
+        let job_certainly_running = submitted.elapsed() < HOLD;
+
+        pool::rearm();
+        assert!(!pool::is_shutting_down());
+
+        // The job was never killed; it runs to its end and completes normally.
+        assert_eq!(read_ticket(r), ticket);
+
+        if remaining > 0 && rc == FFI_ERR {
+            observed = true;
+            break;
+        }
+        assert!(
+            !job_certainly_running,
+            "a non-cooperative job outlived the budget and was still running when both drains \
+             returned, so shutdown must report it: pool::shutdown left {remaining} in flight \
+             (want more than 0), gusset_shutdown returned {rc} (want FFI_ERR = {FFI_ERR})"
+        );
+        eprintln!(
+            "attempt {attempt}/{MAX_ATTEMPTS}: the host stalled the test past the job's {HOLD:?} \
+             hold, so the drain met no job and proves nothing; running it again"
+        );
+    }
     assert!(
-        remaining > 0,
-        "a non-cooperative job outlived the budget, so shutdown must report it"
-    );
-    assert!(
-        pool::is_shutting_down(),
-        "an incomplete drain still latches"
+        observed,
+        "no attempt out of {MAX_ATTEMPTS} reached shutdown while its job was still running: \
+         the host stalled this test past the job's hold every time, so the check could not run"
     );
 
-    // The export maps the same outcome to FFI_ERR, which Go reads as
-    // ErrShutdownIncomplete. Nothing about the job has changed in between.
-    // SAFETY: no pointer arguments.
-    let rc = unsafe { gusset_shutdown(10) };
-    assert_eq!(rc, FFI_ERR, "undrained work must be FFI_ERR, not FFI_OK");
-
-    pool::rearm();
-    assert!(!pool::is_shutting_down());
-
-    // The job was never killed; it runs to its end and completes normally.
-    assert_eq!(read_ticket(r), ticket);
     assert!(handle.close().is_ok());
     // SAFETY: `r` is the read end this test opened.
     unsafe { libc::close(r) };
