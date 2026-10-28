@@ -1560,18 +1560,25 @@ func TestRead_SteadyFramesAfterTheProbeAreAllDelivered(t *testing.T) {
 // host: every ticket then got an answer, but a frame it lacks was written
 // later than the probe allows. It returns "" when the attempt must be judged
 // as it stands, either because every frame arrived or because the clock shows
-// the reader gave up with the next frame inside its window.
+// the reader gave up while the next frames were due inside its window.
 //
 // The reader's deadline after a frame is armed no earlier than the instant
 // that frame's write began, and a timer never fires early, so a reader that
 // died less than queuedFrameProbe after the last frame it delivered died
 // early: that is the one-shot probe, which dies about 50ms after it was armed
-// whatever arrives. Two things excuse a longer silence. The writer's own
-// schedule shows a gap of half a probe or more between two writes, which the
-// 5ms sleeps never produce on their own. Or the reader died a whole probe after
-// its last frame with no gap visible to the writer: the stall began after the
-// next write and before the reader could wake, and a timer that has expired
-// wins over a pipe that has become readable.
+// whatever arrives. Two things excuse a longer silence, and only these. The
+// writer's own schedule shows a gap of half a probe or more between two
+// writes, which the 5ms sleeps never produce on their own. Or the silence
+// follows the last or the second to last frame with the writer on schedule:
+// the stall began after the final write and before the reader could wake, and
+// a timer that has expired wins over a pipe that has become readable. Silence
+// of a whole probe in the middle of the stream with the writer on schedule is
+// not excused: the next frames were in the pipe, so the reader sat on them.
+//
+// Known limit, not fixed here: a re-arm window cut to between about 12ms and
+// 50ms (the gap is 5ms, the stream 100ms) is invisible to this test, as it was
+// to the one-shot test on a quiet host. Catching it needs a planned gap of
+// about 0.8 of a probe in the stream.
 func stalledNotLost(payloads [][]byte, got []result, begin time.Time, starts []time.Time, doneAt time.Time) (stall, note string) {
 	delivered := 0
 	for delivered < len(payloads) && got[delivered].err == nil && bytes.Equal(got[delivered].out, payloads[delivered]) {
@@ -1599,8 +1606,10 @@ func stalledNotLost(payloads [][]byte, got []result, begin time.Time, starts []t
 	switch {
 	case widest >= queuedFrameProbe/2:
 		return fmt.Sprintf("the writer's own schedule stalled for %v between two writes (probe %v), after %d of %d frames", widest, queuedFrameProbe, delivered, len(payloads)), ""
+	case silence >= queuedFrameProbe && delivered >= len(payloads)-1:
+		return fmt.Sprintf("the reader died %v after the last frame it delivered (%d of %d), a whole probe (%v), with the writer on schedule and nothing left to write", silence, delivered, len(payloads), queuedFrameProbe), ""
 	case silence >= queuedFrameProbe:
-		return fmt.Sprintf("the reader died %v after the last frame it delivered (%d of %d), a whole probe (%v), with the writer on schedule", silence, delivered, len(payloads), queuedFrameProbe), ""
+		return "", fmt.Sprintf("the reader went silent for %v (a whole probe is %v) after delivering %d of %d frames, with the writer on schedule (widest gap %v) and the next frames already in the pipe", silence, queuedFrameProbe, delivered, len(payloads), widest)
 	}
 	return "", fmt.Sprintf("the reader died %v after the last frame it delivered (%d of %d), inside the %v probe, with the writer's widest gap %v: the probe was not re-armed", silence, delivered, len(payloads), queuedFrameProbe, widest)
 }
