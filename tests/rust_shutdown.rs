@@ -261,8 +261,8 @@ fn shutdown_reports_non_cooperative_work_that_outlives_its_budget() {
         assert!(
             !job_certainly_running,
             "a non-cooperative job outlived the budget and was still running when both drains \
-             returned, so shutdown must report it: pool::shutdown left {remaining} in flight, \
-             gusset_shutdown returned {rc} (want {FFI_ERR}, not FFI_OK)"
+             returned, so shutdown must report it: pool::shutdown left {remaining} in flight \
+             (want more than 0), gusset_shutdown returned {rc} (want FFI_ERR = {FFI_ERR})"
         );
         eprintln!(
             "attempt {attempt}/{MAX_ATTEMPTS}: the host stalled the test past the job's {HOLD:?} \

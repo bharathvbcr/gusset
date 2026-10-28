@@ -211,6 +211,15 @@ func TestShutdown_ReportsWorkItCannotDrain(t *testing.T) {
 	// wrapped budget pass too, so the answer counts only if the call started
 	// before the job's floor: judged from the instant the call itself began, not
 	// from a guess at how long a stalled goroutine takes to reach it.
+	//
+	// That instant is the latest one this test can see, not the instant
+	// Shutdown reads the in-flight count. A stall longer than the rest of the
+	// hold between the two, inside the call, lets an unclamped Shutdown read a
+	// finished job and pass here: a clamped call and a stalled wrapped one both
+	// return after the job ends, and nothing after the return tells them apart.
+	// boundary_inputs_internal_test.go owns the clamp deterministically, at
+	// drainMillis; this step checks it end to end on every run that is not so
+	// stalled.
 	elapsed, called, err := shutdownWithin(t, gusset.MaxDrain+time.Millisecond, 30*time.Second)
 	if since := called.Sub(submitted); since >= engineHold {
 		hostprobe.Skip(t, "the host stalled the test until %v after Submit, longer than the job's %v hold, so the job may have ended before Shutdown(MaxDrain+1ms) read it and a wrapped budget could not be told from a clamped one (it answered %v)", since, engineHold, err)
