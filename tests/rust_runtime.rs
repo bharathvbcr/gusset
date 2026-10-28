@@ -597,7 +597,7 @@ fn shared_ticket_reader_reassembles_a_split_ticket_and_refuses_a_torn_one() {
 /// (`a_deadline_stops_a_multi_unit_job_between_units`), which counts the units
 /// a deadline lets start and so cannot be pushed over its bound by load.
 #[test]
-fn deadline_alone_stops_a_multi_unit_job_within_one_unit() {
+fn deadline_alone_cancels_a_multi_unit_job_with_deadline_exceeded() {
     use gusset::header::CancelReason;
     use gusset::pool::JobResult;
 
