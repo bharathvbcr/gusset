@@ -1478,21 +1478,37 @@ func TestRead_PastDeadlineWithNothingConsumedStillProbes(t *testing.T) {
 
 // writeFramesSteadily writes one echo frame per payload, ids 1..n, gap apart,
 // then closes pw. A write error ends it: the reader closed its end, which the
-// test reports through the frames it did not receive.
-func writeFramesSteadily(pw *os.File, payloads [][]byte, gap time.Duration) {
+// test reports through the frames it did not receive. It returns the instant
+// each write began, the first n of them at most, so a caller can tell from the
+// clock whether a frame it never received was written inside the reader's
+// window.
+func writeFramesSteadily(pw *os.File, payloads [][]byte, gap time.Duration) []time.Time {
 	defer func() { _ = pw.Close() }()
+	starts := make([]time.Time, 0, len(payloads))
 	for i, payload := range payloads {
 		time.Sleep(gap)
+		starts = append(starts, time.Now())
 		if err := writeFrame(pw, &response{ID: uint64(i + 1), Out: payload}, maxResponseFrame); err != nil {
-			return
+			break
 		}
 	}
+	return starts
 }
+
+// steadyReadAttempts bounds how often the steady-frames test runs again after
+// a host stall. Ten is the Shutdown tests' bound (DECISIONS.md 2026-10-27): a
+// stall that long and that often is the host, which hostprobe.Skip reports.
+const steadyReadAttempts = 10
 
 // The reaper's wake has already put the reader into its probe, and frames then
 // keep arriving 5ms apart: each far inside queuedFrameProbe, all of them
 // together twice past it. The probe used to be armed once, so every frame
 // after its first 50ms got the poison instead.
+//
+// A reader that gives up queuedFrameProbe after its last frame is correct when
+// the host held the writer (or the whole process) for that long, so an
+// undelivered frame is judged from the clock, not assumed to be the bug.
+// stalledNotLost says which; a stall runs the attempt again.
 func TestRead_SteadyFramesAfterTheProbeAreAllDelivered(t *testing.T) {
 	const gap = 5 * time.Millisecond
 	payloads := make([][]byte, 20)
@@ -1502,20 +1518,100 @@ func TestRead_SteadyFramesAfterTheProbeAreAllDelivered(t *testing.T) {
 	if time.Duration(len(payloads))*gap < 2*queuedFrameProbe {
 		t.Fatal("the frames must outlast the probe window, or this test proves nothing")
 	}
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
+	var lastStall string
+	for attempt := 1; attempt <= steadyReadAttempts; attempt++ {
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = pr.Close()
+			_ = pw.Close()
+		})
+		if err := pr.SetReadDeadline(time.Unix(1, 0)); err != nil {
+			t.Fatal(err)
+		}
+		begin := time.Now()
+		writes := make(chan []time.Time, 1)
+		go func() { writes <- writeFramesSteadily(pw, payloads, gap) }()
+		got, doneAt, dead := readQueuedFramesTimed(t, pr, bufio.NewReader(pr), payloads)
+		var starts []time.Time
+		select {
+		case starts = <-writes:
+		case <-time.After(2 * time.Second):
+			t.Fatal("the writer did not stop after the reader closed its end")
+		}
+		stall, why := stalledNotLost(payloads, got, begin, starts, doneAt)
+		if stall == "" {
+			if why != "" {
+				t.Logf("%s", why)
+			}
+			assertQueuedPayloads(t, payloads, dead, got)
+			return
+		}
+		lastStall = stall
+		t.Logf("attempt %d of %d: %s", attempt, steadyReadAttempts, stall)
 	}
-	t.Cleanup(func() {
-		_ = pr.Close()
-		_ = pw.Close()
-	})
-	if err := pr.SetReadDeadline(time.Unix(1, 0)); err != nil {
-		t.Fatal(err)
+	hostprobe.Skip(t, "every one of %d attempts met a host stall longer than the probe, so none could judge the reader; last: %s", steadyReadAttempts, lastStall)
+}
+
+// stalledNotLost reads one finished attempt of the steady-frames test. It
+// returns a non-empty stall when the reader's give-up is explained by the
+// host: every ticket then got an answer, but a frame it lacks was written
+// later than the probe allows. It returns "" when the attempt must be judged
+// as it stands, either because every frame arrived or because the clock shows
+// the reader gave up while the next frames were due inside its window.
+//
+// The reader's deadline after a frame is armed no earlier than the instant
+// that frame's write began, and a timer never fires early, so a reader that
+// died less than queuedFrameProbe after the last frame it delivered died
+// early: that is the one-shot probe, which dies about 50ms after it was armed
+// whatever arrives. Two things excuse a longer silence, and only these. The
+// writer's own schedule shows a gap of half a probe or more between two
+// writes, which the 5ms sleeps never produce on their own. Or the silence
+// follows the last or the second to last frame with the writer on schedule:
+// the stall began after the final write and before the reader could wake, and
+// a timer that has expired wins over a pipe that has become readable. Silence
+// of a whole probe in the middle of the stream with the writer on schedule is
+// not excused: the next frames were in the pipe, so the reader sat on them.
+//
+// Known limit, not fixed here: a re-arm window cut to between about 12ms and
+// 50ms (the gap is 5ms, the stream 100ms) is invisible to this test, as it was
+// to the one-shot test on a quiet host. Catching it needs a planned gap of
+// about 0.8 of a probe in the stream.
+func stalledNotLost(payloads [][]byte, got []result, begin time.Time, starts []time.Time, doneAt time.Time) (stall, note string) {
+	delivered := 0
+	for delivered < len(payloads) && got[delivered].err == nil && bytes.Equal(got[delivered].out, payloads[delivered]) {
+		delivered++
 	}
-	go writeFramesSteadily(pw, payloads, gap)
-	got, dead := readQueuedFrames(t, pr, bufio.NewReader(pr), payloads)
-	assertQueuedPayloads(t, payloads, dead, got)
+	if delivered == len(payloads) {
+		return "", ""
+	}
+	for _, r := range got[delivered:] {
+		if r.err == nil {
+			return "", "a ticket was answered with the wrong bytes; that is not a timing outcome"
+		}
+	}
+	base := begin
+	if delivered > 0 {
+		base = starts[delivered-1]
+	}
+	widest := time.Duration(0)
+	prev := begin
+	for _, s := range starts {
+		widest = max(widest, s.Sub(prev))
+		prev = s
+	}
+	silence := doneAt.Sub(base)
+	switch {
+	case widest >= queuedFrameProbe/2:
+		return fmt.Sprintf("the writer's own schedule stalled for %v between two writes (probe %v), after %d of %d frames", widest, queuedFrameProbe, delivered, len(payloads)), ""
+	case silence >= queuedFrameProbe && delivered >= len(payloads)-1:
+		return fmt.Sprintf("the reader died %v after the last frame it delivered (%d of %d), a whole probe (%v), with the writer on schedule and nothing left to write", silence, delivered, len(payloads), queuedFrameProbe), ""
+	case silence >= queuedFrameProbe:
+		return "", fmt.Sprintf("the reader went silent for %v (a whole probe is %v) after delivering %d of %d frames, with the writer on schedule (widest gap %v) and the next frames already in the pipe", silence, queuedFrameProbe, delivered, len(payloads), widest)
+	}
+	return "", fmt.Sprintf("the reader died %v after the last frame it delivered (%d of %d), inside the %v probe, with the writer's widest gap %v: the probe was not re-armed", silence, delivered, len(payloads), queuedFrameProbe, widest)
 }
 
 // A worker that has exited while a descendant still writes its answers, one
@@ -1656,6 +1752,14 @@ func queueFramesPastDeadline(t *testing.T, payloads [][]byte, prefix int) (*os.F
 // while the ticket is still in the map. One slot cannot take both.
 func readQueuedFrames(t *testing.T, pr *os.File, br *bufio.Reader, payloads [][]byte) ([]result, error) {
 	t.Helper()
+	got, _, dead := readQueuedFramesTimed(t, pr, br, payloads)
+	return got, dead
+}
+
+// readQueuedFramesTimed is readQueuedFrames that also returns the instant the
+// test saw the reader finish.
+func readQueuedFramesTimed(t *testing.T, pr *os.File, br *bufio.Reader, payloads [][]byte) ([]result, time.Time, error) {
+	t.Helper()
 	p := &Proc{
 		rd:         pr,
 		sem:        make(chan struct{}, len(payloads)),
@@ -1678,6 +1782,7 @@ func readQueuedFrames(t *testing.T, pr *os.File, br *bufio.Reader, payloads [][]
 	case <-time.After(2 * time.Second):
 		t.Fatal("read did not finish")
 	}
+	doneAt := time.Now()
 	p.mu.Lock()
 	dead := p.dead
 	p.mu.Unlock()
@@ -1689,7 +1794,7 @@ func readQueuedFrames(t *testing.T, pr *os.File, br *bufio.Reader, payloads [][]
 			t.Fatalf("ticket %d waiter received nothing; reader dead=%v", i+1, dead)
 		}
 	}
-	return got, dead
+	return got, doneAt, dead
 }
 
 func assertQueuedPayloads(t *testing.T, payloads [][]byte, dead error, got []result) {
