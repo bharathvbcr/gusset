@@ -119,6 +119,10 @@ note_pid() {
 	fi
 	id=$(ident "$1")
 	if [ -z "$id" ]; then
+		# It may have exited between the two reads, which needs no cleanup either.
+		if ! alive "$1"; then
+			return 0
+		fi
 		fail "cannot read the start time of process $1, so cleanup could not tell it from a reused pid"
 	fi
 	printf '%s %s\n' "$1" "$id" >>"$PROCS_FILE"
