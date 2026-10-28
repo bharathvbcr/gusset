@@ -37,41 +37,173 @@ fail() {
 	exit 1
 }
 
-CANARY=
-PIDS=
-EXTRA=
+# alive PID: running. A zombie is not: kill -0 succeeds for one, and under a
+# PID 1 that does not reap orphans a group-killed process stays one, which read
+# as a survivor. ps -o stat= puts Z in the state for a zombie on both procps and
+# BSD ps (modifier letters never include Z); any other state is alive, so the
+# check stays strict for a live process.
+alive() {
+	kill -0 "$1" 2>/dev/null || return 1
+	state=$(ps -o stat= -p "$1" 2>/dev/null || true)
+	case $state in
+	*Z*) return 1 ;;
+	esac
+	return 0
+}
+
+# wait_dead PID: up to 5s for a process that was signalled to be gone.
+wait_dead() {
+	i=0
+	while [ "$i" -lt 100 ]; do
+		if ! alive "$1"; then
+			return 0
+		fi
+		sleep 0.05
+		i=$((i + 1))
+	done
+	return 1
+}
+
+# ident PID: when PID started, as ps prints it, with its blanks collapsed (empty
+# for a pid that is not running). A pid alone does not name a process once it has
+# exited: the kernel hands the number to the next process that asks.
+ident() {
+	out=$(ps -o lstart= -p "$1" 2>/dev/null || true)
+	# shellcheck disable=SC2086
+	set -- $out
+	echo "$*"
+}
+
+# same PID IDENT: PID is still the process that was recorded as IDENT, alive.
+same() {
+	alive "$1" && [ "$(ident "$1")" = "$2" ]
+}
+
+# wait_gone PID IDENT: up to 5s for that process to be gone. A pid that now
+# belongs to another process counts as gone: it is not one this run started.
+wait_gone() {
+	i=0
+	while [ "$i" -lt 100 ]; do
+		if ! same "$1" "$2"; then
+			return 0
+		fi
+		sleep 0.05
+		i=$((i + 1))
+	done
+	return 1
+}
+
+# signal_if SIG PID IDENT: signal PID only while it is still the process recorded
+# as IDENT. cleanup signals pids it recorded long ago, most of them dead by then,
+# and a number the kernel has since reused is somebody else's process.
+signal_if() {
+	if same "$2" "$3"; then
+		kill "-$1" "$2" 2>/dev/null || true
+	elif alive "$2"; then
+		echo "cleanup: pid $2 is another process now (recorded as started $3); not signalling it" >&2
+	fi
+}
+
+# Every process this run started, one "PID IDENT" line each. A file, not a
+# variable: a case run in a subshell (mutant_case) starts processes whose
+# registration a variable would lose with the subshell, and the stat feed it
+# started went on writing into its case directory while cleanup removed it.
+PROCS_FILE=$WORK/.procs
+
+# note_pid PID: record a running process for cleanup, with its start time. One that
+# is gone already needs no cleanup; one that runs but whose start time cannot be
+# read could never be told from a reused pid, so that fails the run.
+note_pid() {
+	if ! alive "$1"; then
+		return 0
+	fi
+	id=$(ident "$1")
+	if [ -z "$id" ]; then
+		# It may have exited between the two reads, which needs no cleanup either.
+		if ! alive "$1"; then
+			return 0
+		fi
+		fail "cannot read the start time of process $1, so cleanup could not tell it from a reused pid"
+	fi
+	printf '%s %s\n' "$1" "$id" >>"$PROCS_FILE"
+}
+
+# forget_pid PID: a process the case has reaped, which cleanup need not look for.
+forget_pid() {
+	if [ -f "$PROCS_FILE" ]; then
+		grep -v "^$1 " "$PROCS_FILE" >"$PROCS_FILE.new" || true
+		mv "$PROCS_FILE.new" "$PROCS_FILE"
+	fi
+}
+
+# parse_victim LINE: VP and VI from a "PID IDENT" line. Fails for anything else,
+# above all for a pid of 0 (kill's own process group) or 1.
+parse_victim() {
+	VP=${1%% *}
+	VI=${1#"$VP"}
+	VI=${VI# }
+	case $VP in
+	'' | *[!0-9]* | 0* | 1) return 1 ;;
+	esac
+	[ -n "$VI" ]
+}
+
+# The processes cleanup signals are reaped before the scratch tree goes, not just
+# signalled: a signal takes effect when the target next runs, so removing the tree
+# straight after one raced any process still writing into it (rm: cannot remove
+# ...: Directory not empty). Each gets a bounded wait for the TERM, then a KILL
+# and a second bounded wait; one that survives both fails the run, loudly, and
+# never replaces a failure status that is already set. Only a process that still
+# has the start time it was recorded with is signalled.
 cleanup() {
 	status=$?
-	for p in $EXTRA $CANARY; do
-		kill "$p" 2>/dev/null || true
-	done
-	for p in $PIDS; do
-		kill -TERM "$p" 2>/dev/null || true
-	done
-	for p in $PIDS $CANARY; do
-		wait "$p" 2>/dev/null || true
-	done
-	# The stub go's grandchildren, for a case that failed before it reaped its own.
-	for f in "$WORK"/*/gc.pid; do
-		if [ -s "$f" ]; then
-			kill "$(cat "$f")" 2>/dev/null || true
+	# A second signal must not end the cleanup of the first.
+	trap '' INT TERM HUP
+	victims=$WORK/.victims
+	cat "$PROCS_FILE" >"$victims" 2>/dev/null || true
+	# The stub go and its grandchild, for a case that failed before it reaped its own.
+	for f in "$WORK"/*/go.pid "$WORK"/*/gc.pid; do
+		if [ -s "$f" ] && [ -s "${f%.pid}.lstart" ]; then
+			printf '%s %s\n' "$(cat "$f")" "$(cat "${f%.pid}.lstart")" >>"$victims"
 		fi
 	done
-	rm -rf "$WORK"
+	while IFS= read -r line; do
+		if parse_victim "$line"; then
+			signal_if TERM "$VP" "$VI"
+		else
+			echo "FAIL: cleanup: ignoring the malformed entry '$line'" >&2
+			if [ "$status" = 0 ]; then
+				status=1
+			fi
+		fi
+	done <"$victims"
+	while IFS= read -r line; do
+		parse_victim "$line" || continue
+		if ! wait_gone "$VP" "$VI"; then
+			signal_if KILL "$VP" "$VI"
+			if ! wait_gone "$VP" "$VI"; then
+				echo "FAIL: cleanup: process $VP survived TERM and KILL (status was $status)" >&2
+				if [ "$status" = 0 ]; then
+					status=1
+				fi
+				continue
+			fi
+		fi
+		# A child of this shell is reaped once it is gone; it never blocks here.
+		wait "$VP" 2>/dev/null || true
+	done <"$victims"
+	if ! rm -rf "$WORK"; then
+		echo "FAIL: cleanup: could not remove $WORK (status was $status)" >&2
+		if [ "$status" = 0 ]; then
+			status=1
+		fi
+	fi
 	rmdir "$PROBE" 2>/dev/null || true
 	exit $status
 }
 trap cleanup EXIT
 # A signal ends this shell through the EXIT trap, so the scratch tree goes too.
 trap 'exit 130' INT TERM HUP
-
-note_pid() {
-	PIDS="$PIDS $1"
-}
-
-note_extra() {
-	EXTRA="$EXTRA $1"
-}
 
 # start_at DIR MODE OUT -- argv
 # MODE 1: new session, with SIGINT/SIGTERM at their default disposition (this
@@ -177,33 +309,6 @@ wait_file() {
 	return 1
 }
 
-# alive PID: running. A zombie is not: kill -0 succeeds for one, and under a
-# PID 1 that does not reap orphans a group-killed process stays one, which read
-# as a survivor. ps -o stat= puts Z in the state for a zombie on both procps and
-# BSD ps (modifier letters never include Z); any other state is alive, so the
-# check stays strict for a live process.
-alive() {
-	kill -0 "$1" 2>/dev/null || return 1
-	state=$(ps -o stat= -p "$1" 2>/dev/null || true)
-	case $state in
-	*Z*) return 1 ;;
-	esac
-	return 0
-}
-
-# wait_dead PID: up to 5s for a process that was signalled to be gone.
-wait_dead() {
-	i=0
-	while [ "$i" -lt 100 ]; do
-		if ! alive "$1"; then
-			return 0
-		fi
-		sleep 0.05
-		i=$((i + 1))
-	done
-	return 1
-}
-
 # start_statfeed FILE: a background writer that keeps a /proc/stat-shaped file
 # moving at 90% idle, so the Linux branch of cpu_idle (two samples a second apart)
 # reads a machine this test controls. Atomic replace, so a sample never sees half
@@ -211,7 +316,7 @@ wait_dead() {
 start_statfeed() {
 	feed=$1
 	if [ -n "${STATFEED_PID:-}" ]; then
-		kill "$STATFEED_PID" 2>/dev/null || true
+		signal_if TERM "$STATFEED_PID" "$STATFEED_ID"
 	fi
 	owner=$$
 	(
@@ -228,15 +333,56 @@ start_statfeed() {
 		done
 	) >/dev/null 2>&1 &
 	STATFEED_PID=$!
-	note_extra "$STATFEED_PID"
+	STATFEED_ID=$(ident "$STATFEED_PID")
+	note_pid "$STATFEED_PID"
 	wait_file "$feed" || fail "stat feed did not start"
+}
+
+# start_straggler DIR [stubborn]: a process that keeps creating files in DIR, as the
+# stat feed does, and that takes its time to die: on TERM it goes on creating files
+# for about a third of a second (a loaded host's worth of slow shutdown) and only
+# then exits. Given `stubborn` it ignores TERM, and only KILL ends it. It also ends
+# with this shell, so a failure of the check cannot strand it. Its pid goes to
+# note_pid and, one a line, to $RECORD_TEST_STRAGGLER_PIDS, which the cleanup cases
+# read after the run that started it is over.
+start_straggler() {
+	mkdir -p "$1"
+	/bin/sh -c 'dir=$1
+owner=$2
+mode=$3
+i=0
+fill() {
+	true >"$dir/f$((i % 64))" 2>/dev/null
+	i=$((i + 1))
+}
+slow_exit() {
+	n=0
+	while [ "$n" -lt 15000 ]; do
+		fill
+		n=$((n + 1))
+	done
+	exit 0
+}
+case $mode in
+stubborn) trap "" TERM ;;
+*) trap slow_exit TERM ;;
+esac
+echo ready >"$dir.ready"
+while kill -0 "$owner" 2>/dev/null; do
+	fill
+done' _ "$1" "$$" "${2:-}" &
+	printf '%s\n' "$!" >>"$RECORD_TEST_STRAGGLER_PIDS"
+	note_pid "$!"
+	wait_file "$1.ready" || fail "straggler did not start"
 }
 
 # install_stubs DEST KIND [UNAME]
 # KIND selects what `go` does:
 #   fast    prints one benchmark row and logs the -C directory to $ORDER_LOG
 #   slow    starts a grandchild, records its pid in $GO_GC_PIDFILE and its own in
-#           $GO_PIDFILE (last, so a non-empty go.pid means both exist), and waits
+#           $GO_PIDFILE (last, so a non-empty go.pid means both exist), each after
+#           its start time in the .lstart file beside it (what ident prints, so
+#           cleanup can tell the process from a reused pid), and waits
 #   norows  exits 0 having printed no benchmark row
 # `cargo` logs its argv to $CARGO_LOG and, unless it is a --no-run build, prints
 # rows on stdout and noise on stderr. `ps -Ao` prints $FAKE_PS_LINES (default
@@ -270,7 +416,10 @@ install_stubs() {
 	slow)
 		printf '%s\n' '#!/bin/sh' \
 			'sleep 120 &' \
-			'echo $! > "$GO_GC_PIDFILE"' \
+			'gc=$!' \
+			'echo $(/bin/ps -o lstart= -p $gc) > "${GO_GC_PIDFILE%.pid}.lstart"' \
+			'echo $gc > "$GO_GC_PIDFILE"' \
+			'echo $(/bin/ps -o lstart= -p $$) > "${GO_PIDFILE%.pid}.lstart"' \
 			'echo $$ > "$GO_PIDFILE"' \
 			'wait' >"$dest/go"
 		;;
@@ -373,12 +522,58 @@ assert_no_lock() {
 # did not: a loaded host once took longer than it) and ends with it.
 /bin/sh -c 'while kill -0 "$1" 2>/dev/null; do sleep 1; done' _ "$$" &
 CANARY=$!
+note_pid "$CANARY"
 
 if [ "${RECORD_TEST_FAULT:-}" = "1" ]; then
 	new_case fault fast
 	: >"$D/run/state"
 	fail "injected failure after setup"
 fi
+
+# RECORD_TEST_INNER=MODE: a run that one of the cleanup cases at the bottom drives
+# from outside, to see what cleanup does in a state those cases set up. MODE
+#   straggler  three processes keep writing into the scratch tree after being told
+#              to stop (one ignores TERM, one is started from a subshell, as
+#              mutant_case starts its processes); the run then exits 7
+#   signals    the same, minus the subshell one, and the run waits to be signalled
+#   reuse      a live pid that is registered with a start time that is not its own
+#              (RECORD_TEST_REUSE_PID), as a reused pid would look; exits 7
+#   garbage    registry lines that are not a pid above 1 and a start time; exits 7
+case "${RECORD_TEST_INNER:-}" in
+'') ;;
+straggler)
+	new_case straggle fast
+	start_straggler "$D/main"
+	start_straggler "$D/stubborn" stubborn
+	(
+		new_case substraggle fast
+		start_straggler "$D/sub"
+	)
+	exit 7
+	;;
+signals)
+	new_case signals fast
+	start_straggler "$D/slow"
+	start_straggler "$D/stubborn" stubborn
+	echo ready >"$RECORD_TEST_READY"
+	# Bounded, so a case that never signals this run cannot strand it.
+	i=0
+	while [ "$i" -lt 600 ]; do
+		sleep 0.05
+		i=$((i + 1))
+	done
+	exit 9
+	;;
+reuse)
+	printf '%s Thu Jan  1 00:00:00 1970\n' "$RECORD_TEST_REUSE_PID" >>"$PROCS_FILE"
+	exit 7
+	;;
+garbage)
+	printf '%s\n' '0 x' '1 x' 'abc x' '-1 x' '007 x' '' '12' '77 ' >>"$PROCS_FILE"
+	exit 7
+	;;
+*) fail "unknown RECORD_TEST_INNER '$RECORD_TEST_INNER'" ;;
+esac
 
 # --- COUNT must be a positive integer, in both modes, before results are touched
 count_case() {
@@ -488,7 +683,7 @@ grace_case() {
 	kill -TERM "$pid" 2>/dev/null || true
 	status=0
 	wait "$pid" || status=$?
-	PIDS=
+	forget_pid "$pid"
 	if [ "$status" -ne 130 ]; then
 		echo "--- grace stdio ---" >&2
 		cat "$D/stdio" >&2
@@ -667,18 +862,16 @@ race_case() {
 	# Reap the losers (they already exited).
 	while read -r p; do
 		wait "$p" 2>/dev/null || true
+		forget_pid "$p"
 	done <"$D/pids"
-	PIDS=
-	if [ -s "$D/gc.pid" ]; then
-		kill "$(cat "$D/gc.pid")" 2>/dev/null || true
-	fi
+	kill_gc "$D"
 	echo "ok one winner of $n${label:+ against a $label lock}"
 }
 
 # kill_gc DIR: the stub go's grandchild, whatever happened to the case.
 kill_gc() {
-	if [ -s "$1/gc.pid" ]; then
-		kill "$(cat "$1/gc.pid")" 2>/dev/null || true
+	if [ -s "$1/gc.pid" ] && [ -s "$1/gc.lstart" ]; then
+		signal_if TERM "$(cat "$1/gc.pid")" "$(cat "$1/gc.lstart")"
 	fi
 }
 
@@ -718,7 +911,7 @@ signal_case() {
 		fi
 		canary_group=$(cut -d' ' -f1 "$D/fam")
 		pid=$(cut -d' ' -f2 "$D/fam")
-		note_extra "$canary_group"
+		note_pid "$canary_group"
 	else
 		start_at "$D/run" 1 "$D/stdio" /bin/sh -c "$STUB_ENV"'exec /bin/sh "$3" "$4" 1x 1 "Dispatch\$"' \
 			_ "$D/bin" "$D" "$SUT" "$D/out.txt"
@@ -750,7 +943,7 @@ signal_case() {
 		status=$(cat "$D/fam.status")
 	else
 		wait "$pid" || status=$?
-		PIDS=$canary_sep
+		forget_pid "$pid"
 	fi
 	if [ "$status" -ne 130 ]; then
 		echo "--- $sig stdio ---" >&2
@@ -799,7 +992,7 @@ kill9_case() {
 	wait_file "$D/fam" || sig_fail "$D" "kill -9: the family did not start"
 	canary_group=$(cut -d' ' -f1 "$D/fam")
 	pid=$(cut -d' ' -f2 "$D/fam")
-	note_extra "$canary_group"
+	note_pid "$canary_group"
 	wait_file "$D/go.pid" || sig_fail "$D" "kill -9: the stub go never started"
 	kill -KILL "$pid"
 	wait_file "$D/fam.status" || sig_fail "$D" "kill -9: the recorder did not die"
@@ -838,7 +1031,7 @@ refusal_case() {
 	fi
 	kill -TERM "$holder" 2>/dev/null || true
 	wait "$holder" 2>/dev/null || true
-	PIDS=
+	forget_pid "$holder"
 	kill_gc "$D"
 	echo "ok refusal names the pid, not a group"
 }
@@ -866,7 +1059,7 @@ exec /bin/sh "$3" "$4" 1x 1 "Dispatch\$"' _ "$D/bin" "$D" "$SUT" "$D/out.txt"
 	echo "$pid" >"$D/stage.pid"
 	status=0
 	wait "$pid" || status=$?
-	PIDS=
+	forget_pid "$pid"
 	if [ "$status" -ne 130 ]; then
 		cat "$D/stdio" >&2
 		fail "staging signal: status $status, want 130"
@@ -1092,7 +1285,7 @@ exec /bin/sh "$3" "$4" 1x 1 "Dispatch\$"
 	fi
 	kill -TERM "$pid" 2>/dev/null || true
 	wait "$pid" 2>/dev/null || true
-	PIDS=
+	forget_pid "$pid"
 	echo "ok idle measured on $HOST: $(grep -o '[0-9.][0-9.]*% idle' "$d/stdio" | head -1)"
 }
 
@@ -1141,6 +1334,133 @@ cleanup_case() {
 	echo "ok a failing run removes its scratch tree"
 }
 
+# --- cleanup: what it signals, what it waits for, and what it survives ---
+# Each case below runs this script again (RECORD_TEST_INNER, above) in a session of
+# its own, with its own scratch tree under bench/.probe, and judges what that run's
+# cleanup did: the tree is gone, no helper it started is left alive, and the run's
+# own exit status came through.
+SELF=$ROOT/bench/$(basename "$0")
+
+# probe_count: the scratch trees under bench/.probe, this run's own among them.
+probe_count() {
+	ls "$PROBE" | wc -l | tr -d ' '
+}
+
+# start_inner MODE [NAME=VALUE ...]: the inner run, in the background. Sets INNER
+# to its pid; its output lands in $WORK/inner.MODE.out. Not called from a command
+# substitution (see start_at).
+start_inner() {
+	mode=$1
+	shift
+	start_at "$WORK" 1 "$WORK/inner.$mode.out" env "RECORD_TEST_INNER=$mode" "$@" /bin/sh "$SELF"
+	INNER=$STARTED
+	note_pid "$INNER"
+}
+
+# finish_inner MODE WANT BEFORE: the inner run has ended with status WANT, left no
+# scratch tree behind (BEFORE trees were there when it started) and printed no rm
+# error.
+finish_inner() {
+	status=0
+	wait "$INNER" || status=$?
+	forget_pid "$INNER"
+	after=$(probe_count)
+	if [ "$status" != "$2" ] || [ "$3" != "$after" ] || grep -q 'cannot remove' "$WORK/inner.$1.out"; then
+		cat "$WORK/inner.$1.out" >&2
+		ls -a "$PROBE" >&2
+		fail "the $1 run: exit $status (want $2), $((after - $3)) scratch directory(ies) left, rm errors above if any"
+	fi
+}
+
+# --- the scratch tree is removed after processes that outlive their signal ---
+# cleanup signalled its processes and removed the tree at once, so one still
+# writing (the stat feed of a case run in a subshell was never signalled at all)
+# made rm fail with "Directory not empty". A run that ends with status 7 while three
+# stragglers write into the tree (one of them ignoring TERM, so only the KILL
+# escalation ends it) must remove it, leave no straggler alive, print no rm error,
+# and still exit 7.
+straggler_case() {
+	pidfile=$WORK/straggler.pids
+	: >"$pidfile"
+	before=$(probe_count)
+	start_inner straggler "RECORD_TEST_STRAGGLER_PIDS=$pidfile"
+	finish_inner straggler 7 "$before"
+	[ "$(wc -l <"$pidfile" | tr -d ' ')" = 3 ] || fail "the stragglers did not all start"
+	while read -r p; do
+		# They end with the run that started them, so one alive now is one cleanup
+		# left behind.
+		if alive "$p"; then
+			fail "a straggler (pid $p) outlived the run that started it"
+		fi
+	done <"$pidfile"
+	echo "ok the scratch tree is removed after processes that outlive their signal"
+}
+
+# --- a pid that is no longer the process that was recorded is not signalled ---
+# cleanup signals pids it recorded long ago, nearly all of them dead by then; the
+# kernel hands a dead pid's number to the next process, and cleanup then went on to
+# KILL whatever held it. A live helper is registered here with a start time that is
+# not its own, which is how a reused pid looks: the run must leave it alone.
+reused_pid_case() {
+	/bin/sh -c 'while kill -0 "$1" 2>/dev/null; do sleep 0.1; done' _ "$$" &
+	helper=$!
+	note_pid "$helper"
+	before=$(probe_count)
+	start_inner reuse "RECORD_TEST_REUSE_PID=$helper"
+	finish_inner reuse 7 "$before"
+	if ! alive "$helper"; then
+		cat "$WORK/inner.reuse.out" >&2
+		fail "cleanup signalled a process whose start time was not the one recorded"
+	fi
+	grep -q "pid $helper is another process now" "$WORK/inner.reuse.out" || {
+		cat "$WORK/inner.reuse.out" >&2
+		fail "cleanup skipped a pid that is another process now without saying so"
+	}
+	kill -TERM "$helper" 2>/dev/null || true
+	wait_dead "$helper" || fail "the helper did not end"
+	wait "$helper" 2>/dev/null || true
+	forget_pid "$helper"
+	echo "ok cleanup leaves a reused pid alone"
+}
+
+# --- registry lines that are not a pid are ignored, not signalled ---
+# A pid of 0 made `kill -TERM 0` signal cleanup's own process group; the run is in a
+# session of its own here, so that is the run itself, and its exit status shows it.
+malformed_entry_case() {
+	before=$(probe_count)
+	start_inner garbage
+	finish_inner garbage 7 "$before"
+	n=$(grep -c 'ignoring the malformed entry' "$WORK/inner.garbage.out" || true)
+	[ "$n" = 8 ] || {
+		cat "$WORK/inner.garbage.out" >&2
+		fail "cleanup reported $n malformed entries, want 8"
+	}
+	echo "ok malformed registry lines are ignored"
+}
+
+# --- more signals during a cleanup do not cut it short ---
+# The first TERM puts the run into cleanup, which then waits out a straggler that
+# ignores TERM (5 s). TERM, HUP and INT sent meanwhile ran the `exit 130` trap
+# inside the EXIT trap and ended the cleanup before it removed the tree.
+signal_during_cleanup_case() {
+	pidfile=$WORK/signals.pids
+	ready=$WORK/signals.ready
+	: >"$pidfile"
+	before=$(probe_count)
+	start_inner signals "RECORD_TEST_STRAGGLER_PIDS=$pidfile" "RECORD_TEST_READY=$ready"
+	if ! wait_file "$ready"; then
+		cat "$WORK/inner.signals.out" >&2
+		fail "the run to be signalled never got going"
+	fi
+	kill -TERM "$INNER"
+	sleep 1
+	kill -TERM "$INNER" 2>/dev/null || true
+	kill -HUP "$INNER" 2>/dev/null || true
+	kill -INT "$INNER" 2>/dev/null || true
+	finish_inner signals 130 "$before"
+	echo "ok signals during a cleanup do not end it"
+}
+
 # RECORD_TEST_ONLY="count_case order_case" runs just those cases (a case name is
 # the function name; the arguments of a case that takes some are not part of it).
 run_case() {
@@ -1181,6 +1501,10 @@ run_case real_idle_case
 run_case linux_branch_case
 run_case mutant_case
 run_case cleanup_case
+run_case straggler_case
+run_case reused_pid_case
+run_case malformed_entry_case
+run_case signal_during_cleanup_case
 
 kill -0 "$CANARY" 2>/dev/null || fail "parent process group did not survive"
 echo "ok record.sh"
