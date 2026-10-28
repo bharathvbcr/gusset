@@ -37,25 +37,69 @@ fail() {
 	exit 1
 }
 
+# alive PID: running. A zombie is not: kill -0 succeeds for one, and under a
+# PID 1 that does not reap orphans a group-killed process stays one, which read
+# as a survivor. ps -o stat= puts Z in the state for a zombie on both procps and
+# BSD ps (modifier letters never include Z); any other state is alive, so the
+# check stays strict for a live process.
+alive() {
+	kill -0 "$1" 2>/dev/null || return 1
+	state=$(ps -o stat= -p "$1" 2>/dev/null || true)
+	case $state in
+	*Z*) return 1 ;;
+	esac
+	return 0
+}
+
+# wait_dead PID: up to 5s for a process that was signalled to be gone.
+wait_dead() {
+	i=0
+	while [ "$i" -lt 100 ]; do
+		if ! alive "$1"; then
+			return 0
+		fi
+		sleep 0.05
+		i=$((i + 1))
+	done
+	return 1
+}
+
 CANARY=
 PIDS=
-EXTRA=
+# Every process note_extra was told about, one pid a line. A file, not a variable:
+# a case run in a subshell (mutant_case) starts processes whose pids a variable
+# would lose with the subshell, and the stat feed it started went on writing into
+# its case directory while cleanup removed it.
+EXTRA_FILE=$WORK/.extra
+
+# The processes cleanup signals are reaped before the scratch tree goes, not just
+# signalled: a signal takes effect when the target next runs, so removing the tree
+# straight after one raced any process still writing into it (rm: cannot remove
+# ...: Directory not empty). Each gets a bounded wait for the TERM, then a KILL
+# and a second bounded wait; one that survives both fails the run, loudly.
 cleanup() {
 	status=$?
-	for p in $EXTRA $CANARY; do
-		kill "$p" 2>/dev/null || true
+	victims="$(cat "$EXTRA_FILE" 2>/dev/null || true) $CANARY $PIDS"
+	# The stub go and its grandchild, for a case that failed before it reaped its own.
+	for f in "$WORK"/*/go.pid "$WORK"/*/gc.pid; do
+		if [ -s "$f" ]; then
+			victims="$victims $(cat "$f")"
+		fi
 	done
-	for p in $PIDS; do
+	for p in $victims; do
 		kill -TERM "$p" 2>/dev/null || true
 	done
-	for p in $PIDS $CANARY; do
-		wait "$p" 2>/dev/null || true
-	done
-	# The stub go's grandchildren, for a case that failed before it reaped its own.
-	for f in "$WORK"/*/gc.pid; do
-		if [ -s "$f" ]; then
-			kill "$(cat "$f")" 2>/dev/null || true
+	for p in $victims; do
+		if ! wait_dead "$p"; then
+			kill -KILL "$p" 2>/dev/null || true
+			if ! wait_dead "$p"; then
+				echo "FAIL: cleanup: process $p survived TERM and KILL" >&2
+				status=1
+				continue
+			fi
 		fi
+		# A child of this shell is reaped once it is gone; it never blocks here.
+		wait "$p" 2>/dev/null || true
 	done
 	rm -rf "$WORK"
 	rmdir "$PROBE" 2>/dev/null || true
@@ -70,7 +114,7 @@ note_pid() {
 }
 
 note_extra() {
-	EXTRA="$EXTRA $1"
+	printf '%s\n' "$1" >>"$EXTRA_FILE"
 }
 
 # start_at DIR MODE OUT -- argv
@@ -177,33 +221,6 @@ wait_file() {
 	return 1
 }
 
-# alive PID: running. A zombie is not: kill -0 succeeds for one, and under a
-# PID 1 that does not reap orphans a group-killed process stays one, which read
-# as a survivor. ps -o stat= puts Z in the state for a zombie on both procps and
-# BSD ps (modifier letters never include Z); any other state is alive, so the
-# check stays strict for a live process.
-alive() {
-	kill -0 "$1" 2>/dev/null || return 1
-	state=$(ps -o stat= -p "$1" 2>/dev/null || true)
-	case $state in
-	*Z*) return 1 ;;
-	esac
-	return 0
-}
-
-# wait_dead PID: up to 5s for a process that was signalled to be gone.
-wait_dead() {
-	i=0
-	while [ "$i" -lt 100 ]; do
-		if ! alive "$1"; then
-			return 0
-		fi
-		sleep 0.05
-		i=$((i + 1))
-	done
-	return 1
-}
-
 # start_statfeed FILE: a background writer that keeps a /proc/stat-shaped file
 # moving at 90% idle, so the Linux branch of cpu_idle (two samples a second apart)
 # reads a machine this test controls. Atomic replace, so a sample never sees half
@@ -230,6 +247,44 @@ start_statfeed() {
 	STATFEED_PID=$!
 	note_extra "$STATFEED_PID"
 	wait_file "$feed" || fail "stat feed did not start"
+}
+
+# start_straggler DIR [stubborn]: a process that keeps creating files in DIR, as the
+# stat feed does, and that takes its time to die: on TERM it goes on creating files
+# for about a third of a second (a loaded host's worth of slow shutdown) and only
+# then exits. Given `stubborn` it ignores TERM, and only KILL ends it. It also ends
+# with this shell, so a failure of the check cannot strand it. Its pid goes to
+# note_extra and, one a line, to $RECORD_TEST_STRAGGLER_PIDS, which straggler_case
+# reads after the run that started it is over.
+start_straggler() {
+	mkdir -p "$1"
+	/bin/sh -c 'dir=$1
+owner=$2
+mode=$3
+i=0
+fill() {
+	true >"$dir/f$((i % 64))" 2>/dev/null
+	i=$((i + 1))
+}
+slow_exit() {
+	n=0
+	while [ "$n" -lt 15000 ]; do
+		fill
+		n=$((n + 1))
+	done
+	exit 0
+}
+case $mode in
+stubborn) trap "" TERM ;;
+*) trap slow_exit TERM ;;
+esac
+echo ready >"$dir.ready"
+while kill -0 "$owner" 2>/dev/null; do
+	fill
+done' _ "$1" "$$" "${2:-}" &
+	printf '%s\n' "$!" >>"$RECORD_TEST_STRAGGLER_PIDS"
+	note_extra "$!"
+	wait_file "$1.ready" || fail "straggler did not start"
 }
 
 # install_stubs DEST KIND [UNAME]
@@ -378,6 +433,21 @@ if [ "${RECORD_TEST_FAULT:-}" = "1" ]; then
 	new_case fault fast
 	: >"$D/run/state"
 	fail "injected failure after setup"
+fi
+
+# RECORD_TEST_STRAGGLER=1 (run by straggler_case): two processes that go on writing
+# into the scratch tree after being told to stop, one started here, one that ignores
+# TERM, and one from a subshell, as mutant_case starts its processes; then the run
+# ends with status 7.
+if [ "${RECORD_TEST_STRAGGLER:-}" = "1" ]; then
+	new_case straggle fast
+	start_straggler "$D/main"
+	start_straggler "$D/stubborn" stubborn
+	(
+		new_case substraggle fast
+		start_straggler "$D/sub"
+	)
+	exit 7
 fi
 
 # --- COUNT must be a positive integer, in both modes, before results are touched
@@ -1141,6 +1211,35 @@ cleanup_case() {
 	echo "ok a failing run removes its scratch tree"
 }
 
+# --- the scratch tree is removed after processes that outlive their signal ---
+# cleanup signalled its processes and removed the tree at once, so one still
+# writing (the stat feed of a case run in a subshell was never signalled at all)
+# made rm fail with "Directory not empty". A run that ends with status 7 while three
+# stragglers write into the tree (one of them ignoring TERM, so only the KILL
+# escalation ends it) must remove it, leave no straggler alive, print no rm error,
+# and still exit 7.
+straggler_case() {
+	pidfile=$WORK/straggler.pids
+	: >"$pidfile"
+	before=$(ls "$PROBE" | wc -l | tr -d ' ')
+	status=0
+	RECORD_TEST_STRAGGLER=1 RECORD_TEST_STRAGGLER_PIDS=$pidfile /bin/sh "$0" >"$WORK/straggler.out" 2>&1 || status=$?
+	[ "$(wc -l <"$pidfile" | tr -d ' ')" = 3 ] || fail "the stragglers did not all start"
+	after=$(ls "$PROBE" | wc -l | tr -d ' ')
+	if [ "$status" != 7 ] || [ "$before" != "$after" ] || grep -q 'cannot remove' "$WORK/straggler.out"; then
+		cat "$WORK/straggler.out" >&2
+		ls -a "$PROBE" >&2
+		fail "a run with stragglers: exit $status (want 7), $((after - before)) scratch directory(ies) left, rm errors above if any"
+	fi
+	while read -r p; do
+		if alive "$p"; then
+			kill -KILL "$p" 2>/dev/null || true
+			fail "a straggler (pid $p) outlived the run that started it"
+		fi
+	done <"$pidfile"
+	echo "ok the scratch tree is removed after processes that outlive their signal"
+}
+
 # RECORD_TEST_ONLY="count_case order_case" runs just those cases (a case name is
 # the function name; the arguments of a case that takes some are not part of it).
 run_case() {
@@ -1181,6 +1280,7 @@ run_case real_idle_case
 run_case linux_branch_case
 run_case mutant_case
 run_case cleanup_case
+run_case straggler_case
 
 kill -0 "$CANARY" 2>/dev/null || fail "parent process group did not survive"
 echo "ok record.sh"
