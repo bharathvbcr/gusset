@@ -13,7 +13,18 @@ bench/results/*.tmp
 # Local agent/account state (also excluded per-machine; listed here so clones agree)
 .claude-account
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/scheduled_tasks.json
+.claude/worktrees/
+.claude/routines/
+.claude/checkpoints/
+.claude/mailbox/
+.claude/agent-registry.json
+.claude/agent-memory-local/
+.claude/first-run
+.claude/assistant-daemon-state.json
 .cursor/hooks/state/
+.cursor/worktrees/
 
 # Editors and IDEs
 .idea/
@@ -60,8 +71,27 @@ perf.data*
 !.devcouncil/
 !.devcouncil/config.yaml
 
-# GitPulse (agent worktrees and task state)
+# GitPulse (agent worktrees, task briefs, and task state)
 .gitpulse/
+/tasks/
+*.task.md
+.tasks/
+
+# Session reports (build, wave, audit, branch, release)
+/AUDIT_REPORT*.md
+/BRANCH_REPORT*.md
+/BUILD_REPORT*.md
+/WAVE_REPORT*.md
+/RELEASE_REPORT*.md
+/*_REPORT*.md
+/wave-*.md
+
+# Working plans, scratchpads, and notes
+*_Implementation_Plan.md
+**/*.plan.md
+TODO.md
+NOTES.md
+/scratch/
 
 # bench/record.sh holds this while a recording runs and removes it on exit. The
 # stage and claim directories are the private directory a lock is built in and a
