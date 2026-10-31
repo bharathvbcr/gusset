@@ -147,6 +147,7 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
 - Between 21:05 and 21:07 CDT on 2026-10-27, something other than this session edited `BUILD_REPORT.md` (a separate "Wave 5" section), `CHANGELOG.md`, `DECISIONS.md` and `docs/benchmarks.md`.
 - GitPulse saw no other agent session in this repository.
 - On your instruction those edits are untouched. So the main checkout stays at `e561435` until they are committed or set aside, and their `BUILD_REPORT.md` change will conflict with this section.
+- Reconciled on 2026-10-29, after this checkout fast-forwarded onto origin. The wave 5 section above was kept. What those edits added, and this report did not already say, is committed with them: the four `DECISIONS.md` rows (R10, the rejected candidates, the DevMap unpin, libc 0.2.191), the changelog sentence that R10 landed in #38, the DevMap changelog bullet, and the `docs/benchmarks.md` index rows for recordings already under `bench/results/dispatch/` and `bench/results/gp-feat-001/`. Their shorter wave 5 section was not committed. It ended at `e561435` and dropped #43 through #48.
 
 **Still yours.**
 - **Crossover data (ft-8a8279f5).** An idle gate can't record it on this shared host. It needs about 30 minutes with the other workloads (other sessions' builds and benchmarks) paused. That is the last open criterion on the perf card.

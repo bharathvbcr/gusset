@@ -96,6 +96,12 @@ comparison.
 | `CallNoopBare`, `CallNoopTraced` | `carrier_goexit_internal_test.go` | none: no committed results file |
 | `Plain`, `NoEscape` | `bench/seed/esc/esc_test.go` | none: no committed results file |
 | the r14 two-engine host | `bench/r14/` | none: no committed results file |
+| `BenchmarkDeadlineExpiry`, `BenchmarkDeadlineInFlight`, `BenchmarkDiscard`, `BenchmarkStats` | `bench/dispatch_test.go` | none: baseline recorded under `bench/results/dispatch/` |
+| `BenchmarkGussetCallResult`, `BenchmarkGussetSubmitWaitResult`, `BenchmarkGussetWaitBufferResultSize` | `bench/result_size_test.go` | none: the g7 and r8 A/B records under `bench/results/gp-feat-001/` cover these sizes |
+| `BenchmarkGussetWaitBuffer` | `bench/waitbuffer_test.go` | none: the g7 A/B record under `bench/results/gp-feat-001/` |
+| `BenchmarkBufferAllocParallel` | `bench/alloc_counters_test.go` | none: recorded under `bench/results/gp-feat-001/r10-*` |
+| Cargo `dispatch` (`diagnostic_opcode0`, etc.) | `crates/gusset/benches/dispatch.rs` | none: cargo benchmark recorded under `bench/results/dispatch/` |
+| Cargo `alloc_counters` | `crates/gusset/benches/alloc_counters.rs` | none: no committed cargo results file; the Go A/B is `bench/results/gp-feat-001/r10-*` |
 
 ## What is not charted, and why
 
@@ -128,6 +134,8 @@ crossover.
 
 **Never recorded.** `CompletionTransport`, `CallNoopBare`/`CallNoopTraced`, the
 `esc` pair and the r14 host have no committed output at all.
+
+**Candidate and baseline recordings in subdirectories.** Baseline recordings for dispatch, deadlines, Discard and Stats sit under [`bench/results/dispatch/`](../bench/results/dispatch/README.md). Coordination overhead profiling and A/B evaluations for candidates R6, R8, R10, R11 and G6–G8 (with R9 profiles) sit under [`bench/results/gp-feat-001/`](../bench/results/gp-feat-001/README.md); R7's records stay on its archived tip, as that README says. Each directory documents its own methodology and is not part of the main comparison gallery.
 
 To get any of these charted, re-record them through `bench/record.sh` on the host
 that matters, commit the file, and add the chart to
