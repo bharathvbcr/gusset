@@ -1,6 +1,6 @@
 # BUILD_REPORT
 
-Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End of wave 1: `main` @ `a9cb808`. End of wave 2: `main` @ `6fe980a`. End of wave 3: `main` @ `8ef9659`. End of wave 4: `main` @ `8cf859f`. End of wave 5: `main` @ `52745db`. "Wave 5", "Wave 4", "Wave 3" and "Wave 2" supersede the scope lines below. The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
+Date: 2026-10-26, with wave 2 running into 2026-10-27. Base: `main` @ `d151fa3`, after the main checkout was fast-forwarded from `320c56c` (123 commits behind). End of wave 1: `main` @ `a9cb808`. End of wave 2: `main` @ `6fe980a`. End of wave 3: `main` @ `8ef9659`. End of wave 4: `main` @ `8cf859f`. End of wave 5: `main` @ `52745db`, followed by report close #47 (`256f6b0`), reconciliation #49 (`354efbb`), and repo settings #50 (`2b44d89`). "Wave 5", "Wave 4", "Wave 3" and "Wave 2" supersede the scope lines below. The previous report (2026-10-13, `wave-w1`) is in git history at `320c56c:BUILD_REPORT.md`.
 
 **Scope.** The ask was "work on major optimizations and bugs, pull all changes and merge".
 - Bugs and gate defects: four PRs merged, each with a passing Matrix run on main after merge.
@@ -39,6 +39,9 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
 | #45 | none posted | APPROVED: "Approved. Cursor Bugbot completed successfully with no findings that need human review, and no approval policy requires a human reviewer. This automation had no prior approval on the current head." |
 | #46 | "We couldn't complete this review." The account had reached its Codex usage limit; the state field nevertheless reads `has_any_findings: true` | APPROVED: "Approved. Cursor Bugbot completed successfully and reported no findings that need human review; no approval policy requires a human pass on these test-harness and changelog changes." |
 | #48 | "We couldn't complete this review." Same usage limit; the state field reads `has_any_findings: true` | APPROVED: "Approved. Cursor Bugbot completed successfully on the current head with no review comment findings, and no approval policy requires human review. This automation had no prior approval to keep or dismiss." |
+| #47 | "You have reached your Codex usage limits for code reviews." | Not approved on any head. On `8db8486`: "Not approved. Cursor Bugbot is not on this head after the first check poll, and its earlier medium-severity finding on BUILD_REPORT.md is still an unresolved review thread. Human review is needed and no reviewers were assigned." Merged with 0 required approvals |
+| #49 | none posted | APPROVED: "Approved. Cursor Bugbot completed successfully with no findings that need human review, and no approval policy requires a human pass on this docs-only change." |
+| #50 | none posted | APPROVED: "Approved. Cursor Bugbot completed successfully and reported no findings that need human review, and no approval policy requires additional review." |
 
 | PR | Merge | Card | What | Main Matrix / adopter after merge |
 | --- | --- | --- | --- | --- |
@@ -47,6 +50,9 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
 | #44, #45 | `3d3f73f`, `5fff810` | — | This report, then a correction of its crossover section | #44: 40640847299 / 40640847215; #45: 40645801390 / 40645801584 |
 | #46 | `326e002` | ft-b58e1c66 | `record_test.sh` cleanup reaps what it started, and only what it started, before removing its scratch tree | 40648589935 / 40648589918. The Matrix's first attempt failed in macOS Unit & Pitfalls on an `internal/isolate` test that #46 does not touch (filed as ft-735a4757); attempt 2 passed |
 | #48 | `52745db` | ft-735a4757 | The steady-frames read test tells a host stall from a lost frame | 40658526056 / 40658526577 |
+| #47 | `256f6b0` | — | BUILD_REPORT closes wave 5 with #45 to #48 | 40662610353 / 40662610303 |
+| #49 | `354efbb` | — | Record decisions the checkout still held uncommitted (R10, rejected candidates, DevMap unpin, libc 0.2.191, bench index) | 41151191791 / 41151192066 |
+| #50 | `2b44d89` | — | Repo-level Claude Code attribution off (.claude/settings.json); ignore Cursor hook state (.cursor/hooks/state/) | 41151218690 / 41151218633 (on PR) |
 
 - **#42.** You approved the bump this wave.
   - `Cargo.lock` moves from 0.2.189 and `fuzz/Cargo.lock` from 0.2.190. Both `Cargo.toml` files still say `"0.2"`.
@@ -88,6 +94,14 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
     | `-race` | 50/50 pass |
     | Freeze harness | 400/400 pass, 36 writer-gap reruns |
     | Re-arm-deleted mutant | 100/100 fail |
+- **#47.** Docs only: closed the wave 5 BUILD_REPORT with #45, #46, and #48 incorporated.
+- **#49.** Reconciled doc decisions held uncommitted in the checkout against origin/main:
+  - Added DECISIONS.md rows for R10 allocator counters (`Counters` on separate cache lines with saturating `fetch_add`), the four rejected candidates (R6, R11, G8, R8) kept off main, the DevMap MCP unpinning (`ft-197f6d41`), and libc 0.2.191 adoption (`ft-d3d3888d`).
+  - Added changelog entry noting R10 landed in PR #38 (`8ef9659`) and DevMap unpinning in PR #40 (`8cf859f`).
+  - Added index rows in `docs/benchmarks.md` for existing recordings under `bench/results/dispatch/` and `bench/results/gp-feat-001/`.
+- **#50.** Repo configuration and agent state:
+  - Created `.claude/settings.json` to disable commit and PR attribution (`attribution.commit = ""`, `attribution.pr = ""`, `attribution.sessionUrl = false`) for single-repo/cloud sessions, using the object format compatible across Claude Code versions.
+  - Added `.cursor/hooks/state/` to `.gitignore` so Cursor's per-run continual-learning run counters and session state are treated as local-only and not tracked.
 
 **Issue #4: closed as completed, on your go.**
 - The closing comment maps each failed nightly job to its fix commit: d78c6bc, 7e48959, 7c6aded, de70bd4, 8a456f1 and ca5759d (#10), and 4c9c9ba (#12).
@@ -147,7 +161,7 @@ Asked for as "commit and merge all branches and delete old and stale branches", 
 - Between 21:05 and 21:07 CDT on 2026-10-27, something other than this session edited `BUILD_REPORT.md` (a separate "Wave 5" section), `CHANGELOG.md`, `DECISIONS.md` and `docs/benchmarks.md`.
 - GitPulse saw no other agent session in this repository.
 - On your instruction those edits are untouched. So the main checkout stays at `e561435` until they are committed or set aside, and their `BUILD_REPORT.md` change will conflict with this section.
-- Reconciled on 2026-10-29, after this checkout fast-forwarded onto origin. The wave 5 section above was kept. What those edits added, and this report did not already say, is committed with them: the four `DECISIONS.md` rows (R10, the rejected candidates, the DevMap unpin, libc 0.2.191), the changelog sentence that R10 landed in #38, the DevMap changelog bullet, and the `docs/benchmarks.md` index rows for recordings already under `bench/results/dispatch/` and `bench/results/gp-feat-001/`. Their shorter wave 5 section was not committed. It ended at `e561435` and dropped #43 through #48.
+- Reconciled on 2026-10-30 in PR #49 (`354efbb`), after this checkout fast-forwarded onto origin. The wave 5 section above was kept. What those edits added, and this report did not already say, is committed with them: the four `DECISIONS.md` rows (R10, the rejected candidates, the DevMap unpin, libc 0.2.191), the changelog sentence that R10 landed in #38, the DevMap changelog bullet, and the `docs/benchmarks.md` index rows for recordings already under `bench/results/dispatch/` and `bench/results/gp-feat-001/`. Their shorter wave 5 section was not committed. It ended at `e561435` and dropped #43 through #48.
 
 **Still yours.**
 - **Crossover data (ft-8a8279f5).** An idle gate can't record it on this shared host. It needs about 30 minutes with the other workloads (other sessions' builds and benchmarks) paused. That is the last open criterion on the perf card.
