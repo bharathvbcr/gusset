@@ -13,6 +13,7 @@ bench/results/*.tmp
 # Local agent/account state (also excluded per-machine; listed here so clones agree)
 .claude-account
 .claude/settings.local.json
+.cursor/hooks/state/
 
 # Editors and IDEs
 .idea/
