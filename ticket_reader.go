@@ -216,7 +216,9 @@ func (tr *ticketReader) waitRing() error {
 		}
 	}
 	waiting := (*uint32)(unsafe.Add(tr.ring.Shared, ffi.RingOffWaiting))
-	atomic.StoreUint32(waiting, 1)
+	// atomic.SwapUint32 emits SWPALW on ARM64 (AcqRel), enforcing sequential
+	// consistency before reading the ring slot sequence in ringReady.
+	atomic.SwapUint32(waiting, 1)
 	var err error
 	if !tr.ringReady() && !tr.overflowPending() {
 		err = tr.fillMode(readPark)

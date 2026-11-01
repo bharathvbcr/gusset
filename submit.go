@@ -3,6 +3,7 @@ package gusset
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
 
 	"github.com/bharathvbcr/gusset/internal/ffi"
@@ -211,6 +212,32 @@ func (s *handleState) submitInput(ctx context.Context, raw []byte, buf *Buffer) 
 	if s.poisoned.Load() {
 		<-s.sem
 		return 0, errHandlePoisoned
+	}
+
+	if s.maxUncollected > 0 {
+		s.mu.Lock()
+		for len(s.completed) >= s.maxUncollected && !s.closed.Load() && !s.drainExited.Load() {
+			s.mu.Unlock()
+			select {
+			case <-s.uncollectedCh:
+				s.mu.Lock()
+			case <-ctx.Done():
+				<-s.sem
+				return 0, fmt.Errorf("%w: %w", ErrTooManyUncollected, ctx.Err())
+			case <-s.drainDone:
+				<-s.sem
+				return 0, s.closedErr()
+			}
+		}
+		if s.closed.Load() || s.drainExited.Load() {
+			s.mu.Unlock()
+			<-s.sem
+			return 0, s.closedErr()
+		}
+		if len(s.completed)+1 < s.maxUncollected {
+			s.notifyUncollectedLocked()
+		}
+		s.mu.Unlock()
 	}
 
 	stampTimeout(ctx, &header)

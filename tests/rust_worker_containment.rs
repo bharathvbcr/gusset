@@ -128,3 +128,88 @@ fn panicking_payload_destructor_does_not_kill_the_worker() {
         libc::close(r);
     }
 }
+
+#[test]
+fn direct_drop_panic_payload_catches_secondary_panic_without_abort() {
+    use gusset::ffi::guard::{drop_panic_payload, extract_panic_payload, take_panic_location};
+
+    // 1. DropBomb panicking with &'static str
+    struct StaticStrBomb;
+    impl Drop for StaticStrBomb {
+        fn drop(&mut self) {
+            panic!("static str panic in destructor");
+        }
+    }
+    drop_panic_payload(Box::new(StaticStrBomb));
+    assert!(
+        take_panic_location().is_none(),
+        "stale location after static str bomb"
+    );
+
+    // 2. DropBomb panicking with String
+    struct StringBomb;
+    impl Drop for StringBomb {
+        fn drop(&mut self) {
+            panic!("{}", "formatted string panic in destructor".to_string());
+        }
+    }
+    drop_panic_payload(Box::new(StringBomb));
+    assert!(
+        take_panic_location().is_none(),
+        "stale location after string bomb"
+    );
+
+    // 3. DropBomb panicking with non-string payload (i64)
+    struct NonStringBomb;
+    impl Drop for NonStringBomb {
+        fn drop(&mut self) {
+            std::panic::panic_any(9999i64);
+        }
+    }
+    drop_panic_payload(Box::new(NonStringBomb));
+    assert!(
+        take_panic_location().is_none(),
+        "stale location after non-string bomb"
+    );
+
+    // 4. Double-panic bomb: destructor throws an InnerBomb whose destructor ALSO panics
+    struct OuterBomb;
+    impl Drop for OuterBomb {
+        fn drop(&mut self) {
+            struct InnerBomb;
+            impl Drop for InnerBomb {
+                fn drop(&mut self) {
+                    panic!("inner bomb destructor panic");
+                }
+            }
+            std::panic::panic_any(InnerBomb);
+        }
+    }
+    // drop_panic_payload must catch InnerBomb, see it's non-string, and mem::forget it
+    // without executing InnerBomb::drop or aborting the process.
+    drop_panic_payload(Box::new(OuterBomb));
+    assert!(
+        take_panic_location().is_none(),
+        "stale location after double-panic bomb"
+    );
+
+    // 5. Cascading bomb: 5-level nested bomb
+    struct CascadingBomb(u8);
+    impl Drop for CascadingBomb {
+        fn drop(&mut self) {
+            if self.0 > 0 {
+                std::panic::panic_any(CascadingBomb(self.0 - 1));
+            } else {
+                panic!("cascade terminal panic");
+            }
+        }
+    }
+    for _i in 0..10 {
+        drop_panic_payload(Box::new(CascadingBomb(5)));
+    }
+    assert!(take_panic_location().is_none());
+
+    // 6. extract_panic_payload on a bomb safely describes and disposes
+    let msg = extract_panic_payload(Box::new(OuterBomb));
+    assert!(!msg.is_empty());
+}

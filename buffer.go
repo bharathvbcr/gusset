@@ -293,7 +293,7 @@ func (b *Buffer) Bytes() []byte {
 // empty result, or a small result carried in Go memory (see WaitBuffer). A
 // 0-id Buffer passed to Submit or CallBuffer sends its bytes inline.
 func (b *Buffer) ID() uint64 {
-	if b == nil || b.state == nil {
+	if b == nil || b.state == nil || b.freed.Load() {
 		return 0
 	}
 	return b.id
@@ -318,10 +318,15 @@ func (b *Buffer) Free() error {
 	charge := b.budgeted
 	// Drop our own view before releasing the lock, so a Bytes that acquires it
 	// next sees freed and never copies this header out.
-	// An id-0 buffer's data is Go memory and is never written after
-	// construction, so Submit can read it after an atomic freed check without
-	// a lock (see submitInput). Only a Rust view is withdrawn here.
-	if b.id != 0 {
+	// Poison backing memory with 0xDE to detect use-after-free on slices previously
+	// extracted via Bytes(), but only if the handle is not already closed (in which
+	// case Rust has already deallocated the underlying memory to the system allocator).
+	if len(b.data) > 0 {
+		if id == 0 || state == nil || !state.closed.Load() {
+			for i := range b.data {
+				b.data[i] = 0xDE
+			}
+		}
 		b.data = nil
 	}
 	b.mu.Unlock()

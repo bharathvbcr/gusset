@@ -1,3 +1,15 @@
+# gusset-bench: v1
+# gusset-bench-recorded: 2026-09-25T22:15:00Z
+# gusset-bench-host: vm
+# gusset-bench-uname: Linux 6.18.44-fc-v37 x86_64
+# gusset-bench-package: . ./bench
+# gusset-bench-arms: GussetCallNoop$ GussetCallParallel$ GussetSubmitWait$
+# gusset-bench-benchtime: 1s
+# gusset-bench-count: 8
+# gusset-bench-cpu-idle-before: 98.50
+# gusset-bench-cpu-idle-after: 98.25
+# gusset-bench-min-idle: 60
+# gusset-bench-exclusive: yes
 goos: linux
 goarch: amd64
 pkg: github.com/bharathvbcr/gusset/bench

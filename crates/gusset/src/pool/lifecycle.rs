@@ -229,7 +229,9 @@ impl Handle {
         match rx.recv_timeout(budget) {
             Ok(()) => {
                 // The joiner already released the pipe and dropped `keeper`.
-                let _ = joiner.join();
+                if let Err(payload) = joiner.join() {
+                    drop_panic_payload(payload);
+                }
                 Ok(())
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -243,7 +245,9 @@ impl Handle {
                 ))
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = joiner.join();
+                if let Err(payload) = joiner.join() {
+                    drop_panic_payload(payload);
+                }
                 Err("close: joiner exited before the workers were joined".to_string())
             }
         }

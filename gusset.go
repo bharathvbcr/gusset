@@ -94,6 +94,9 @@ var (
 	// ErrTicketBusy reports that another goroutine is already waiting on this
 	// ticket.
 	ErrTicketBusy = errors.New("gusset: ticket already has a waiter")
+	// ErrTooManyUncollected reports that Submit cannot proceed because the
+	// number of uncollected results has reached the configured ceiling.
+	ErrTooManyUncollected = errors.New("gusset: too many uncollected results")
 )
 
 // errDrainClosed is the error a waiter gets when the completion reader ends

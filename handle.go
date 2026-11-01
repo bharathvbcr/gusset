@@ -92,6 +92,10 @@ type handleState struct {
 	// consumes them. Kept off callResult so the completion channel stays the
 	// same size as HEAD (a uint64 on that struct was +10% B/op on CallParallel).
 	takeIDs map[uint64]uint64
+	// maxUncollected bounds uncollected completed results on this handle (0 = unlimited).
+	maxUncollected int
+	// uncollectedCh is signaled when completed results are claimed or discarded.
+	uncollectedCh chan struct{}
 }
 
 // inlineResultBytes is the egress twin of the 4 KiB submit copy limit (R16).
@@ -140,6 +144,9 @@ func Open(opts ...Option) (*Handle, error) {
 	}
 	if cfg.poolSizeErr != nil {
 		return nil, cfg.poolSizeErr
+	}
+	if cfg.maxUncollectedErr != nil {
+		return nil, cfg.maxUncollectedErr
 	}
 	if cfg.bufferBudget < 0 {
 		return nil, &Error{Code: ErrBadArg.Code, Msg: fmt.Sprintf("buffer budget must not be negative (got %d); 0 means unlimited", cfg.bufferBudget)}
@@ -206,6 +213,13 @@ func Open(opts ...Option) (*Handle, error) {
 		semTickets:    make(map[uint64]struct{}),
 		abandoned:     make(map[uint64]struct{}),
 		takeIDs:       make(map[uint64]uint64),
+		maxUncollected: func() int {
+			if cfg.maxUncollectedSet {
+				return cfg.maxUncollected
+			}
+			return DefaultMaxUncollected
+		}(),
+		uncollectedCh: make(chan struct{}, 1),
 	}
 
 	state.quietProcs.Store(quietAt(runtime.GOMAXPROCS(0)))
@@ -267,13 +281,7 @@ func (s *handleState) close() error {
 	}
 	s.cgoMu.RUnlock()
 
-	// 2. Wait for all active CGO operations to finish before deallocating handle
-	s.cgoMu.Lock()
-	err = ffi.HandleClose(s.ptr)
-	s.ptr = nil
-	s.cgoMu.Unlock()
-
-	// 3. Stop the drain reader. It used to wait for EOF, which needs every
+	// 2. Stop the drain reader. It used to wait for EOF, which needs every
 	// copy of the write end closed: a child forked outside Go's ForkLock (from
 	// Rust or C) that inherited it, or a panic inside gusset_handle_close
 	// before it closed the descriptor, left Close — and every concurrent
@@ -284,7 +292,7 @@ func (s *handleState) close() error {
 	<-s.drainDone
 	_ = s.pipe.Close()
 
-	// 4. Drain any remaining permits from untaken submitted tickets and free unconsumed buffers.
+	// 3. Drain any remaining permits from untaken submitted tickets and collect unconsumed take buffers.
 	// semTickets covers abandoned tickets too: their permits were deliberately
 	// left with the work, and the work is over now that the pool has joined.
 	s.mu.Lock()
@@ -296,9 +304,16 @@ func (s *handleState) close() error {
 	}
 	s.mu.Unlock()
 
+	// 4. Free unconsumed take buffers under cgoMu BEFORE closing the handle and nulling s.ptr!
+	s.cgoMu.Lock()
 	for _, id := range toFree {
-		_ = s.bufFree(id)
+		if id != 0 && s.ptr != nil {
+			_ = ffi.BufFree(s.ptr, id)
+		}
 	}
+	err = ffi.HandleClose(s.ptr)
+	s.ptr = nil
+	s.cgoMu.Unlock()
 
 	return err
 }

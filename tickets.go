@@ -44,7 +44,17 @@ func (s *handleState) takeUnclaimedLocked() []uint64 {
 		}
 	}
 	s.completed = make(map[uint64]callResult)
+	s.notifyUncollectedLocked()
 	return ids
+}
+
+func (s *handleState) notifyUncollectedLocked() {
+	if s.uncollectedCh != nil {
+		select {
+		case s.uncollectedCh <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // collectLocked ends a waiter's claim on a ticket whose outcome it holds: it

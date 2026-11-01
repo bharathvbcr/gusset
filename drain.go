@@ -60,7 +60,10 @@ func drainPipe(s *handleState) {
 					ch <- callResult{err: waiterErr}
 				}
 			}
-			toFree := s.takeUnclaimedLocked()
+			var toFree []uint64
+			if !s.closed.Load() {
+				toFree = s.takeUnclaimedLocked()
+			}
 			s.drainExited.Store(true)
 			// Permits held by abandoned tickets are returned by close, which
 			// drains every entry in semTickets. Clearing the set here only stops
