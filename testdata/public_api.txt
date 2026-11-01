@@ -1,4 +1,5 @@
 // Exported surface of package gusset. Generated: see public_api_test.go.
+const DefaultMaxUncollected
 const ExpectedAbiVersion
 const ExpectedHeaderAlign
 const ExpectedHeaderSize
@@ -31,6 +32,7 @@ func Stats() AllocStats
 func Threads() int64
 func WithBufferBudget(bytes int64) Option
 func WithDiagnosticEngine() Option
+func WithMaxUncollected(n int) Option
 func WithOpcode(opcode uint32) Option
 func WithPoolSize(n int) Option
 type AllocStats struct {
@@ -63,6 +65,7 @@ var ErrPoisoned
 var ErrShutdown
 var ErrShutdownIncomplete
 var ErrTicketBusy
+var ErrTooManyUncollected
 var ErrUnknownTicket
 var OpcodeContextKey
 var SpanContextKey

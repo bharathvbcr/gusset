@@ -144,7 +144,7 @@ pub fn drop_panic_payload(payload: Box<dyn std::any::Any + Send>) {
         // The ordinary `panic!` payloads cannot panic when dropped. Forgetting
         // them leaked a box on every panicking destructor (Miri flags it).
         if second.is::<&'static str>() || second.is::<String>() {
-            drop(second);
+            let _ = catch_unwind(AssertUnwindSafe(move || drop(second)));
         } else {
             std::mem::forget(second);
         }
@@ -160,7 +160,12 @@ pub fn drop_panic_payload(payload: Box<dyn std::any::Any + Send>) {
 /// Consumes the payload and disposes of it through [`drop_panic_payload`]. Take
 /// the panic location first: disposal discards any location its own panic records.
 pub fn extract_panic_payload(payload: Box<dyn std::any::Any + Send>) -> String {
-    let msg = describe_panic_payload(&*payload);
+    let msg = catch_unwind(AssertUnwindSafe(|| describe_panic_payload(&*payload))).unwrap_or_else(
+        |desc_err| {
+            drop_panic_payload(desc_err);
+            "Unknown Rust panic payload (description panicked)".to_string()
+        },
+    );
     drop_panic_payload(payload);
     msg
 }
@@ -170,6 +175,14 @@ fn describe_panic_payload(payload: &(dyn std::any::Any + Send)) -> String {
         truncate_payload((*s).to_string())
     } else if let Some(s) = payload.downcast_ref::<String>() {
         truncate_payload(s.clone())
+    } else if let Some(s) = payload.downcast_ref::<Box<str>>() {
+        truncate_payload(s.to_string())
+    } else if let Some(s) = payload.downcast_ref::<std::borrow::Cow<'static, str>>() {
+        truncate_payload(s.to_string())
+    } else if let Some(e) = payload.downcast_ref::<Box<dyn std::error::Error + Send + Sync>>() {
+        truncate_payload(e.to_string())
+    } else if let Some(e) = payload.downcast_ref::<Box<dyn std::error::Error + Send>>() {
+        truncate_payload(e.to_string())
     } else if let Some(i) = payload.downcast_ref::<i32>() {
         format!("panic payload (i32): {}", i)
     } else if let Some(u) = payload.downcast_ref::<u32>() {
@@ -309,11 +322,25 @@ where
                 } else {
                     (ptr::null(), 0, 0)
                 };
+                let status_res = catch_unwind(AssertUnwindSafe(|| {
+                    FfiStatus::new_err(FFI_PANIC, msg.as_bytes(), file_ptr, file_len, line)
+                }));
+                let st = match status_res {
+                    Ok(s) => s,
+                    Err(p) => {
+                        drop_panic_payload(p);
+                        FfiStatus {
+                            code: FFI_PANIC,
+                            msg: ptr::null_mut(),
+                            msg_len: 0,
+                            file: file_ptr,
+                            file_len,
+                            line,
+                        }
+                    }
+                };
                 unsafe {
-                    ptr::write(
-                        status,
-                        FfiStatus::new_err(FFI_PANIC, msg.as_bytes(), file_ptr, file_len, line),
-                    );
+                    ptr::write(status, st);
                 }
             }
             Err(FFI_PANIC)
@@ -451,6 +478,52 @@ mod tests {
         let file = String::from_utf8_lossy(file);
         assert!(file.ends_with("ffi/guard.rs"), "panic location: {file}");
         assert!(st.line > 0);
+        unsafe { gusset_status_free(&mut st) };
+    }
+
+    #[test]
+    fn panic_payload_broadened_types_and_nested_bombs() {
+        let mut st = FfiStatus::ok();
+
+        // 1. Box<str>
+        let _: Result<(), i32> = unsafe {
+            ffi_guard_code(&mut st, || -> Result<(), FfiError> {
+                std::panic::panic_any(Box::<str>::from("boxed str payload"))
+            })
+        };
+        assert_eq!(st.code, FFI_PANIC);
+        assert_eq!(msg_of(&st), "boxed str payload");
+        unsafe { gusset_status_free(&mut st) };
+
+        // 2. i32
+        let _: Result<(), i32> = unsafe {
+            ffi_guard_code(&mut st, || -> Result<(), FfiError> {
+                std::panic::panic_any(42i32)
+            })
+        };
+        assert_eq!(st.code, FFI_PANIC);
+        assert_eq!(msg_of(&st), "panic payload (i32): 42");
+        unsafe { gusset_status_free(&mut st) };
+
+        // 3. Double-panic destructor bomb with non-string secondary payload
+        struct RecursiveBomb;
+        impl Drop for RecursiveBomb {
+            fn drop(&mut self) {
+                struct InnerBomb;
+                impl Drop for InnerBomb {
+                    fn drop(&mut self) {
+                        panic!("inner bomb panic");
+                    }
+                }
+                std::panic::panic_any(InnerBomb);
+            }
+        }
+        let _: Result<(), i32> = unsafe {
+            ffi_guard_code(&mut st, || -> Result<(), FfiError> {
+                std::panic::panic_any(RecursiveBomb)
+            })
+        };
+        assert_eq!(st.code, FFI_PANIC);
         unsafe { gusset_status_free(&mut st) };
     }
 }

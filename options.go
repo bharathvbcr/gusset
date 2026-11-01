@@ -23,9 +23,12 @@ type handleConfig struct {
 	callFlags   uint32
 	// pipeOnly skips the shared-memory completion ring, so every completion
 	// crosses the pipe. Unexported: it exists for tests and A/B benchmarks.
-	pipeOnly      bool
-	defaultOpcode uint32
-	bufferBudget  int64
+	pipeOnly          bool
+	defaultOpcode     uint32
+	bufferBudget      int64
+	maxUncollected    int
+	maxUncollectedSet bool
+	maxUncollectedErr error
 }
 
 // MaxPoolSize mirrors gusset::pool::MAX_POOL_SIZE.
@@ -112,5 +115,24 @@ func WithBufferBudget(bytes int64) Option {
 func WithOpcode(opcode uint32) Option {
 	return func(c *handleConfig) {
 		c.defaultOpcode = opcode
+	}
+}
+
+// DefaultMaxUncollected is the default ceiling on completed results that may sit
+// uncollected in memory before backpressure or ErrTooManyUncollected throttles Submit.
+const DefaultMaxUncollected = 1024
+
+// WithMaxUncollected sets the maximum number of completed results that may sit
+// uncollected in memory before backpressure or [ErrTooManyUncollected] throttles Submit.
+// 0 means unlimited. A negative value is refused with an error matching [ErrBadArg].
+func WithMaxUncollected(n int) Option {
+	return func(c *handleConfig) {
+		if n < 0 {
+			c.maxUncollectedErr = &Error{Code: ErrBadArg.Code, Msg: fmt.Sprintf("max uncollected must not be negative (got %d); 0 means unlimited", n)}
+			return
+		}
+		c.maxUncollectedErr = nil
+		c.maxUncollected = n
+		c.maxUncollectedSet = true
 	}
 }

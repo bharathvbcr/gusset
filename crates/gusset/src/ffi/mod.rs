@@ -10,7 +10,9 @@ use crate::header::CallHeader;
 use crate::pool::ring::Ring;
 use crate::pool::{Handle, JobResult};
 use alloc::{get_alloc_stats, AllocStats};
-use guard::{extract_panic_payload, ffi_guard_code, install_panic_hook, FfiError};
+use guard::{
+    drop_panic_payload, extract_panic_payload, ffi_guard_code, install_panic_hook, FfiError,
+};
 use static_assertions::{assert_eq_align, assert_eq_size};
 use status::{FfiStatus, FFI_BAD_ARG, FFI_ERR, FFI_OK, FFI_PANIC, FFI_POISONED};
 use std::mem::{align_of, size_of};
@@ -275,7 +277,7 @@ unsafe fn refuse_poisoned(status: *mut FfiStatus) -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn gusset_abi_layout(out: *mut AbiLayout) {
     if !out.is_null() {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let layout = AbiLayout {
                 version: GUSSET_ABI_VERSION,
                 sizes: [
@@ -294,7 +296,9 @@ pub unsafe extern "C" fn gusset_abi_layout(out: *mut AbiLayout) {
             unsafe {
                 ptr::write(out, layout);
             }
-        }));
+        })) {
+            drop_panic_payload(payload);
+        }
     }
 }
 
@@ -316,7 +320,7 @@ pub unsafe extern "C" fn gusset_abi_layout(out: *mut AbiLayout) {
 pub unsafe extern "C" fn gusset_abi_fields(offsets: *mut u32, sizes: *mut u32, cap: u32) -> u32 {
     // A zero count cannot be a successful report: the table is non-empty, and
     // Go's init refuses anything other than ABI_FIELD_COUNT. Default is that zero.
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (off, sz) = fields::layout();
         let take = (cap as usize).min(fields::ABI_FIELD_COUNT);
         unsafe {
@@ -332,8 +336,13 @@ pub unsafe extern "C" fn gusset_abi_fields(offsets: *mut u32, sizes: *mut u32, c
             }
         }
         fields::ABI_FIELD_COUNT as u32
-    }))
-    .unwrap_or_default()
+    })) {
+        Ok(count) => count,
+        Err(payload) => {
+            drop_panic_payload(payload);
+            0
+        }
+    }
 }
 
 /// 2. Initializes the Gusset runtime and installs panic hook.
@@ -751,8 +760,11 @@ pub unsafe extern "C" fn gusset_ring_release(ring: *const Ring) {
     if ring.is_null() {
         return;
     }
-    // Dropping never unwinds: the ring holds only atomics and two boxes.
-    drop(unsafe { Arc::from_raw(ring) });
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(unsafe { Arc::from_raw(ring) });
+    })) {
+        drop_panic_payload(payload);
+    }
 }
 
 /// 10. Frees a status message allocated by Rust (R4).
@@ -763,9 +775,11 @@ pub unsafe extern "C" fn gusset_ring_release(ring: *const Ring) {
 #[no_mangle]
 pub unsafe extern "C" fn gusset_status_free(status: *mut FfiStatus) {
     if !status.is_null() {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             (*status).free_msg();
-        }));
+        })) {
+            drop_panic_payload(payload);
+        }
     }
 }
 
@@ -777,12 +791,17 @@ pub unsafe extern "C" fn gusset_status_free(status: *mut FfiStatus) {
 #[no_mangle]
 pub unsafe extern "C" fn gusset_alloc_stats(out: *mut AllocStats) {
     if !out.is_null() {
-        let stats = std::panic::catch_unwind(std::panic::AssertUnwindSafe(get_alloc_stats))
-            .unwrap_or(AllocStats {
-                live_bytes: 0,
-                peak_bytes: 0,
-                alloc_count: 0,
-            });
+        let stats = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(get_alloc_stats)) {
+            Ok(s) => s,
+            Err(payload) => {
+                drop_panic_payload(payload);
+                AllocStats {
+                    live_bytes: 0,
+                    peak_bytes: 0,
+                    alloc_count: 0,
+                }
+            }
+        };
         unsafe {
             ptr::write(out, stats);
         }
@@ -810,7 +829,7 @@ pub unsafe extern "C" fn gusset_drain_logs(buf: *mut u8, len: usize, out_written
         return;
     }
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let written = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // `None` only when re-entered from a panic hook on the thread
         // draining: there is nothing to hand over then.
         let Some(mut ring) = lock_log_ring() else {
@@ -823,9 +842,15 @@ pub unsafe extern "C" fn gusset_drain_logs(buf: *mut u8, len: usize, out_written
         }
         log_buf.drain(..count);
         count
-    }));
+    })) {
+        Ok(count) => count,
+        Err(payload) => {
+            drop_panic_payload(payload);
+            0
+        }
+    };
     unsafe {
-        ptr::write(out_written, result.unwrap_or(0));
+        ptr::write(out_written, written);
     }
 }
 

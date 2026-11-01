@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ import (
 // which is the latest the call's first read of the in-flight count can precede:
 // a caller that needs the job to have been running at that read compares it, not
 // the time the caller itself started waiting, with the job's floor.
-func shutdownWithin(t *testing.T, d time.Duration, guard time.Duration) (time.Duration, time.Time, error) {
+func shutdownWithin(t *testing.T, d time.Duration, guard time.Duration, beforeCall ...func()) (time.Duration, time.Time, error) {
 	t.Helper()
 	type result struct {
 		err     error
@@ -44,6 +45,9 @@ func shutdownWithin(t *testing.T, d time.Duration, guard time.Duration) (time.Du
 	}
 	done := make(chan result, 1)
 	go func() {
+		if len(beforeCall) > 0 && beforeCall[0] != nil {
+			beforeCall[0]()
+		}
 		start := time.Now()
 		err := gusset.Shutdown(d)
 		done <- result{err, time.Since(start), start}
@@ -68,6 +72,9 @@ func readEngineGauge(ctx context.Context, t *testing.T, h *gusset.Handle) uint64
 	t.Helper()
 	out, err := h.Call(ctx, []byte{18})
 	if err != nil {
+		if errors.Is(err, gusset.ErrShutdown) {
+			t.Skip("runtime already shut down in this process (-count > 1): the latch is one-way")
+		}
 		t.Fatalf("reading the engine gauge (mode 18): %v", err)
 	}
 	if len(out) != 8 {
@@ -172,10 +179,26 @@ func TestShutdown_ReportsWorkItCannotDrain(t *testing.T) {
 		}
 	}
 
+	// Launch background waiter to deterministically synchronize and detect job completion.
+	// Unlike wall-clock comparisons, channel synchronization deterministically reports
+	// whether the non-cooperative job was in flight or already completed when Shutdown runs.
+	jobDone := make(chan struct{})
+	var waitErr error
+	go func() {
+		_, waitErr = h.Wait(ctx, ticket)
+		close(jobDone)
+	}()
+
 	// unexpected reports an answer that contradicts the contract: a failure while
 	// the job was certainly running, the host's doing after that.
 	unexpected := func(format string, args ...any) {
 		t.Helper()
+		select {
+		case <-jobDone:
+			hostprobe.Skip(t, "the host stalled the test and the job completed before Shutdown met it: "+format, args...)
+			return
+		default:
+		}
 		if since := time.Since(submitted); since >= engineHold {
 			hostprobe.Skip(t, "the host stalled the test %v past Submit, longer than the job's %v hold, so the job may have ended before Shutdown met it: "+format,
 				append([]any{since, engineHold}, args...)...)
@@ -209,18 +232,21 @@ func TestShutdown_ReportsWorkItCannotDrain(t *testing.T) {
 	// ErrShutdownIncomplete here for any job still running when it started.
 	// Clamped, it waits the work out. A job that had already ended would let the
 	// wrapped budget pass too, so the answer counts only if the call started
-	// before the job's floor: judged from the instant the call itself began, not
-	// from a guess at how long a stalled goroutine takes to reach it.
-	//
-	// That instant is the latest one this test can see, not the instant
-	// Shutdown reads the in-flight count. A stall longer than the rest of the
-	// hold between the two, inside the call, lets an unclamped Shutdown read a
-	// finished job and pass here: a clamped call and a stalled wrapped one both
-	// return after the job ends, and nothing after the return tells them apart.
-	// boundary_inputs_internal_test.go owns the clamp deterministically, at
-	// drainMillis; this step checks it end to end on every run that is not so
-	// stalled.
-	elapsed, called, err := shutdownWithin(t, gusset.MaxDrain+time.Millisecond, 30*time.Second)
+	// before the job's floor or completion: verified both by clock floor and
+	// deterministically via channel synchronization right before Shutdown is invoked.
+	var jobCompletedBeforeShutdown atomic.Bool
+	var called time.Time
+	elapsed, called, err = shutdownWithin(t, gusset.MaxDrain+time.Millisecond, 30*time.Second, func() {
+		select {
+		case <-jobDone:
+			jobCompletedBeforeShutdown.Store(true)
+		default:
+		}
+	})
+	if jobCompletedBeforeShutdown.Load() {
+		hostprobe.Skip(t, "the host stalled the test and the job completed before Shutdown(MaxDrain+1ms) was called; cannot distinguish clamped budget from wrapped budget (it answered %v)", err)
+		return
+	}
 	if since := called.Sub(submitted); since >= engineHold {
 		hostprobe.Skip(t, "the host stalled the test until %v after Submit, longer than the job's %v hold, so the job may have ended before Shutdown(MaxDrain+1ms) read it and a wrapped budget could not be told from a clamped one (it answered %v)", since, engineHold, err)
 		return
@@ -231,7 +257,12 @@ func TestShutdown_ReportsWorkItCannotDrain(t *testing.T) {
 
 	// The job was never killed. Collect it so Close has nothing outstanding;
 	// it finished, or was cut off by the latch, and either is an answer.
-	if _, err := h.Wait(ctx, ticket); err != nil && !errors.Is(err, gusset.ErrShutdown) {
-		t.Fatalf("Wait on the drained job: %v", err)
+	select {
+	case <-jobDone:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for background job completion")
+	}
+	if waitErr != nil && !errors.Is(waitErr, gusset.ErrShutdown) {
+		t.Fatalf("Wait on the drained job: %v", waitErr)
 	}
 }

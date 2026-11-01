@@ -293,7 +293,7 @@ func (b *Buffer) Bytes() []byte {
 // empty result, or a small result carried in Go memory (see WaitBuffer). A
 // 0-id Buffer passed to Submit or CallBuffer sends its bytes inline.
 func (b *Buffer) ID() uint64 {
-	if b == nil || b.state == nil {
+	if b == nil || b.state == nil || b.freed.Load() {
 		return 0
 	}
 	return b.id

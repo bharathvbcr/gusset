@@ -1,0 +1,15 @@
+[package]
+name = "uniffi-gusset-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "uniffi_gusset_example"
+crate-type = ["rlib"]
+
+[dependencies]
+# Depends on gusset core runtime contract
+gusset = { path = "../../../crates/gusset" }
+
+[workspace]

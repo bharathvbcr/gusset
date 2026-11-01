@@ -166,6 +166,7 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 func (s *handleState) claimLocked(ticket uint64) (res callResult, takeID uint64, done bool, err error) {
 	if res, done := s.completed[ticket]; done {
 		delete(s.completed, ticket)
+		s.notifyUncollectedLocked()
 		return res, s.collectLocked(ticket), true, nil
 	}
 

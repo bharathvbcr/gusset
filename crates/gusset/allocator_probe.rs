@@ -74,32 +74,58 @@ fn probe_allocator_api() {
             v.len() + *b as usize + Vec::<u8, P>::new_in(P).capacity() + s.capacity()
         }
     "#;
-    if std::fs::write(&src, code).is_err() {
-        publish(false);
-        return;
-    }
 
-    // First, compile the probe the way the crate itself is compiled: through
-    // the same wrapper (as autocfg does), with the same flags and target, so a
-    // sysroot or -Z flag that changes what std offers changes the answer too.
-    let (mut ok, mut stderr) = run_probe(&rustc, &out_dir, &src, true);
-    if !ok {
-        // Retry for the host with no extra flags. Whether `Allocator` is
-        // stable is a property of the compiler release, never of the target,
-        // and the target-mode compile fails for reasons unrelated to it: a
-        // custom target spec (TARGET is only the JSON file's stem) or
-        // -Zbuild-std (no prebuilt std for the target). Those builds used to
-        // fall back silently to the pre-1.100 path.
-        let (host_ok, host_err) = run_probe(&rustc, &out_dir, &src, false);
-        if host_ok {
-            ok = true;
-        } else {
-            stderr = format!("{stderr}\n-- host retry --\n{host_err}");
+    let cache_file = out_dir.join("gusset_allocator_probe.cache");
+    let cache_key = compute_cache_key(&rustc, code);
+    let cached_result = if let (Some(key), Ok(contents)) = (cache_key, std::fs::read_to_string(&cache_file)) {
+        let mut parts = contents.split_whitespace();
+        match (parts.next(), parts.next()) {
+            (Some(k), Some(v)) if k == key.to_string() => Some(v == "1"),
+            _ => None,
         }
-    }
+    } else {
+        None
+    };
+
+    let (ok, mut stderr) = if let Some(cached_ok) = cached_result {
+        (cached_ok, String::new())
+    } else {
+        if std::fs::write(&src, code).is_err() {
+            publish(false);
+            return;
+        }
+
+        // First, compile the probe the way the crate itself is compiled: through
+        // the same wrapper (as autocfg does), with the same flags and target, so a
+        // sysroot or -Z flag that changes what std offers changes the answer too.
+        let (mut ok, mut stderr) = run_probe(&rustc, &out_dir, &src, true);
+        if !ok {
+            // Retry for the host with no extra flags. Whether `Allocator` is
+            // stable is a property of the compiler release, never of the target,
+            // and the target-mode compile fails for reasons unrelated to it: a
+            // custom target spec (TARGET is only the JSON file's stem) or
+            // -Zbuild-std (no prebuilt std for the target). Those builds used to
+            // fall back silently to the pre-1.100 path.
+            let (host_ok, host_err) = run_probe(&rustc, &out_dir, &src, false);
+            if host_ok {
+                ok = true;
+            } else {
+                stderr = format!("{stderr}\n-- host retry --\n{host_err}");
+            }
+        }
+        if let Some(key) = cache_key {
+            let _ = std::fs::write(&cache_file, format!("{} {}\n", key, if ok { 1 } else { 0 }));
+        }
+        (ok, stderr)
+    };
+
     if ok {
         println!("cargo::rustc-cfg=gusset_allocator_api");
     } else if forced.as_deref() == Some("1") {
+        if stderr.is_empty() {
+            let (_, host_err) = run_probe(&rustc, &out_dir, &src, false);
+            stderr = host_err;
+        }
         panic!(
             "GUSSET_ALLOCATOR_API=1 but the allocator probe failed to compile. \
              Rust 1.100+ is required; if this is a cross or -Zbuild-std build, \
@@ -107,6 +133,23 @@ fn probe_allocator_api() {
         );
     }
     publish(ok);
+}
+
+/// Computes a cache key from the toolchain version, flags, and probe code.
+fn compute_cache_key(rustc: &std::ffi::OsStr, code: &str) -> Option<u64> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::env;
+    use std::hash::{Hash, Hasher};
+    use std::process::Command;
+
+    let output = Command::new(rustc).arg("-vV").output().ok()?;
+    let mut hasher = DefaultHasher::new();
+    output.stdout.hash(&mut hasher);
+    code.hash(&mut hasher);
+    env::var("CARGO_ENCODED_RUSTFLAGS").ok().hash(&mut hasher);
+    env::var("TARGET").ok().hash(&mut hasher);
+    env::var_os("RUSTC_WRAPPER").hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 /// Compiles the probe; `as_target` adds the build's wrapper, flags and target.

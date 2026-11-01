@@ -875,8 +875,10 @@ func TestAdversarial_SustainedThroughputStaysBounded(t *testing.T) {
 	}
 
 	// I4/R11: callers park on the Go semaphore, not on OS threads. 64 concurrent
-	// callers must not translate into 64 threads.
-	limit := int64(handles*poolSize + runtime.GOMAXPROCS(0) + 16)
+	// callers must not translate into 64 threads. As in TestPitfall_ThreadCapBoundedSoak,
+	// Go never destroys an M, so earlier tests in this binary (or earlier -count
+	// iterations) remain in baseline.
+	limit := baseline + int64(handles*poolSize+runtime.GOMAXPROCS(0)+16)
 	if peakThreads.Load() > limit {
 		t.Fatalf("thread count %d exceeded the bound %d: callers are blocking on OS threads (I4 breach)",
 			peakThreads.Load(), limit)
