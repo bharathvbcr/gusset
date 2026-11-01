@@ -281,7 +281,26 @@ func (s *handleState) close() error {
 	}
 	s.cgoMu.RUnlock()
 
-	// 2. Stop the drain reader. It used to wait for EOF, which needs every
+	// 2. Wait for all active CGO operations to finish, free any unclaimed take
+	// buffers while s.ptr is still valid, and close the Rust handle.
+	// Once cgoMu.Lock() is acquired after s.closed is true, no enterCgo() can
+	// succeed: every in-flight submitInput has already inserted into semTickets
+	// and released cgoMu, and drainPipe cannot call ffi.Take to create any new
+	// non-zero takeID.
+	s.cgoMu.Lock()
+	s.mu.Lock()
+	toFree := s.takeUnclaimedLocked()
+	s.mu.Unlock()
+	for _, id := range toFree {
+		if id != 0 && s.ptr != nil {
+			_ = ffi.BufFree(s.ptr, id)
+		}
+	}
+	err = ffi.HandleClose(s.ptr)
+	s.ptr = nil
+	s.cgoMu.Unlock()
+
+	// 3. Stop the drain reader. It used to wait for EOF, which needs every
 	// copy of the write end closed: a child forked outside Go's ForkLock (from
 	// Rust or C) that inherited it, or a panic inside gusset_handle_close
 	// before it closed the descriptor, left Close — and every concurrent
@@ -292,28 +311,18 @@ func (s *handleState) close() error {
 	<-s.drainDone
 	_ = s.pipe.Close()
 
-	// 3. Drain any remaining permits from untaken submitted tickets and collect unconsumed take buffers.
+	// 4. Drain any remaining permits from untaken submitted tickets and clear
+	// any inline completions delivered before drainPipe exited.
 	// semTickets covers abandoned tickets too: their permits were deliberately
 	// left with the work, and the work is over now that the pool has joined.
 	s.mu.Lock()
-	toFree := s.takeUnclaimedLocked()
+	_ = s.takeUnclaimedLocked()
 	s.abandoned = make(map[uint64]struct{})
 	for ticket := range s.semTickets {
 		delete(s.semTickets, ticket)
 		<-s.sem
 	}
 	s.mu.Unlock()
-
-	// 4. Free unconsumed take buffers under cgoMu BEFORE closing the handle and nulling s.ptr!
-	s.cgoMu.Lock()
-	for _, id := range toFree {
-		if id != 0 && s.ptr != nil {
-			_ = ffi.BufFree(s.ptr, id)
-		}
-	}
-	err = ffi.HandleClose(s.ptr)
-	s.ptr = nil
-	s.cgoMu.Unlock()
 
 	return err
 }

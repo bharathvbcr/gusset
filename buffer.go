@@ -318,15 +318,10 @@ func (b *Buffer) Free() error {
 	charge := b.budgeted
 	// Drop our own view before releasing the lock, so a Bytes that acquires it
 	// next sees freed and never copies this header out.
-	// Poison backing memory with 0xDE to detect use-after-free on slices previously
-	// extracted via Bytes(), but only if the handle is not already closed (in which
-	// case Rust has already deallocated the underlying memory to the system allocator).
-	if len(b.data) > 0 {
-		if id == 0 || state == nil || !state.closed.Load() {
-			for i := range b.data {
-				b.data[i] = 0xDE
-			}
-		}
+	// An id-0 buffer's data is Go memory and is never written after
+	// construction, so Submit can read it after an atomic freed check without
+	// a lock (see submitInput). Only a Rust view is withdrawn here.
+	if b.id != 0 {
 		b.data = nil
 	}
 	b.mu.Unlock()

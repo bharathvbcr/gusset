@@ -255,7 +255,7 @@ func TestTier5_Adversarial_BufferBudget_ExtremeBoundaryAndRaces(t *testing.T) {
 		t.Fatalf("expected ErrBufferBudget on 1-byte overflow, got: %v", errOverflow)
 	}
 
-	// 3. Free bufExact and verify memory poisoning on slice
+	// 3. Free bufExact and verify view and ID withdrawal
 	sliceRef := bufExact.Bytes()
 	if len(sliceRef) != exactBudget {
 		t.Fatalf("expected slice length %d, got %d", exactBudget, len(sliceRef))
@@ -263,20 +263,12 @@ func TestTier5_Adversarial_BufferBudget_ExtremeBoundaryAndRaces(t *testing.T) {
 	err = bufExact.Free()
 	requireNoError(t, err, "bufExact.Free()")
 
-	// After Free, Bytes() must return nil
+	// After Free, Bytes() must return nil and ID() must return 0
 	if bufExact.Bytes() != nil {
 		t.Fatal("expected bufExact.Bytes() to be nil after Free()")
 	}
-
-	// Backing memory was poisoned with 0xDE (unless already deallocated)
-	poisonCount := 0
-	for i := 0; i < 64; i++ {
-		if sliceRef[i] == 0xDE {
-			poisonCount++
-		}
-	}
-	if poisonCount < 32 {
-		t.Logf("memory poisoning verification: %d / 64 bytes poisoned with 0xDE", poisonCount)
+	if bufExact.ID() != 0 {
+		t.Fatalf("expected bufExact.ID() == 0 after Free(), got %d", bufExact.ID())
 	}
 
 	// 4. Double Free is an idempotent no-op

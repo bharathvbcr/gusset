@@ -193,8 +193,8 @@ func TestHardening_M2_PanicFirewall_NonStringAndDoublePanicDestructor(t *testing
 	}
 }
 
-// TestHardening_M2_BufferFreePoisoning verifies that Buffer.Free() immediately poisons
-// user-accessible slice memory with 0xDE and clears the view.
+// TestHardening_M2_BufferFreePoisoning verifies that Buffer.Free() immediately withdraws
+// the slice view (Bytes() == nil), zeroes ID(), and refuses subsequent submissions.
 func TestHardening_M2_BufferFreePoisoning(t *testing.T) {
 	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
 	if err != nil {
@@ -226,12 +226,9 @@ func TestHardening_M2_BufferFreePoisoning(t *testing.T) {
 		t.Fatalf("expected ID() == 0 after Free(), got %d", buf.ID())
 	}
 
-	// The previously extracted slice must be poisoned or zeroed by deallocation,
-	// and must never retain the original user data (0xAA).
-	for i, b := range slice {
-		if b == 0xAA {
-			t.Fatalf("byte at index %d was not poisoned: retained original 0xAA", i)
-		}
+	// Submitting a freed buffer must be refused.
+	if _, err := h.Submit(context.Background(), buf); err == nil {
+		t.Fatal("expected Submit with freed Rust buffer to fail")
 	}
 
 	// 2. Go-memory buffer from WaitBuffer (<= 4 KiB inline result)
@@ -258,10 +255,10 @@ func TestHardening_M2_BufferFreePoisoning(t *testing.T) {
 	if resBuf.Bytes() != nil {
 		t.Fatal("expected resBuf.Bytes() == nil after Free()")
 	}
-
-	for i, b := range resSlice {
-		if b != 0xDE {
-			t.Fatalf("resSlice byte at index %d was not poisoned: got 0x%02X, want 0xDE", i, b)
-		}
+	if resBuf.ID() != 0 {
+		t.Fatalf("expected resBuf.ID() == 0 after Free(), got %d", resBuf.ID())
+	}
+	if _, err := h.Submit(context.Background(), resBuf); err == nil {
+		t.Fatal("expected Submit with freed Go-heap buffer to fail")
 	}
 }

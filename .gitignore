@@ -23,9 +23,19 @@ bench/results/*.tmp
 .claude/agent-memory-local/
 .claude/first-run
 .claude/assistant-daemon-state.json
+.claude/todos/
+.claude/projects/
+.claude/statsig/
 .cursor/hooks/state/
 .cursor/worktrees/
+.cursor/chats/
+.cursor/logs/
 .agents/teamwork/
+.agents/scratch/
+.agents/state/
+.agents/cache/
+.agents/logs/
+.gemini/
 
 # Editors and IDEs
 .idea/
@@ -109,9 +119,6 @@ bench/.probe/
 
 # bench/r14/run.sh stamps the linked archives' hash here before every link.
 bench/r14/host/zz_archives.go
-
-# DevCouncil local state
-!/.devcouncil/
 
 # go generate ./internal/ffi stamps the local archive hash here, through a
 # dot-named temporary file; the tracked stub internal/ffi/archive_hash.go explains.
