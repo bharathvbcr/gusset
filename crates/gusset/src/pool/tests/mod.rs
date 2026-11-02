@@ -16,7 +16,7 @@ use crate::header::GUSSET_FLAG_DIAGNOSTIC_ENGINE;
 
 // The helpers every Rust test binary shares; see that file for why it lives
 // outside this crate's `src`.
-#[path = "../../../../../tests/common/mod.rs"]
+#[path = "../../../../../tests/rust/common/mod.rs"]
 mod common;
 use common::{make_pipe, read_ticket, Must};
 

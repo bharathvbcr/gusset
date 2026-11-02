@@ -2,7 +2,7 @@ package shutdown_test
 
 // gusset.Shutdown drain semantics.
 //
-// Its own test binary, for the same reason tests/rust_shutdown.rs is: Shutdown
+// Its own test binary, for the same reason tests/rust/rust_shutdown.rs is: Shutdown
 // latches a process-global flag that refuses every later submission, so any
 // test sharing this binary would see its work rejected by whichever test ran
 // first. Every assertion about "before shutdown" therefore has to happen in

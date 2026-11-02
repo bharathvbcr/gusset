@@ -64,7 +64,7 @@ extern "C" {
 #define GUSSET_INLINE_RESULT_MAX 48u
 #define GUSSET_INLINE_RECORD_MAX 64u
 
-/* Limits and encodings a C host must honour. tests/constants_match.rs checks
+/* Limits and encodings a C host must honour. tests/rust/constants_match.rs checks
  * each against the Rust constant and the Go constant that mirror it. */
 
 /* Largest pool gusset_handle_open accepts; larger is refused, not clamped. The

@@ -92,8 +92,8 @@ comparison.
 | `ThreadPressure` | `bench/seed/go/crossover_test.go` | peak threads at 512 |
 | `CgoRustNoop`, `CgoCNoop`, `CgoNoopParallel`, `Batch16/256/4096`, `ChannelHop`, `UnbufferedRoundTrip`, `PureGoLoopItem` | `bench/seed/go/ffi_test.go` | none: only an uncertified VM file exists |
 | `SumSquares` (Go scalar, Go SIMD, Gusset) | `bench/simd_crossover_test.go` | none: only uncertified VM files exist |
-| `CompletionTransport` (ring against pipe) | `transport_ab_test.go` | none: no committed results file |
-| `CallNoopBare`, `CallNoopTraced` | `carrier_goexit_internal_test.go` | none: no committed results file |
+| `CompletionTransport` (ring against pipe) | `ring_internal_test.go` | none: no committed results file |
+| `CallNoopBare`, `CallNoopTraced` | `handle_internal_test.go` | none: no committed results file |
 | `Plain`, `NoEscape` | `bench/seed/esc/esc_test.go` | none: no committed results file |
 | the r14 two-engine host | `bench/r14/` | none: no committed results file |
 | `BenchmarkDeadlineExpiry`, `BenchmarkDeadlineInFlight`, `BenchmarkDiscard`, `BenchmarkStats` | `bench/dispatch_test.go` | none: baseline recorded under `bench/results/dispatch/` |

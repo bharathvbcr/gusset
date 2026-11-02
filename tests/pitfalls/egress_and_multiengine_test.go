@@ -1,8 +1,11 @@
 package pitfalls_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"runtime"
 	"strings"
 	"sync"
@@ -339,7 +342,6 @@ func TestZeroCopyEgress_ConcurrentStress(t *testing.T) {
 				ticket, err := h.Submit(ctx, payload)
 				if err != nil {
 					t.Errorf("Submit failed: %v", err)
-					return
 				}
 				buf, err := h.WaitBuffer(ctx, ticket)
 				if err != nil {
@@ -720,5 +722,202 @@ func TestZeroCopyEgress_InlineWaitBufferResultIsNotRustMemory(t *testing.T) {
 		if err := b.Free(); err != nil {
 			t.Fatalf("Free: %v", err)
 		}
+	}
+}
+
+// The engine-side in-flight gauge (diagnostic modes 17 and 18).
+//
+// I4 says in-flight calls per handle never exceed the pool size. A Go test that
+// counts its own goroutines or reads the thread total after the run cannot see
+// two jobs executing at once: both are consequences of the semaphore, not
+// observations of the engine. Mode 17 is a non-cooperative job that raises a
+// process-wide atomic on entry and lowers it on exit; mode 18 reads the highest
+// value it reached since the last read. That is the engine reporting how many
+// jobs it ran concurrently.
+//
+// The gauge is process-wide, so a test that reads it must not run alongside
+// another that submits mode 17. None here run in parallel.
+
+// holdInEngine is a mode 17 payload: count in, sleep ms without ever checking
+// for cancellation, count out.
+func holdInEngine(ms byte) []byte { return []byte{17, ms} }
+
+// peakInEngine reads and resets the engine's peak concurrent mode 17 jobs.
+func peakInEngine(t *testing.T, h *gusset.Handle) uint64 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := h.Call(ctx, []byte{18})
+	if err != nil {
+		t.Fatalf("reading the engine gauge: %v", err)
+	}
+	if len(out) != 8 {
+		t.Fatalf("engine gauge returned %d bytes, want 8", len(out))
+	}
+	return binary.LittleEndian.Uint64(out)
+}
+
+// The gauge has to be able to see concurrency, or "peak <= pool size" in the
+// tests that use it proves nothing. Four callers on a four-worker pool, each
+// holding the engine for 100 ms, are all inside it together.
+func TestEngineGauge_SeesJobsRunningAtOnce(t *testing.T) {
+	const poolSize = 4
+	h, err := gusset.Open(gusset.WithPoolSize(poolSize), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+	_ = peakInEngine(t, h) // reset
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tickets := make([]uint64, poolSize)
+	for i := range tickets {
+		if tickets[i], err = h.Submit(ctx, holdInEngine(100)); err != nil {
+			t.Fatalf("Submit %d: %v", i, err)
+		}
+	}
+	for i, tk := range tickets {
+		if _, err := h.Wait(ctx, tk); err != nil {
+			t.Fatalf("Wait %d: %v", i, err)
+		}
+	}
+	if peak := peakInEngine(t, h); peak != poolSize {
+		t.Fatalf("engine saw a peak of %d concurrent jobs, want exactly the pool size %d", peak, poolSize)
+	}
+}
+
+// Phase 2 Validation:
+// Validates adoption of Gusset by a second engine shape (CPU-bound vector arithmetic)
+// with zero modifications to the 15-export Rust ABI or the Go public API.
+func TestPhase2_CpuBoundEngine(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(4), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Prepare 10,000 element vector for sum-and-square (opcode 10)
+	const n = 10_000
+	payload := make([]byte, n+1)
+	payload[0] = 10 // opcode 10: sum and square
+	var expectedAcc uint64
+	for i := 1; i <= n; i++ {
+		val := byte(i % 127)
+		payload[i] = val
+		v64 := uint64(val)
+		expectedAcc += v64 * v64
+	}
+
+	// 10_001 bytes is past the 4 KiB inline copy ceiling (R16). Call would
+	// refuse a raw []byte; the CPU-bound path is a Rust-owned Buffer.
+	buf, err := h.NewBuffer(len(payload))
+	if err != nil {
+		t.Fatalf("NewBuffer failed: %v", err)
+	}
+	defer buf.Free()
+	copy(buf.Bytes(), payload)
+
+	ticket, err := h.Submit(ctx, buf)
+	if err != nil {
+		t.Fatalf("CPU-bound Submit failed: %v", err)
+	}
+	res, err := h.Wait(ctx, ticket)
+	if err != nil {
+		t.Fatalf("CPU-bound Wait failed: %v", err)
+	}
+
+	if len(res) != 8 {
+		t.Fatalf("expected 8-byte uint64 result, got %d bytes", len(res))
+	}
+
+	actualAcc := binary.LittleEndian.Uint64(res)
+	if actualAcc != expectedAcc {
+		t.Fatalf("calculation mismatch: expected %d, got %d", expectedAcc, actualAcc)
+	}
+
+	t.Logf("Phase 2 CPU-bound engine calculation verified successfully: sum-sq = %d", actualAcc)
+}
+
+// Results at, below and above the inline-record limit (48 bytes) come back
+// identical whichever path carried them, serially and under concurrency,
+// through Call and through Submit+Wait.
+func TestInlineCompletionBoundaryRoundTrips(t *testing.T) {
+	h, err := gusset.Open(gusset.WithPoolSize(4), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx := context.Background()
+
+	// Mode 0 echoes its whole input, mode byte included.
+	echo := func(n int) []byte {
+		in := make([]byte, n)
+		for i := 1; i < n; i++ {
+			in[i] = byte(i * 7)
+		}
+		return in
+	}
+	sizes := []int{1, 2, 8, 9, 40, 47, 48, 49, 56, 64, 4096}
+
+	for _, n := range sizes {
+		in := echo(n)
+		out, err := h.Call(ctx, in)
+		if err != nil || !bytes.Equal(out, in) {
+			t.Fatalf("Call %d bytes: got %d bytes, err %v", n, len(out), err)
+		}
+		ticket, err := h.Submit(ctx, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err = h.Wait(ctx, ticket)
+		if err != nil || !bytes.Equal(out, in) {
+			t.Fatalf("Submit/Wait %d bytes: got %d bytes, err %v", n, len(out), err)
+		}
+	}
+
+	// A result slice is the caller's: it must not alias the reader's buffer,
+	// which the next completion overwrites.
+	first, err := h.Call(ctx, echo(48))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keep := append([]byte(nil), first...)
+	for i := 0; i < 64; i++ {
+		if _, err := h.Call(ctx, []byte{0, 0xFF, 0xFF, 0xFF}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !bytes.Equal(first, keep) {
+		t.Fatal("an inline result was overwritten by a later completion")
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+	for g := 0; g < 64; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				n := sizes[(g+i)%len(sizes)]
+				in := echo(n)
+				if n > 1 {
+					in[n-1] = byte(g)
+				}
+				out, err := h.Call(ctx, in)
+				if err != nil || !bytes.Equal(out, in) {
+					errs <- fmt.Errorf("g%d i%d n%d: got %d bytes, err %v", g, i, n, len(out), err)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
 	}
 }

@@ -19,7 +19,7 @@
 use gusset::header::{CallHeader, GUSSET_FLAG_DIAGNOSTIC_ENGINE};
 use gusset::pool::{Handle, MAX_POOL_SIZE};
 
-#[path = "../../../tests/common/mod.rs"]
+#[path = "../../../tests/rust/common/mod.rs"]
 mod common;
 use common::procfs::{baseline, maps, settled, usage, Usage};
 use common::{make_pipe, read_ticket};

@@ -18,7 +18,7 @@ import (
 // inline result in a completion record: what a full record weighs beyond the
 // result bytes it can carry. Taken from the header's two maxima rather than
 // typed, so the reader cannot disagree with gusset.h about where the payload
-// starts; tests/constants_match.rs pins the difference to those two u64 words
+// starts; tests/rust/constants_match.rs pins the difference to those two u64 words
 // and fails if this file goes back to a literal.
 const inlineHeaderBytes = ffi.InlineRecordMax - ffi.InlineResultMax
 

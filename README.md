@@ -89,7 +89,7 @@ flowchart TD
 3. **(I3) Deadline & Cancellation:** Deadlines and cancellations are enforced inside Rust between work units using relative `timeout_ns` and per-job `AtomicBool` flags.
 4. **(I4) Bounded Concurrency:** In-flight calls per handle never exceed the configured pool size. Callers park on the Go semaphore, never on an OS thread in cgo. Pool size is capped at `gusset.MaxPoolSize` (1024); a larger request is refused, not clamped. On Linux the completion pipe is grown to hold one inline record per worker, or one 8-byte ticket per worker when it cannot, and `Open` is refused only when even the tickets will not fit. `Open` attaches a completion ring by default, so steady-state records live there and the pipe carries wake tokens and overflow.
 5. **(I5) Rust-Owned Stacks:** Heavy Rust work runs on Rust-spawned threads with an explicit 8 MiB stack, never on the caller's g0 stack (musl's default is 128 KiB). Each worker installs its own guard-paged `sigaltstack` (at least 64 KiB, larger where the kernel's signal frame needs it) so Go's signal handler can run on a Rust thread, and a failure to do so is logged rather than silently accepted. The alternate stack does not make a stack overflow survivable: the process still exits. Workers also block SIGPIPE, so a write to a closed pipe returns EPIPE instead of killing the process.
-6. **(I6) ABI Verification:** Go `init()` verifies ABI version, struct sizes, alignments, and the offset and size of every named field against Rust before the process starts serving — for the four `#[repr(C)]` types in the ABI manifest, `AllocStats` included. (`RingShared` and `Slot` are `#[repr(C)]` too; C reads them through offsets that `tests/constants_match.rs` checks.)
+6. **(I6) ABI Verification:** Go `init()` verifies ABI version, struct sizes, alignments, and the offset and size of every named field against Rust before the process starts serving — for the four `#[repr(C)]` types in the ABI manifest, `AllocStats` included. (`RingShared` and `Slot` are `#[repr(C)]` too; C reads them through offsets that `tests/rust/constants_match.rs` checks.)
 
 ---
 
@@ -237,7 +237,7 @@ By default, this installs into `~/.local` (or `/usr/local` if run with write per
 ## The Public Surface
 
 ### 17 Exported Rust Functions
-Gusset exports strictly 17 C ABI functions from `libgusset.a` (enforced by `tests/exports_match.rs`):
+Gusset exports strictly 17 C ABI functions from `libgusset.a` (enforced by `tests/rust/exports_match.rs`):
 - `gusset_abi_layout(out)`: Layout and struct size/alignment verification.
 - `gusset_abi_fields(offsets, sizes, cap)`: Named-field offsets and sizes of all `#[repr(C)]` types.
 - `gusset_init()`: Global runtime initialization and panic hook installation.

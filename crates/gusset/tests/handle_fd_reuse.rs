@@ -13,7 +13,7 @@
 
 #![allow(unsafe_code)]
 
-#[path = "../../../tests/common/mod.rs"]
+#[path = "../../../tests/rust/common/mod.rs"]
 mod common;
 
 use common::{make_pipe, Must};

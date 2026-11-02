@@ -327,5 +327,6 @@ docs-check:
 
 clean:
 	cargo clean
-	rm -f bench/results/tmp*
+	rm -rf examples/uniffi_bindgen_go/rust/target fuzz/target
+	rm -f bench/results/tmp* bench/results/*.tmp internal/ffi/zz_archive_hash.go
 

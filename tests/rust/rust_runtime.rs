@@ -593,7 +593,7 @@ fn shared_ticket_reader_reassembles_a_split_ticket_and_refuses_a_torn_one() {
 /// This test asserts no upper bound on the elapsed time: a wall-clock margin is
 /// a statement about the host, and a stall longer than it failed a correct
 /// implementation. How promptly the deadline is noticed is judged by what the
-/// engine ran, in `tests/rust_deadline.rs`
+/// engine ran, in `tests/rust/rust_deadline.rs`
 /// (`a_deadline_stops_a_multi_unit_job_between_units`), which counts the units
 /// a deadline lets start and so cannot be pushed over its bound by load.
 #[test]
@@ -646,7 +646,7 @@ fn deadline_edges_expire_at_once_or_never_early() {
         ..Default::default()
     };
     // Refused before any unit runs is judged by whether the engine was entered,
-    // in `tests/rust_deadline.rs` (`an_expired_deadline_never_enters_the_engine`),
+    // in `tests/rust/rust_deadline.rs` (`an_expired_deadline_never_enters_the_engine`),
     // not by an elapsed-time bound that a stalled host can exceed. The result
     // here is `Cancelled(DeadlineExceeded)` either way.
     let t1 = handle.submit(expired, &[5, 200], 0).must("submit expired");

@@ -138,7 +138,7 @@ mod tests {
 
     /// The completion ring's header and slot are repr(C) to pin their layout,
     /// but C never declares them: it reads them through the GUSSET_RING_*
-    /// offsets, which tests/constants_match.rs checks. They must still exist,
+    /// offsets, which tests/rust/constants_match.rs checks. They must still exist,
     /// so this list cannot outlive them.
     const OFFSET_VERIFIED: [&str; 2] = ["RingShared", "Slot"];
 

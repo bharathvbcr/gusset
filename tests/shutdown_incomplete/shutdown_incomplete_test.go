@@ -5,7 +5,7 @@ package shutdown_incomplete_test
 // Its own package, so its own test binary: Shutdown latches a process-global
 // flag that refuses every later submission and is cleared only by package init,
 // so a test that calls it cannot share a process with any test that submits
-// afterwards (the same reason tests/shutdown and tests/rust_shutdown.rs are
+// afterwards (the same reason tests/shutdown and tests/rust/rust_shutdown.rs are
 // binaries of their own). tests/shutdown cannot cover this: its work is
 // cooperative, so every drain there is clean, and its comment on
 // TestShutdown_ReportsWorkItCouldNotDrain says "nothing in flight" and accepts
@@ -14,7 +14,7 @@ package shutdown_incomplete_test
 // Diagnostic mode 17 holds without calling JobContext::check, which is the
 // shape of a real adopter engine and the only kind of work Shutdown cannot
 // drain. The Rust half of this contract is
-// tests/rust_shutdown.rs (shutdown_reports_non_cooperative_work_that_outlives_its_budget).
+// tests/rust/rust_shutdown.rs (shutdown_reports_non_cooperative_work_that_outlives_its_budget).
 
 import (
 	"context"

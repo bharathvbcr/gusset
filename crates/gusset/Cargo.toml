@@ -33,69 +33,69 @@ libc = "0.2"
 
 [[test]]
 name = "exports_match"
-path = "../../tests/exports_match.rs"
+path = "../../tests/rust/exports_match.rs"
 
 # Signature-level agreement between the hand-written gusset.h and the Rust
 # exports. exports_match covers names only; this covers types.
 [[test]]
 name = "header_match"
-path = "../../tests/header_match.rs"
+path = "../../tests/rust/header_match.rs"
 
 # Numbers duplicated across Rust, gusset.h and Go (status codes, flags, limits).
 [[test]]
 name = "constants_match"
-path = "../../tests/constants_match.rs"
+path = "../../tests/rust/constants_match.rs"
 
 [[test]]
 name = "rust_runtime"
-path = "../../tests/rust_runtime.rs"
+path = "../../tests/rust/rust_runtime.rs"
 
 # Separate binary: registers engines in the process-global opcode registry,
 # which rust_runtime promises never to touch.
 [[test]]
 name = "rust_deadline"
-path = "../../tests/rust_deadline.rs"
+path = "../../tests/rust/rust_deadline.rs"
 
 # Separate binary: registers a process-global engine handler whose panic
 # payloads panic again on drop.
 [[test]]
 name = "rust_worker_containment"
-path = "../../tests/rust_worker_containment.rs"
+path = "../../tests/rust/rust_worker_containment.rs"
 
 # Separate binary: installs the counting global allocator.
 [[test]]
 name = "rust_status_overwrite"
-path = "../../tests/rust_status_overwrite.rs"
+path = "../../tests/rust/rust_status_overwrite.rs"
 
 # Separate binary: shutdown latches a process-global flag that refuses every
 # submission, which a parallel test in the same binary would observe.
 [[test]]
 name = "rust_shutdown"
-path = "../../tests/rust_shutdown.rs"
+path = "../../tests/rust/rust_shutdown.rs"
 
 # Stable `Allocator` trait (Rust 1.100+): BufferAlloc, Counting as a local
 # allocator, and zero-copy adoption of engine output. No global allocator, so
 # the manual recorders are what is being measured.
 [[test]]
 name = "rust_allocator_api"
-path = "../../tests/rust_allocator_api.rs"
+path = "../../tests/rust/rust_allocator_api.rs"
 
 # Separate binary: installs the counting global allocator to prove BufferAlloc
 # and Counting<Global> never count a byte twice.
 [[test]]
 name = "rust_allocator_counting"
-path = "../../tests/rust_allocator_counting.rs"
+path = "../../tests/rust/rust_allocator_counting.rs"
 
 # Separate binary: restores SIGPIPE's default action process-wide, as a Go host
 # has it for threads Go did not create.
 [[test]]
 name = "rust_sigpipe"
-path = "../../tests/rust_sigpipe.rs"
+path = "../../tests/rust/rust_sigpipe.rs"
 
 # Separate binary: flips the process-wide COUNTING_ACTIVE flag permanently.
 [[test]]
 name = "rust_counting_flip"
-path = "../../tests/rust_counting_flip.rs"
+path = "../../tests/rust/rust_counting_flip.rs"
 
 # In-process dispatch comparisons. A bench binary, not a second staticlib:
 # the package still builds one libgusset and this target does not export a C ABI.

@@ -20,12 +20,12 @@ func isBuffer64Aligned(b []byte) bool {
 	return len(b) == 0 || uintptr(unsafe.Pointer(unsafe.SliceData(b)))%64 == 0
 }
 
-// TestChallenge_M5_2_ConcurrentDoubleFreeProtection validates that:
+// TestAllocatorStress_ConcurrentDoubleFreeProtection validates that:
 // 1. Multiple concurrent goroutines calling buf.Free() on the same Buffer is strictly safe and idempotent.
 // 2. Budget is decremented exactly once with zero drift.
 // 3. Stats().LiveBytes returns to baseline without double-uncount.
 // 4. Both Rust-owned (ID > 0) and Go heap-owned (ID == 0) buffers behave identically.
-func TestChallenge_M5_2_ConcurrentDoubleFreeProtection(t *testing.T) {
+func TestAllocatorStress_ConcurrentDoubleFreeProtection(t *testing.T) {
 	const budget = 256 * 1024 // 256 KiB
 	h, err := gusset.Open(
 		gusset.WithPoolSize(4),
@@ -140,12 +140,12 @@ func TestChallenge_M5_2_ConcurrentDoubleFreeProtection(t *testing.T) {
 	}
 }
 
-// TestChallenge_M5_2_MemoryPoisoningAndPostFreeAccess validates that:
+// TestAllocatorStress_MemoryPoisoningAndPostFreeAccess validates that:
 //  1. Calling Free() immediately withdraws the slice view (Bytes() == nil) and zeroes ID().
 //  2. Subsequent Submit / CallBuffer calls with a freed Rust or Go-heap buffer are refused.
 //  3. Go-heap buffer backing memory is left intact on Free() so a concurrent Submit that
 //     passed the lock-free freed check cannot race a slice modification.
-func TestChallenge_M5_2_MemoryPoisoningAndPostFreeAccess(t *testing.T) {
+func TestAllocatorStress_MemoryPoisoningAndPostFreeAccess(t *testing.T) {
 	h, err := gusset.Open(
 		gusset.WithPoolSize(2),
 		gusset.WithDiagnosticEngine(),
@@ -219,10 +219,10 @@ func TestChallenge_M5_2_MemoryPoisoningAndPostFreeAccess(t *testing.T) {
 	}
 }
 
-// TestChallenge_M5_2_BufferFreeVsHandleCloseRace stress-tests concurrent racing between
+// TestAllocatorStress_BufferFreeVsHandleCloseRace stress-tests concurrent racing between
 // buf.Free() and h.Close() across multiple goroutines to verify that neither path segfaults,
 // crashes under AddressSanitizer/race detector, or double-frees.
-func TestChallenge_M5_2_BufferFreeVsHandleCloseRace(t *testing.T) {
+func TestAllocatorStress_BufferFreeVsHandleCloseRace(t *testing.T) {
 	baseLive := gusset.Stats().LiveBytes
 
 	const iterations = 50
@@ -277,12 +277,12 @@ func TestChallenge_M5_2_BufferFreeVsHandleCloseRace(t *testing.T) {
 	}
 }
 
-// TestChallenge_M5_2_AllocatorStatsMonotonicityAndMonotonicPeak asserts that under concurrent
+// TestAllocatorStress_AllocatorStatsMonotonicityAndMonotonicPeak asserts that under concurrent
 // allocation and free churn:
 // 1. Stats().AllocCount is strictly monotonically non-decreasing.
 // 2. Stats().PeakBytes is strictly monotonically non-decreasing.
 // 3. Stats().LiveBytes is non-negative and returns to baseline upon quiescence.
-func TestChallenge_M5_2_AllocatorStatsMonotonicityAndMonotonicPeak(t *testing.T) {
+func TestAllocatorStress_AllocatorStatsMonotonicityAndMonotonicPeak(t *testing.T) {
 	h, err := gusset.Open(
 		gusset.WithPoolSize(8),
 		gusset.WithDiagnosticEngine(),
@@ -378,11 +378,11 @@ func TestChallenge_M5_2_AllocatorStatsMonotonicityAndMonotonicPeak(t *testing.T)
 	}
 }
 
-// TestChallenge_M5_2_AddCleanupGarbageCollectionBackstop validates that:
+// TestAllocatorStress_AddCleanupGarbageCollectionBackstop validates that:
 // 1. Buffers dropped without explicit Free() are reclaimed by Go's runtime.AddCleanup.
 // 2. Reclaimed buffers decrement Stats().LiveBytes back to baseline.
 // 3. Buffer budget (WithBufferBudget) is completely reclaimed, allowing subsequent allocations.
-func TestChallenge_M5_2_AddCleanupGarbageCollectionBackstop(t *testing.T) {
+func TestAllocatorStress_AddCleanupGarbageCollectionBackstop(t *testing.T) {
 	prevLog := slog.Default()
 	slog.SetDefault(slog.New(discardHandler{}))
 	defer slog.SetDefault(prevLog)
@@ -455,10 +455,10 @@ func TestChallenge_M5_2_AddCleanupGarbageCollectionBackstop(t *testing.T) {
 	}
 }
 
-// TestChallenge_M5_2_CleanupVsManualFreeRace exercises concurrent racing between
+// TestAllocatorStress_CleanupVsManualFreeRace exercises concurrent racing between
 // explicit buf.Free() and runtime.AddCleanup running during aggressive GC cycles.
 // Asserts that budget does not drift negative and zero panics occur.
-func TestChallenge_M5_2_CleanupVsManualFreeRace(t *testing.T) {
+func TestAllocatorStress_CleanupVsManualFreeRace(t *testing.T) {
 	prevLog := slog.Default()
 	slog.SetDefault(slog.New(discardHandler{}))
 	defer slog.SetDefault(prevLog)
@@ -541,10 +541,10 @@ func TestChallenge_M5_2_CleanupVsManualFreeRace(t *testing.T) {
 	}
 }
 
-// TestChallenge_M5_2_ARM64MemoryBarrierRingChurn stress-tests the completion ring and
+// TestAllocatorStress_ARM64MemoryBarrierRingChurn stress-tests the completion ring and
 // Dekker pair memory barrier synchronization (Go SwapUint32(waiting, 1) vs Rust fence(SeqCst)
 // + waiting.swap(0, AcqRel)) under heavy concurrent async churn across 32 goroutines.
-func TestChallenge_M5_2_ARM64MemoryBarrierRingChurn(t *testing.T) {
+func TestAllocatorStress_ARM64MemoryBarrierRingChurn(t *testing.T) {
 	h, err := gusset.Open(
 		gusset.WithPoolSize(8),
 		gusset.WithDiagnosticEngine(),
@@ -611,10 +611,10 @@ func TestChallenge_M5_2_ARM64MemoryBarrierRingChurn(t *testing.T) {
 	wg.Wait()
 }
 
-// TestChallenge_M5_2_ZeroLeakMixedEgressStress executes 200 mixed ingress and egress operations
+// TestAllocatorStress_ZeroLeakMixedEgressStress executes 200 mixed ingress and egress operations
 // (inline sync Call, sync CallBuffer, async Submit/Wait, async Submit/WaitBuffer, and diagnostic
 // mode 16 BufferAlloc outputs), asserting that Stats().LiveBytes returns with 0 delta.
-func TestChallenge_M5_2_ZeroLeakMixedEgressStress(t *testing.T) {
+func TestAllocatorStress_ZeroLeakMixedEgressStress(t *testing.T) {
 	h, err := gusset.Open(
 		gusset.WithPoolSize(4),
 		gusset.WithDiagnosticEngine(),

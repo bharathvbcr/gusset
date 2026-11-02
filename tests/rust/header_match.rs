@@ -4,7 +4,7 @@
 //! `build.rs` does not run cbindgen, so the header is written by hand. Three things
 //! already guard part of that surface, and none of them covers this:
 //!
-//! - `tests/exports_match.rs` compares `exports.txt` against the archive's symbol
+//! - `tests/rust/exports_match.rs` compares `exports.txt` against the archive's symbol
 //!   table, so it sees *names* but never types.
 //! - The ABI check in Go's `init()` compares struct sizes and alignments, so it sees
 //!   `#[repr(C)]` layout drift but not function signatures.
