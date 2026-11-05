@@ -97,6 +97,13 @@ path = "../../tests/rust/rust_sigpipe.rs"
 name = "rust_counting_flip"
 path = "../../tests/rust/rust_counting_flip.rs"
 
+# Separate binary: live bytes are process-global. Proves catch_unwind drops a
+# RawBuffer, and on Rust 1.100+ a BufferAlloc vector from try_reserve, without
+# installing Counting or opening a handle.
+[[test]]
+name = "rust_unwind_reclaim"
+path = "../../tests/rust/rust_unwind_reclaim.rs"
+
 # In-process dispatch comparisons. A bench binary, not a second staticlib:
 # the package still builds one libgusset and this target does not export a C ABI.
 [[bench]]

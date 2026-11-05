@@ -33,6 +33,7 @@ type Caller interface {
 var (
 	_ Caller = (*gusset.Handle)(nil)
 	_ Caller = (*Proc)(nil)
+	_ Caller = (*Supervisor)(nil)
 )
 
 // Serve is the worker half. It announces poolSize, then runs each submit

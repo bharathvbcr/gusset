@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -130,14 +131,36 @@ type Proc struct {
 	procExited chan struct{} // closed after the one cmd.Wait returns
 	closeDone  chan struct{}
 	closeErr   error
+
+	// retire is a buffer-1 signal for a supervisor, nil when this Proc has
+	// none. deliver and poisonStream send once under mu. The supervisor's
+	// goroutine kills; the goroutine inside writeLocked does not.
+	retire      chan struct{}
+	retireSent  bool
+	retireCause string
+
+	// stdinOnce makes the retirement close and poisonStream's close the same
+	// close. A second Close on an *os.File errors and does not close the
+	// descriptor twice; Once also keeps those two paths from racing.
+	stdinOnce sync.Once
 }
 
 // Start runs cmd as a worker. cmd must run Serve reading its stdin and
 // writing ProtocolOut; Start owns stdin and appends the protocol pipe to
-// cmd.ExtraFiles, naming its descriptor in EnvProtocolFD. cmd.Stdout and
-// cmd.Stderr stay as the caller set them. ctx bounds the handshake only: a
-// worker that has not announced itself by then is killed.
+// cmd.ExtraFiles, naming its descriptor in EnvProtocolFD. An existing
+// EnvProtocolFD entry is replaced, so a factory that copied a previous
+// command's environment cannot leave the child pointed at a dead descriptor.
+// cmd.Stdout and cmd.Stderr stay as the caller set them. ctx bounds the
+// handshake only: a worker that has not announced itself by then is killed.
 func Start(ctx context.Context, cmd *exec.Cmd) (*Proc, error) {
+	return start(ctx, cmd, nil)
+}
+
+// start is Start with an optional supervisor signal. retire is nil for a Proc
+// that poisons in place. waitProc is the only cmd.Wait after a successful
+// return; the handshake failure path reaps the process that never became a
+// Proc.
+func start(ctx context.Context, cmd *exec.Cmd, retire chan struct{}) (*Proc, error) {
 	if ctx == nil {
 		return nil, gusset.ErrNilContext
 	}
@@ -158,7 +181,10 @@ func Start(ctx context.Context, cmd *exec.Cmd) (*Proc, error) {
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()
 	}
-	cmd.Env = append(cmd.Env, EnvProtocolFD+"="+strconv.Itoa(3+len(cmd.ExtraFiles)))
+	// Drop every previous value, then append the descriptor this Start just
+	// created. Getenv returns the first match, so a stale entry left in front
+	// would win over one appended after it.
+	cmd.Env = replaceEnv(cmd.Env, EnvProtocolFD, strconv.Itoa(3+len(cmd.ExtraFiles)))
 	cmd.ExtraFiles = append(cmd.ExtraFiles, wr)
 	if cmd.WaitDelay == 0 {
 		cmd.WaitDelay = waitDelay
@@ -204,6 +230,7 @@ func Start(ctx context.Context, cmd *exec.Cmd) (*Proc, error) {
 		readerDone: make(chan struct{}),
 		procExited: make(chan struct{}),
 		closeDone:  make(chan struct{}),
+		retire:     retire,
 	}
 	// Exactly one goroutine calls cmd.Wait. It runs beside the reader: Wait
 	// is what starts WaitDelay, and a grandchild holding the protocol write
@@ -406,6 +433,9 @@ func (p *Proc) deliver(resp response) bool {
 		res.err = resp.Err.decode()
 		if errors.Is(res.err, gusset.ErrPanic) || errors.Is(res.err, gusset.ErrPoisoned) {
 			p.poisoned = true
+			// Once per generation. A later ErrPoisoned from a sibling job is
+			// the same retirement, not another signal.
+			p.notifyRetireLocked("engine poison")
 		}
 	}
 	switch {
@@ -593,15 +623,64 @@ func (p *Proc) writeLocked(ctx context.Context, req *request) error {
 
 // poisonStream latches poison and closes stdin. A partial frame must not be
 // followed by another, and closing the pipe is what unblocks a write stuck
-// in the kernel. Closing an already-closed pipe is an error from os.File and
-// does not close the descriptor twice.
+// in the kernel. The notify is under the lock this function already holds.
+// Killing the child, when a supervisor is attached, is that supervisor's
+// goroutine: the caller is writeLocked, and the goroutine it arms only moves
+// the write deadline.
 func (p *Proc) poisonStream() {
 	p.mu.Lock()
 	if !p.closed {
 		p.poisoned = true
 	}
+	p.notifyRetireLocked("cut frame")
 	p.mu.Unlock()
-	_ = p.stdin.Close()
+	p.closeStdin()
+}
+
+// notifyRetireLocked sends once on the supervisor signal. The channel is
+// buffer-1 and the send does not block; a second call is a no-op. The caller
+// holds p.mu.
+func (p *Proc) notifyRetireLocked(cause string) {
+	if p.retire == nil || p.retireSent {
+		return
+	}
+	p.retireSent = true
+	if cause != "" {
+		p.retireCause = cause
+	}
+	select {
+	case p.retire <- struct{}{}:
+	default:
+	}
+}
+
+func (p *Proc) retireReason() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.retireCause != "" {
+		return p.retireCause
+	}
+	return "poison"
+}
+
+// closeStdin closes the worker's stdin once. poisonStream, retirement, and
+// Close all end here; the second and third calls do not close the descriptor
+// again.
+func (p *Proc) closeStdin() {
+	if p == nil || p.stdin == nil {
+		return
+	}
+	p.stdinOnce.Do(func() { _ = p.stdin.Close() })
+}
+
+// usable reports whether a new submission can still be sent to this process.
+// A supervisor uses it to avoid handing a caller a generation that has
+// already been poisoned or reaped. The caller may hold the supervisor lock;
+// this takes p.mu and nothing else.
+func (p *Proc) usable() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.closed && !p.poisoned && p.dead == nil && !p.exited()
 }
 
 func (p *Proc) refusal() error {
@@ -764,7 +843,7 @@ func (p *Proc) close(budget time.Duration) error {
 	// ending the pipe is what releases that writer.
 	timer := time.NewTimer(budget)
 	defer timer.Stop()
-	_ = p.stdin.Close()
+	p.closeStdin()
 	select {
 	case <-p.readerDone:
 	case <-timer.C:
@@ -822,4 +901,19 @@ func relativeTimeout(ctx context.Context) uint64 {
 		return uint64(remaining.Nanoseconds())
 	}
 	return 1
+}
+
+// replaceEnv drops every entry of key and appends key=value. The worker's
+// getenv returns the first match, so a stale descriptor left in front of a
+// newly appended one would be the one the child opens.
+func replaceEnv(env []string, key, value string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		k, _, ok := strings.Cut(e, "=")
+		if ok && k == key {
+			continue
+		}
+		out = append(out, e)
+	}
+	return append(out, key+"="+value)
 }

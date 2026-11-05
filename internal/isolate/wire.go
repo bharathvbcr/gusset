@@ -6,7 +6,8 @@
 // It is internal on purpose. The transport is length-prefixed JSON frames
 // (the house process contract): requests on the worker's stdin, responses on
 // a protocol pipe Start appends to cmd.ExtraFiles (fd 3 when the caller passed
-// no others) and names in EnvProtocolFD, so the worker's stdout stays its
+// no others) and names in EnvProtocolFD, replacing any previous value, so the
+// worker's stdout stays its
 // own. It stands in for
 // the iceoryx2 shared-memory transport docs/ipc.md specifies, whose Go binding
 // does not exist yet. No public entry point is added; DECISIONS.md 2026-10-08

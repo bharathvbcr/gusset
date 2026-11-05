@@ -27,6 +27,12 @@ import (
 // archive and the same diagnostic engine.
 const workerEnv = "GUSSET_ISOLATE_WORKER"
 
+// countFileEnv, when set on a worker, is a file faulty.Submit appends one
+// line to per submission. The supervisor tests use it to show a payload was
+// not submitted again after the worker died. Empty means the worker does not
+// record submissions.
+const countFileEnv = "GUSSET_ISOLATE_COUNT_FILE"
+
 const workerPool = 2
 
 // Fault bytes: the worker's own process dies the way an uncatchable fault
@@ -119,6 +125,12 @@ func workerMain() int {
 		return 1
 	}
 	mode := os.Getenv(modeEnv)
+	if mode == "delay-hello" {
+		// The handshake stays in progress long enough for a caller to give
+		// up. The process then announces normally.
+		time.Sleep(1500 * time.Millisecond)
+		mode = ""
+	}
 	if mode == "nostdin" {
 		_ = os.Stdin.Close() // before hello: the host's first write fails
 	}
@@ -253,6 +265,9 @@ func (f faulty) Submit(ctx context.Context, in any) (uint64, error) {
 	if os.Getenv(modeEnv) == "stray" {
 		fmt.Fprint(os.Stdout, "INFO engine ready\n")
 	}
+	if b, ok := in.([]byte); ok {
+		noteSubmit(b)
+	}
 	if b, ok := in.([]byte); ok && len(b) > 0 {
 		switch b[0] {
 		case faultKill:
@@ -266,6 +281,23 @@ func (f faulty) Submit(ctx context.Context, in any) (uint64, error) {
 		}
 	}
 	return f.Handle.Submit(ctx, in)
+}
+
+// noteSubmit appends the payload's hex to countFileEnv when that variable is
+// set. A missing file or a short write is ignored: the test that asked for
+// the record fails on the count, and a worker that is not under that test
+// does not have the variable.
+func noteSubmit(in []byte) {
+	path := os.Getenv(countFileEnv)
+	if path == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintf(f, "%x\n", in)
+	_ = f.Close()
 }
 
 func startWorker(t *testing.T) *Proc {
