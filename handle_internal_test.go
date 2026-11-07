@@ -832,3 +832,39 @@ func BenchmarkCallNoopBare(b *testing.B) { benchmarkCallNoop(b, context.Backgrou
 func BenchmarkCallNoopTraced(b *testing.B) {
 	benchmarkCallNoop(b, context.WithValue(context.Background(), SpanContextKey, testSpanCarrier{trace: [16]byte{1}}))
 }
+
+func openFDCount(t *testing.T) int {
+	t.Helper()
+	ents, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		t.Skipf("cannot list /dev/fd: %v", err)
+	}
+	return len(ents)
+}
+
+// A SetNonblock failure on the duplicated write end must fail Open, wrap the
+// cause, and close both descriptors of the pipe pair: Rust would otherwise own
+// a blocking write end, and a full pipe would block a worker inside write.
+func TestOpenSetNonblockFailureFailsAndClosesBothDescriptors(t *testing.T) {
+	injected := errors.New("injected SetNonblock failure")
+	prev := setNonblock
+	t.Cleanup(func() { setNonblock = prev })
+	setNonblock = func(int, bool) error { return injected }
+
+	const rounds = 50
+	before := openFDCount(t)
+	for i := 0; i < rounds; i++ {
+		h, err := Open(WithPoolSize(1))
+		if err == nil {
+			_ = h.Close()
+			t.Fatal("Open succeeded although SetNonblock failed")
+		}
+		if !errors.Is(err, injected) {
+			t.Fatalf("Open error %v does not wrap the injected failure", err)
+		}
+	}
+	// A leaked descriptor per Open is 50 or 100 here; 10 absorbs background noise.
+	if after := openFDCount(t); after-before > 10 {
+		t.Fatalf("descriptors grew from %d to %d over %d failed Opens", before, after, rounds)
+	}
+}
