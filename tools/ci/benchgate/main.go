@@ -1,7 +1,7 @@
 // Command benchgate holds the two CI benchmark gates that used to be a grep.
 //
 //	benchgate allocs -max Name=N [-max Name=N ...] results.txt
-//	benchgate regress -threshold PCT [-allow-one-sided Name]... benchstat.csv
+//	benchgate regress -threshold PCT [-min-samples N] [-allow-one-sided Name]... benchstat.csv
 //
 // allocs reads raw `go test -bench` output and fails when any sample of a named
 // benchmark reports more allocs/op than its bound, or when a named benchmark has
@@ -27,6 +27,9 @@
 // names match with or without the runner's -N GOMAXPROCS suffix. A one-sided
 // row does not end the sec/op table: a later comparison is still gated. A
 // renamed benchmark used to clear the table and a later regression passed.
+// -min-samples (default 6, the least benchstat can give an interval for) fails
+// any compared row whose smaller side has fewer samples: at n=1 every row is
+// "~" and the gate used to print "no regression" having compared nothing.
 package main
 
 import (
@@ -174,20 +177,24 @@ func (s nameSet) Set(v string) error {
 func runRegress(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("regress", flag.ContinueOnError)
 	threshold := fs.Float64("threshold", 10, "percent slower, beyond which a significant row fails")
+	minSamples := fs.Int("min-samples", 6, "fewest samples either side of a compared row may have; below it the gate fails (benchstat cannot give a confidence interval under 6)")
 	allow := nameSet{}
 	fs.Var(allow, "allow-one-sided", "benchmark present on only one side; repeatable, default none (a renamed benchmark fails)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: benchgate regress -threshold PCT [-allow-one-sided Name]... benchstat.csv")
+		return errors.New("usage: benchgate regress -threshold PCT [-min-samples N] [-allow-one-sided Name]... benchstat.csv")
+	}
+	if *minSamples < 1 {
+		return fmt.Errorf("-min-samples %d: must be at least 1", *minSamples)
 	}
 	f, err := os.Open(fs.Arg(0))
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	return checkRegress(f, *threshold, allow, stdout)
+	return checkRegress(f, *threshold, *minSamples, allow, stdout)
 }
 
 func parsePercent(s string) (float64, bool) {
@@ -196,7 +203,7 @@ func parsePercent(s string) (float64, bool) {
 	return v, err == nil
 }
 
-func checkRegress(r io.Reader, threshold float64, allowOneSided map[string]struct{}, stdout io.Writer) error {
+func checkRegress(r io.Reader, threshold float64, minSamples int, allowOneSided map[string]struct{}, stdout io.Writer) error {
 	cr := csv.NewReader(r)
 	cr.FieldsPerRecord = -1
 	cr.LazyQuotes = true
@@ -235,6 +242,15 @@ func checkRegress(r io.Reader, threshold float64, allowOneSided map[string]struc
 			continue
 		}
 		rows++
+		// Checked before the "~" skip: with one sample per side benchstat
+		// calls every row "~", which is exactly the case this guards.
+		if lo, ok := minSampleCount(rec[6]); !ok {
+			failures = append(failures, fmt.Sprintf("%s: no sample count in %q; cannot show the comparison had %d samples per side", rec[0], rec[6], minSamples))
+			continue
+		} else if lo < minSamples {
+			failures = append(failures, fmt.Sprintf("%s: %d sample(s) on the smaller side, fewer than -min-samples %d; a comparison that thin reports \"~\" for everything and is not a pass", rec[0], lo, minSamples))
+			continue
+		}
 		delta := strings.TrimSpace(rec[5])
 		if delta == "~" || delta == "" {
 			continue
@@ -272,6 +288,30 @@ func checkRegress(r io.Reader, threshold float64, allowOneSided map[string]struc
 	}
 	fmt.Fprintf(stdout, "no regression beyond %v%% across %d benchmarks\n", threshold, rows)
 	return nil
+}
+
+// sampleCount matches benchstat's "n=10" (equal sides) or "n=8+7" (unequal).
+var sampleCount = regexp.MustCompile(`\bn=(\d+)(?:\+(\d+))?`)
+
+// minSampleCount returns the smaller side's sample count from a P column such
+// as "p=0.001 n=8+7".
+func minSampleCount(p string) (int, bool) {
+	m := sampleCount.FindStringSubmatch(p)
+	if m == nil {
+		return 0, false
+	}
+	lo, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	if m[2] != "" {
+		hi, err := strconv.Atoi(m[2])
+		if err != nil {
+			return 0, false
+		}
+		lo = min(lo, hi)
+	}
+	return lo, true
 }
 
 // newOnly reports a one-sided row whose base columns are empty: benchstat's

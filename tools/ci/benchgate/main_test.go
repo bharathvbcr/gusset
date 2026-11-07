@@ -85,7 +85,7 @@ GussetCallNoop-18,5e-05,5%,4e-05,5%,-20.00%,p=0.001 n=10
 geomean,2e-06,,3e-06,,+50.00%,
 `
 	var out bytes.Buffer
-	if err := checkRegress(strings.NewReader(in), 10, nil, &out); err != nil {
+	if err := checkRegress(strings.NewReader(in), 10, 1, nil, &out); err != nil {
 		t.Fatalf("overlapping intervals failed the gate: %v", err)
 	}
 	if !strings.Contains(out.String(), "noise GussetBufferLarge-18") {
@@ -96,7 +96,7 @@ geomean,2e-06,,3e-06,,+50.00%,
 func TestRegressFailsOnARealRegression(t *testing.T) {
 	in := csvHeader + `GussetBufferLarge-18,1.0,2%,1.3,3%,+30.00%,p=0.000 n=10
 `
-	err := checkRegress(strings.NewReader(in), 10, nil, &bytes.Buffer{})
+	err := checkRegress(strings.NewReader(in), 10, 1, nil, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "GussetBufferLarge-18") {
 		t.Fatalf("a +30%% row with tight intervals passed: %v", err)
 	}
@@ -106,21 +106,21 @@ func TestRegressHonoursThresholdAndNotSignificant(t *testing.T) {
 	in := csvHeader + `A-18,1.0,1%,1.05,1%,+5.00%,p=0.000 n=10
 B-18,1.0,50%,3.0,1%,~,p=0.300 n=10
 `
-	if err := checkRegress(strings.NewReader(in), 10, nil, &bytes.Buffer{}); err != nil {
+	if err := checkRegress(strings.NewReader(in), 10, 1, nil, &bytes.Buffer{}); err != nil {
 		t.Fatalf("below-threshold and not-significant rows failed: %v", err)
 	}
 }
 
 func TestRegressFailsClosedWhenItCannotRead(t *testing.T) {
-	if err := checkRegress(strings.NewReader(""), 10, nil, &bytes.Buffer{}); err == nil {
+	if err := checkRegress(strings.NewReader(""), 10, 1, nil, &bytes.Buffer{}); err == nil {
 		t.Error("empty benchstat output passed; nothing was compared")
 	}
 	allocsOnly := ",old.txt,,new.txt,,,\n,allocs/op,CI,allocs/op,CI,vs base,P\nA-18,1,0%,1,0%,~,p=1.000 n=10\n"
-	if err := checkRegress(strings.NewReader(allocsOnly), 10, nil, &bytes.Buffer{}); err == nil {
+	if err := checkRegress(strings.NewReader(allocsOnly), 10, 1, nil, &bytes.Buffer{}); err == nil {
 		t.Error("a file with no sec/op rows passed")
 	}
 	noCI := csvHeader + "A-18,1.0,,2.0,,+100.00%,p=0.000 n=3\n"
-	if err := checkRegress(strings.NewReader(noCI), 10, nil, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "interval is unreadable") {
+	if err := checkRegress(strings.NewReader(noCI), 10, 1, nil, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "interval is unreadable") {
 		t.Errorf("a regression with no interval was waved through: %v", err)
 	}
 }
@@ -162,7 +162,7 @@ geomean,1e-06,,1e-06,,+0.00%,
 ,B/op,CI,B/op,CI,vs base,P
 A-18,1.000,1600%,9.000,0%,+800.00%,p=0.000 n=10
 `
-	if err := checkRegress(strings.NewReader(in), 10, nil, &bytes.Buffer{}); err != nil {
+	if err := checkRegress(strings.NewReader(in), 10, 1, nil, &bytes.Buffer{}); err != nil {
 		t.Fatalf("a B/op row was gated as a timing: %v", err)
 	}
 }
@@ -177,7 +177,7 @@ func TestRegressOneSidedRowDoesNotUngateTheNext(t *testing.T) {
 	in := csvHeader + `Steady-18,1.0,2%,1.01,2%,~,p=0.5 n=10
 ` + renamed + `LaterRegress-18,1.0,2%,1.3,3%,+30.00%,p=0.000 n=10
 `
-	err := checkRegress(strings.NewReader(in), 10, nil, &bytes.Buffer{})
+	err := checkRegress(strings.NewReader(in), 10, 1, nil, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "LaterRegress-18") {
 		t.Fatalf("the +30%% row was ungated or the gate passed: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestRegressOneSidedRowDoesNotUngateTheNext(t *testing.T) {
 	}
 
 	allow := map[string]struct{}{"RenamedAway-18": {}}
-	err = checkRegress(strings.NewReader(in), 10, allow, &bytes.Buffer{})
+	err = checkRegress(strings.NewReader(in), 10, 1, allow, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "LaterRegress-18") {
 		t.Fatalf("allow-listing the renamed row hid the regression: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestRegressOneSidedRowDoesNotUngateTheNext(t *testing.T) {
 
 	quiet := csvHeader + `Steady-18,1.0,2%,1.01,2%,~,p=0.5 n=10
 ` + renamed
-	if err := checkRegress(strings.NewReader(quiet), 10, allow, &bytes.Buffer{}); err != nil {
+	if err := checkRegress(strings.NewReader(quiet), 10, 1, allow, &bytes.Buffer{}); err != nil {
 		t.Fatalf("an allow-listed one-sided row failed the gate by itself: %v", err)
 	}
 
@@ -207,7 +207,7 @@ NewOnly-18,,,1.0,2%
 LaterRegress-18,1.0,2%,1.3,3%,+30.00%,p=0.000 n=10
 `
 	var out bytes.Buffer
-	err = checkRegress(strings.NewReader(five), 10, nil, &out)
+	err = checkRegress(strings.NewReader(five), 10, 1, nil, &out)
 	if err == nil || !strings.Contains(err.Error(), "LaterRegress-18") {
 		t.Fatalf("a new-only row ungated the table: %v", err)
 	}
@@ -228,7 +228,7 @@ Discard-4,,,40.0,2%
 Stats-4,,,12.0,3%
 `
 	var out bytes.Buffer
-	if err := checkRegress(strings.NewReader(in), 10, nil, &out); err != nil {
+	if err := checkRegress(strings.NewReader(in), 10, 1, nil, &out); err != nil {
 		t.Fatalf("new-only rows failed the gate: %v", err)
 	}
 	for _, name := range []string{"DeadlineExpiry-4", "Discard-4", "Stats-4"} {
@@ -245,7 +245,7 @@ func TestRegressRenameStillFails(t *testing.T) {
 OldName-4,1.0,2%
 NewName-4,,,1.0,2%
 `
-	err := checkRegress(strings.NewReader(in), 10, nil, &bytes.Buffer{})
+	err := checkRegress(strings.NewReader(in), 10, 1, nil, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "OldName-4") {
 		t.Fatalf("a renamed benchmark passed: %v", err)
 	}
@@ -258,11 +258,11 @@ NewName-4,,,1.0,2%
 func TestRegressAllowMatchesWithoutProcsSuffix(t *testing.T) {
 	in := csvHeader + "Steady-4,1.0,2%,1.01,2%,~,p=0.5 n=10\nRenamedAway-4,1.0,2%\n"
 	for _, allow := range []string{"RenamedAway", "RenamedAway-4"} {
-		if err := checkRegress(strings.NewReader(in), 10, map[string]struct{}{allow: {}}, &bytes.Buffer{}); err != nil {
+		if err := checkRegress(strings.NewReader(in), 10, 1, map[string]struct{}{allow: {}}, &bytes.Buffer{}); err != nil {
 			t.Errorf("allow %q did not match RenamedAway-4: %v", allow, err)
 		}
 	}
-	if err := checkRegress(strings.NewReader(in), 10, map[string]struct{}{"RenamedAway-8": {}}, &bytes.Buffer{}); err == nil {
+	if err := checkRegress(strings.NewReader(in), 10, 1, map[string]struct{}{"RenamedAway-8": {}}, &bytes.Buffer{}); err == nil {
 		t.Error("an allow entry for a different -N matched")
 	}
 }

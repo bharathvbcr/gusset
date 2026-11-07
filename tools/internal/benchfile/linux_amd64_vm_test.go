@@ -3,6 +3,7 @@ package benchfile_test
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -44,16 +45,22 @@ func repoRoot(t *testing.T) string {
 
 // Helper: parse only provenance headers into a benchfile.File.
 func parseProvenanceHeadersOnly(content string) (*benchfile.File, error) {
-	// Prepend clean transport benchmark rows so structural parse succeeds
-	cleanRows := `BenchmarkDummy/Arm1/noop-4 1000 100 ns/op
-BenchmarkDummy/Arm1/noop-4 1000 100 ns/op
-`
 	var headerLines []string
+	count, variants := 0, 0
 	for _, line := range strings.Split(content, "\n") {
 		if strings.HasPrefix(line, "# gusset-bench") {
 			headerLines = append(headerLines, line)
 		}
+		if v, ok := strings.CutPrefix(line, "# gusset-bench-count:"); ok {
+			count, _ = strconv.Atoi(strings.TrimSpace(v))
+		}
+		if strings.HasPrefix(line, "# gusset-bench-variant-") {
+			variants++
+		}
 	}
+	// Dummy rows so the structural parse succeeds, as many as the header's
+	// count promises: RequireProvenance compares the two.
+	cleanRows := strings.Repeat("BenchmarkDummy/Arm1/noop-4 1000 100 ns/op\n", max(count, 1)*max(variants, 1))
 	full := strings.Join(headerLines, "\n") + "\n" + cleanRows
 	tmp, err := os.CreateTemp("", "prov_test_*.txt")
 	if err != nil {

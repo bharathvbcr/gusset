@@ -18,7 +18,7 @@
 //! once, and the order alternates by round (odd rounds as listed, even rounds
 //! reversed: ABBA), so a clock ramp or load that arrives mid-run cannot land
 //! only on the arm that always runs last. A discarded round 0 comes first, for
-//! the frequency ramp. [`MIN_ROUNDS`] is a floor, not a default: benchstat will
+//! the frequency ramp. `common::MIN_ROUNDS` is a floor, not a default: benchstat will
 //! not quote a confidence interval below 6 samples, and fewer rounds than this
 //! cannot tell an order effect from a difference between arms.
 //!
@@ -39,6 +39,9 @@
 //! Record it through `bench/record.sh` (`make bench-dispatch`), not by hand:
 //! the recorder refuses a loaded or shared machine and stamps the file.
 
+mod common;
+
+use common::parse_args;
 use gusset::header::{
     CallHeader, JobContext, GUSSET_FLAG_DIAGNOSTIC_ENGINE, GUSSET_FLAG_INLINE_COMPLETION,
 };
@@ -49,15 +52,11 @@ use std::time::{Duration, Instant};
 /// Round-trips timed per sample, unless `--iters` overrides it.
 const DEFAULT_ITERS: u32 = 5000;
 
-/// The fewest rounds a run may ask for; also the default.
-const MIN_ROUNDS: u32 = 10;
-
 /// The nonzero opcode the registry arms install.
 const NONZERO_OPCODE: u32 = 7;
 
 fn fail(msg: &str) -> ! {
-    eprintln!("dispatch bench: {msg}");
-    std::process::exit(1);
+    common::fail("dispatch", msg)
 }
 
 fn open_pipe() -> (i32, i32) {
@@ -238,48 +237,6 @@ impl Arm {
     }
 }
 
-struct Config {
-    rounds: u32,
-    iters: u32,
-}
-
-fn positive(flag: &str, value: Option<String>) -> u32 {
-    match value.as_deref().map(str::parse::<u32>) {
-        Some(Ok(n)) if n > 0 => n,
-        _ => fail(&format!("{flag} needs a positive integer")),
-    }
-}
-
-/// Reads `--rounds N` and `--iters N`. cargo appends `--bench` when it runs a
-/// bench target, so that one is accepted and ignored; anything else is refused
-/// rather than skipped, because a typo'd flag would otherwise run the defaults
-/// and look like the run that was asked for.
-fn parse_args() -> Config {
-    let mut cfg = Config {
-        rounds: MIN_ROUNDS,
-        iters: DEFAULT_ITERS,
-    };
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--bench" => {}
-            "--rounds" => cfg.rounds = positive("--rounds", args.next()),
-            "--iters" => cfg.iters = positive("--iters", args.next()),
-            other => fail(&format!(
-                "unknown argument {other}; usage: dispatch [--rounds N] [--iters N]"
-            )),
-        }
-    }
-    if cfg.rounds < MIN_ROUNDS {
-        fail(&format!(
-            "--rounds {} is below the floor of {MIN_ROUNDS}: fewer rounds cannot separate an \
-             order effect from a difference between arms",
-            cfg.rounds
-        ));
-    }
-    cfg
-}
-
 /// The arms in the order round `round` (1-based) runs them: as listed on odd
 /// rounds, reversed on even ones.
 fn round_order(round: u32) -> Vec<Arm> {
@@ -291,7 +248,7 @@ fn round_order(round: u32) -> Vec<Arm> {
 }
 
 fn main() {
-    let cfg = parse_args();
+    let cfg = parse_args("dispatch", DEFAULT_ITERS);
     let (read_fd, write_fd) = open_pipe();
     let handle = match Handle::open(1, write_fd) {
         Ok(handle) => handle,
