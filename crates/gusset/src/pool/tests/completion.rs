@@ -1,6 +1,6 @@
 use super::{make_pipe, Must, FORCE_TICKET_ONLY};
 use crate::header::{CallHeader, GUSSET_FLAG_DIAGNOSTIC_ENGINE};
-use crate::pool::completion::{size_completion_pipe, write_completion};
+use crate::pool::completion::{size_completion_pipe, write_completion, WriteEnd};
 use crate::pool::{
     lock_recover, sys, Handle, IdMap, JobResult, INLINE_RECORD_FLAG, INLINE_RECORD_MAX,
     INLINE_RESULT_MAX,
@@ -51,7 +51,8 @@ fn write_completion_gives_up_on_a_full_pipe_once_the_handle_closes() {
     closer.join().must("closer");
 
     match result {
-        Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotConnected, "{e}"),
+        Err(WriteEnd::Closed) => {}
+        Err(WriteEnd::Failed(e)) => panic!("a closing handle was reported as a failed write: {e}"),
         Ok(()) => panic!("a full pipe nobody drains reported a delivered completion"),
     }
     assert!(
@@ -66,6 +67,66 @@ fn write_completion_gives_up_on_a_full_pipe_once_the_handle_closes() {
     unsafe {
         libc::close(r);
         libc::close(w);
+    }
+}
+
+/// An OS `ENOTCONN` from the descriptor is a failed write, not a closing
+/// handle: it logs and poisons. `write_completion` once told the two apart by
+/// `io::ErrorKind::NotConnected` alone, so it swallowed this one quietly.
+///
+/// A never-connected stream socket stands in for the descriptor: writing to it
+/// fails with `ENOTCONN` on Linux and macOS alike (a socketpair whose peer is
+/// shut down fails with `EPIPE` instead, which poisons either way). `open`
+/// refuses non-pipes, so the handle is opened on a pipe and the socket is
+/// swapped in as its write descriptor.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_os_enotconn_on_the_completion_write_poisons_and_logs() {
+    let (r, w) = make_pipe();
+    let handle = match Handle::open(1, w) {
+        Ok(h) => h,
+        Err(e) => panic!("open failed: {}", e),
+    };
+    // SAFETY: creating a socket this test owns.
+    let sock = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    assert!(sock >= 0, "socket: {}", std::io::Error::last_os_error());
+    sys::set_nonblocking(sock).must("set_nonblocking");
+    let pipe_end = handle.pipe_write_fd.swap(sock, Ordering::AcqRel);
+    assert_eq!(pipe_end, w);
+    assert!(!handle.is_poisoned());
+
+    // A ticket no other test in this binary issues, to find its log line.
+    let ticket = 0x0E07_C0DE_u64;
+    handle.complete(ticket, JobResult::Ok(Vec::new()), false);
+
+    assert!(
+        handle.is_poisoned(),
+        "an ENOTCONN from the descriptor was taken for a closing handle"
+    );
+    let want = format!("completion write failed for ticket {ticket}");
+    let mut drained = Vec::new();
+    loop {
+        let mut buf = vec![0u8; 65536];
+        let mut written = 0usize;
+        // SAFETY: `buf` is writable for `buf.len()` bytes and `written` is a valid out pointer.
+        unsafe { crate::ffi::gusset_drain_logs(buf.as_mut_ptr(), buf.len(), &mut written) };
+        if written == 0 {
+            break;
+        }
+        drained.extend_from_slice(&buf[..written]);
+    }
+    let text = String::from_utf8_lossy(&drained);
+    assert!(
+        text.lines().any(|l| l.contains(&want)),
+        "no log line for the failed write: {text:?}"
+    );
+
+    handle.pipe_write_fd.store(pipe_end, Ordering::Release);
+    handle.close().must("close");
+    // SAFETY: the read end and the socket are owned by this test.
+    unsafe {
+        libc::close(r);
+        libc::close(sock);
     }
 }
 
@@ -98,7 +159,7 @@ fn write_completion_succeeds_once_a_stalled_reader_drains() {
 
     let result = write_completion(&lock, &fd, &closed, 7, &7u64.to_ne_bytes());
     if let Err(e) = result {
-        panic!("write must succeed once the reader drains, got {e}");
+        panic!("write must succeed once the reader drains, got {e:?}");
     }
     let r = reader.join().must("reader");
     // SAFETY: both ends are owned by this test.
