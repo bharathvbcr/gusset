@@ -1,0 +1,5 @@
+# The C symbols this example's cgo shim (engine_link.go, -tags
+# gusset_uniffi_engine) imports from the umbrella archive rust/ builds.
+# `make test-uniffi-link` checks the shim against this list with gussetvet
+# (R5: noescape and nocallback on each; R1: each has a Go wrapper).
+init_uniffi_engine

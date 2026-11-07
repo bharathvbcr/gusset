@@ -153,19 +153,20 @@ func wantMathError(t *testing.T, err error, code uniffi.MathErrorCode, msg strin
 	}
 }
 
-// The typed client must produce the golden request bytes, and the Go reference
-// engine must answer them with the golden response bytes, which the Rust engine
-// is tested against. Vectors run in file order against a fresh engine because
-// the OperationsTotal counter is cumulative.
-func TestGolden_ClientAndReferenceEngineMatchRustBytes(t *testing.T) {
+// replayGolden runs every vector of testdata/golden.txt, in file order, as a
+// typed-client call over engine, and fails unless the client sends the golden
+// request bytes and engine answers with the golden response bytes. engine must
+// be fresh: the OperationsTotal counter in each calc response is cumulative.
+// The last vector panics the engine, so the handle behind engine is poisoned
+// afterwards. name labels the engine in failures.
+func replayGolden(t *testing.T, name string, engine uniffi.Transport) {
+	t.Helper()
 	vectors := loadGolden(t)
 	if len(vectors) != len(goldenCalls) {
 		t.Fatalf("golden file has %d vectors, test table has %d", len(vectors), len(goldenCalls))
 	}
 
-	ref := newReferenceEngineTransport()
-	ref.sleepHook = func(context.Context, time.Duration) error { return nil }
-	rec := &recordingTransport{Transport: ref}
+	rec := &recordingTransport{Transport: engine}
 	client := uniffi.NewClient(rec)
 
 	compared := 0
@@ -180,7 +181,7 @@ func TestGolden_ClientAndReferenceEngineMatchRustBytes(t *testing.T) {
 		}
 		if v.response != nil {
 			if !bytes.Equal(rec.response, v.response) {
-				t.Fatalf("%s: reference engine response %x, golden %x", v.name, rec.response, v.response)
+				t.Fatalf("%s: %s response %x, golden %x", v.name, name, rec.response, v.response)
 			}
 			compared++
 		}
@@ -188,4 +189,15 @@ func TestGolden_ClientAndReferenceEngineMatchRustBytes(t *testing.T) {
 	if compared < 10 {
 		t.Fatalf("only %d response vectors compared", compared)
 	}
+}
+
+// The typed client must produce the golden request bytes, and the Go reference
+// engine must answer them with the golden response bytes, which the Rust engine
+// is tested against. TestCompiledEngine_TypedClientMatchesGolden (built with
+// -tags gusset_uniffi_engine) replays the same vectors against the compiled
+// Rust engine through a real Gusset handle.
+func TestGolden_ClientAndReferenceEngineMatchRustBytes(t *testing.T) {
+	ref := newReferenceEngineTransport()
+	ref.sleepHook = func(context.Context, time.Duration) error { return nil }
+	replayGolden(t, "reference engine", ref)
 }
