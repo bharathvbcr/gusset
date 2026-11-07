@@ -96,6 +96,10 @@ type ticketState struct {
 	res       *result
 	waiter    chan result
 	abandoned bool
+	// cancelled is set when Wait gave the ticket up and sent the cancel
+	// frame. Discard abandons without cancelling and is not counted: the
+	// work it left behind is expected to run on.
+	cancelled bool
 }
 
 // Proc is the out-of-process Handle: the Caller contract served by a worker
@@ -139,6 +143,12 @@ type Proc struct {
 	retireSent  bool
 	retireCause string
 
+	// stall is the supervisor's liveness bound, 0 when there is none.
+	// stallArmed is true while a judgement timer is pending, so a ticket
+	// that is dropped and re-abandoned cannot stack a second one.
+	stall      time.Duration
+	stallArmed bool
+
 	// stdinOnce makes the retirement close and poisonStream's close the same
 	// close. A second Close on an *os.File errors and does not close the
 	// descriptor twice; Once also keeps those two paths from racing.
@@ -153,14 +163,15 @@ type Proc struct {
 // cmd.Stdout and cmd.Stderr stay as the caller set them. ctx bounds the
 // handshake only: a worker that has not announced itself by then is killed.
 func Start(ctx context.Context, cmd *exec.Cmd) (*Proc, error) {
-	return start(ctx, cmd, nil)
+	return start(ctx, cmd, nil, 0)
 }
 
 // start is Start with an optional supervisor signal. retire is nil for a Proc
 // that poisons in place. waitProc is the only cmd.Wait after a successful
 // return; the handshake failure path reaps the process that never became a
-// Proc.
-func start(ctx context.Context, cmd *exec.Cmd, retire chan struct{}) (*Proc, error) {
+// Proc. stall is the supervisor's StallTimeout; 0 turns the liveness rule off,
+// as it is for a bare Proc.
+func start(ctx context.Context, cmd *exec.Cmd, retire chan struct{}, stall time.Duration) (*Proc, error) {
 	if ctx == nil {
 		return nil, gusset.ErrNilContext
 	}
@@ -231,6 +242,7 @@ func start(ctx context.Context, cmd *exec.Cmd, retire chan struct{}) (*Proc, err
 		procExited: make(chan struct{}),
 		closeDone:  make(chan struct{}),
 		retire:     retire,
+		stall:      stall,
 	}
 	// Exactly one goroutine calls cmd.Wait. It runs beside the reader: Wait
 	// is what starts WaitDelay, and a grandchild holding the protocol write
@@ -654,6 +666,41 @@ func (p *Proc) notifyRetireLocked(cause string) {
 	}
 }
 
+// judgeStallLocked is the liveness rule, beside the reader and not in it. It
+// runs when Wait abandons a ticket. If every pool permit is now held by a
+// cancelled ticket nothing can be submitted, so it arms one timer for stall.
+// When the timer fires, the generation is unresponsive only if no frame was
+// delivered since it was armed and the permits are still all held; a frame
+// restarts the judgement the next time a Wait abandons. The caller holds
+// p.mu. Without a supervisor (retire nil) or a stall bound it does nothing.
+func (p *Proc) judgeStallLocked() {
+	if p.retire == nil || p.stall <= 0 || p.stallArmed || p.retireSent || !p.stalledLocked() {
+		return
+	}
+	p.stallArmed = true
+	seen := p.frames.Load()
+	time.AfterFunc(p.stall, func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.stallArmed = false
+		if p.closed || p.dead != nil || p.frames.Load() != seen || !p.stalledLocked() {
+			return
+		}
+		p.notifyRetireLocked("unresponsive")
+	})
+}
+
+// stalledLocked reports whether cancelled tickets hold every permit.
+func (p *Proc) stalledLocked() bool {
+	n := 0
+	for _, t := range p.tickets {
+		if t.cancelled && t.res == nil {
+			n++
+		}
+	}
+	return n >= cap(p.sem)
+}
+
 func (p *Proc) retireReason() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -763,6 +810,8 @@ func (p *Proc) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	}
 	t.waiter = nil
 	t.abandoned = true
+	t.cancelled = true
+	p.judgeStallLocked()
 	p.mu.Unlock()
 	// Best effort, and not on this goroutine. The cancel takes writeMu; doing
 	// that here would make the caller's deadline wait on a writer already in

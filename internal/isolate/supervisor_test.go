@@ -830,3 +830,200 @@ func TestSupervisor_TicketIDsStopAtTheCeiling(t *testing.T) {
 		t.Fatalf("Call after restoring the counter = %v", err)
 	}
 }
+
+// abandonPool gives up one Call per permit, each on a short deadline, so every
+// permit of the live generation is held by a ticket whose caller left.
+func abandonPool(t *testing.T, h *supHarness, payload []byte) {
+	t.Helper()
+	for i := 0; i < workerPool; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		_, err := h.s.Call(ctx, payload)
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("abandoning Call %d = %v; want DeadlineExceeded", i, err)
+		}
+	}
+}
+
+func liveProc(h *supHarness) *Proc {
+	h.s.mu.Lock()
+	defer h.s.mu.Unlock()
+	return h.s.live.proc
+}
+
+// stallRetiredAsUnresponsive is the A4-1 flow for a worker that is alive and
+// silent in one of the harness's ways: every permit stranded by a caller that
+// left, one more caller parked on the permit, and then a later Call(500ms)
+// that must succeed on exactly one replacement.
+func stallRetiredAsUnresponsive(t *testing.T, mode string) {
+	h := newHarness(t, Policy{MaxRestarts: 2, Window: time.Minute, StallTimeout: 300 * time.Millisecond}, func(n int) string {
+		if n == 1 {
+			return mode
+		}
+		return ""
+	})
+	// The first Call starts the worker; the worker's mode never answers.
+	abandonPool(t, h, []byte{0, 1})
+	old := liveProc(h)
+	abandoned := time.Now()
+
+	// A caller that arrives after the permits are stranded parks on the
+	// permit. Retirement must release it, not leave it for its own deadline.
+	parked := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := h.s.Call(ctx, []byte{0, 2})
+		parked <- err
+	}()
+
+	deadline := time.After(5 * time.Second)
+	for !old.exited() {
+		select {
+		case <-deadline:
+			t.Fatalf("worker still alive %v after its permits were stranded (stall bound 300ms); starts=%d", time.Since(abandoned), h.starts.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if got := old.retireReason(); got != "unresponsive" {
+		t.Fatalf("retire cause = %q; want %q", got, "unresponsive")
+	}
+	select {
+	case err := <-parked:
+		if err == nil || errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("parked Call = %v; want the retired generation's refusal, not its own deadline", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a caller parked on a stranded permit was not released by the retirement")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	out, err := h.s.Call(ctx, []byte{0, 0x42})
+	if err != nil || !bytes.Equal(out, []byte{0, 0x42}) {
+		t.Fatalf("Call(500ms) after the retirement = %v, %v", out, err)
+	}
+	if got := h.starts.Load(); got != 2 {
+		t.Fatalf("starts = %d; want exactly one restart", got)
+	}
+}
+
+func TestSupervisor_HangAfterHelloRetiredUnresponsive(t *testing.T) {
+	stallRetiredAsUnresponsive(t, "hang")
+}
+
+func TestSupervisor_PartialFrameStallRetiredUnresponsive(t *testing.T) {
+	stallRetiredAsUnresponsive(t, "stall")
+}
+
+// A worker that is slow but answers is not wedged: the frame that lands inside
+// the stall window restarts the judgement, and the permits come back.
+func TestSupervisor_SlowWorkerThatAnswersIsNotRetired(t *testing.T) {
+	h := newHarness(t, Policy{MaxRestarts: 2, Window: time.Minute, StallTimeout: 700 * time.Millisecond}, nil)
+	pid := h.echo()
+	abandonPool(t, h, []byte{9, 30}) // 300ms of work, never polling the deadline
+	p := liveProc(h)
+	begin := time.Now()
+
+	// Outlast the stall window, which started when the permits were stranded.
+	for time.Since(begin) < 1200*time.Millisecond {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(p.sem) != 0 {
+		t.Fatalf("%d permits still held; the slow jobs should have answered", len(p.sem))
+	}
+	p.mu.Lock()
+	sent := p.retireSent
+	p.mu.Unlock()
+	if sent || p.exited() {
+		t.Fatalf("a worker that answered was retired (signal %v, exited %v)", sent, p.exited())
+	}
+	if h.starts.Load() != 1 {
+		t.Fatalf("starts = %d; the slow worker was replaced", h.starts.Load())
+	}
+	if next := h.echo(); next != pid {
+		t.Fatalf("pid %d -> %d", pid, next)
+	}
+}
+
+func TestSupervisor_SilentHandshakeIsKilledWithinStartTimeout(t *testing.T) {
+	const bound = 300 * time.Millisecond
+	h := newHarness(t, Policy{MaxRestarts: 1, Window: time.Minute, StartTimeout: bound}, func(int) string { return "no-hello" })
+
+	// Two callers attach to the one attempt; neither may park past the bound.
+	errs := make(chan error, 2)
+	begin := time.Now()
+	for i := 0; i < 2; i++ {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err := h.s.Call(ctx, []byte{0, 1})
+			errs <- err
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-errs:
+			if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("Call %d = %v; want the handshake timeout", i, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("Call %d still parked %v after StartTimeout %v", i, time.Since(begin), bound)
+		}
+	}
+	if got := h.starts.Load(); got != 1 {
+		t.Fatalf("starts = %d; the hung handshake started more than once", got)
+	}
+	pids := h.pids()
+	if len(pids) != 1 || pidAlive(pids[0]) {
+		t.Fatalf("worker pids %v: the silent worker was not killed and reaped", pids)
+	}
+	// One restart spent, MaxRestarts 1: the next Call gets the budget error.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := h.s.Call(ctx, []byte{0, 1}); !isBudget(err) {
+		t.Fatalf("next Call = %v; the timeout must spend exactly the one restart", err)
+	}
+	if got := h.starts.Load(); got != 1 {
+		t.Fatalf("starts = %d after the budget error", got)
+	}
+}
+
+func TestSupervisor_SilentHandshakeThenFreshWorker(t *testing.T) {
+	h := newHarness(t, Policy{MaxRestarts: 2, Window: time.Minute, StartTimeout: 300 * time.Millisecond}, func(n int) string {
+		if n == 1 {
+			return "no-hello"
+		}
+		return ""
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := h.s.Call(ctx, []byte{0, 1}); err == nil {
+		t.Fatal("Call on a silent handshake = nil")
+	}
+	h.echo()
+	if got := h.starts.Load(); got != 2 {
+		t.Fatalf("starts = %d; want the silent attempt and one fresh worker", got)
+	}
+}
+
+func TestSupervise_LivenessBounds(t *testing.T) {
+	f := func() (*exec.Cmd, error) { return exec.Command("true"), nil }
+	ctx := context.Background()
+	for _, p := range []Policy{
+		{MaxRestarts: 1, Window: time.Second, StartTimeout: -time.Second},
+		{MaxRestarts: 1, Window: time.Second, StallTimeout: -time.Second},
+	} {
+		if _, err := Supervise(ctx, f, p); !errors.Is(err, errNegTimeout) {
+			t.Fatalf("Supervise(%+v) = %v; want %v", p, err, errNegTimeout)
+		}
+	}
+	s, err := Supervise(ctx, f, DefaultPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if s.policy.StartTimeout != defaultStartTimeout || s.policy.StallTimeout != defaultStallTimeout {
+		t.Fatalf("zero timeouts resolved to %v, %v; want the documented defaults", s.policy.StartTimeout, s.policy.StallTimeout)
+	}
+}

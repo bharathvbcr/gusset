@@ -167,6 +167,11 @@ func misbehave(mode string, out *os.File) int {
 			return 1
 		}
 	}
+	if mode == "no-hello" {
+		// A loader stall or a deadlocked init: alive, and never announces.
+		time.Sleep(time.Minute)
+		return 0
+	}
 	if err := writeFrame(out, &response{Op: opHello, Version: protocolVersion, PoolSize: workerPool}, maxResponseFrame); err != nil {
 		return 1
 	}
