@@ -30,6 +30,7 @@ jobs:
   unit:
     name: Unit & Pitfalls (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -128,6 +129,7 @@ jobs:
   go-floor:
     name: Go 1.26 floor
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -167,6 +169,7 @@ jobs:
   rust-floor:
     name: Rust 1.97 floor
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -206,6 +209,7 @@ jobs:
   allocator-api:
     name: Allocator API (Rust 1.100+, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -280,6 +284,7 @@ jobs:
   lint:
     name: Lint & Boundary Audits
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -355,6 +360,7 @@ jobs:
   cgocheck2:
     name: cgocheck2 (R6, R16)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -377,6 +383,7 @@ jobs:
   memlimit:
     name: Memory Limit Bridge
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -399,6 +406,7 @@ jobs:
   soak:
     name: Thread-Cap Soak (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -433,6 +441,7 @@ jobs:
   race:
     name: Race & Aggressive GC
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -456,13 +465,13 @@ jobs:
       # and drain-exit tests live there, and race plus GOGC=1 is what found the
       # use-after-free and double-Wait park they guard (183b007).
       - name: Go Race Detector
-        run: go test -race -v -timeout 20m . ./tests/pitfalls/... ./tests/panic_zoo/... ./internal/...
+        run: go test -race -v -timeout 20m . ./tests/e2e/... ./tests/pitfalls/... ./tests/panic_zoo/... ./internal/...
 
       # GOGC=1 marks far more aggressively, which is what shakes out a Buffer or
       # Handle being collected while Rust still holds the memory.
       - name: Aggressive GC Test
         if: success() || failure()
-        run: GOGC=1 go test -v -count=5 -timeout 20m . ./tests/panic_zoo/... ./tests/pitfalls/... ./internal/...
+        run: GOGC=1 go test -v -count=5 -timeout 20m . ./tests/e2e/... ./tests/panic_zoo/... ./tests/pitfalls/... ./internal/...
 
   # R14's enforcer (docs/rfc-r14.md). A toolchain bump that changes what a naive
   # second staticlib does, or makes the COMDAT rename unnecessary, or breaks a
@@ -470,6 +479,7 @@ jobs:
   r14:
     name: R14 sealed staticlibs (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -587,6 +597,7 @@ jobs:
   r14-musl:
     name: R14 sealed staticlibs (musl)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     container: golang:1.27-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c # golang:1.27-alpine, Go 1.27.3, Alpine 3.24.3, 2026-10-24
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -637,6 +648,7 @@ jobs:
   musl:
     name: musl (I5, R8)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     container: golang:1.27-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c # golang:1.27-alpine, Go 1.27.3, Alpine 3.24.3, 2026-10-24
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -680,6 +692,7 @@ jobs:
   cross:
     name: Cross-compile (supported platform set)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -788,6 +801,7 @@ jobs:
   bench:
     name: Benchmarks (R15)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
