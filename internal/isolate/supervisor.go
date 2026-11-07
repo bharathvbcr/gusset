@@ -21,10 +21,39 @@ const supervisorIDCeiling uint64 = 1 << 63
 // window those failures are counted in. MaxRestarts is a count of restarts,
 // not of processes: the first successful process is not one of them.
 // MaxRestarts 0 runs one process and does not replace it.
+//
+// StartTimeout and StallTimeout are liveness bounds. Zero means the default
+// below; a negative value is refused.
+//
+// StartTimeout bounds one handshake, from the factory's command starting to
+// the worker's hello. A worker that has not announced itself by then is killed
+// and reaped, and the failed attempt spends one restart like any other failed
+// hello. Default 30 seconds (defaultStartTimeout).
+//
+// StallTimeout bounds a worker that is alive and silent. A generation is
+// retired as "unresponsive", spending one restart, when every pool permit is
+// held by a ticket whose caller already gave up (Wait's context ended and the
+// cancel frame was sent) and no frame has been delivered for StallTimeout
+// since the last of those permits was stranded. A worker answers a cancel,
+// so a generation that is still silent after the cancel is wedged: hung in
+// the engine, or stalled inside a frame. A frame arriving inside the window
+// restarts the judgement, so a slow job that answers is never retired, and
+// neither is a worker with a free permit or one whose callers are still
+// waiting inside their own deadlines. A job that ignores its cancel for longer
+// than StallTimeout is indistinguishable from a wedge and is retired. Default
+// 30 seconds (defaultStallTimeout). A caller that passes context.Background
+// and never abandons is not bounded by this rule; Close is its bound.
 type Policy struct {
-	MaxRestarts int
-	Window      time.Duration
+	MaxRestarts  int
+	Window       time.Duration
+	StartTimeout time.Duration
+	StallTimeout time.Duration
 }
+
+const (
+	defaultStartTimeout = 30 * time.Second
+	defaultStallTimeout = 30 * time.Second
+)
 
 // DefaultPolicy is 3 restarts inside one minute. A zero Policy is not this
 // value. Window 0 is refused on its own, and applying the default in that
@@ -35,6 +64,7 @@ var (
 	errZeroPolicy  = errors.New("isolate: zero Policy is refused; pass DefaultPolicy or an explicit budget")
 	errNegRestarts = errors.New("isolate: MaxRestarts must not be negative")
 	errZeroWindow  = errors.New("isolate: Window must be positive")
+	errNegTimeout  = errors.New("isolate: StartTimeout and StallTimeout must not be negative")
 	errNilFactory  = errors.New("isolate: nil factory")
 	errNoCommand   = errors.New("isolate: factory returned no command")
 	errTicketSpace = errors.New("isolate: ticket id space exhausted; refusing to wrap onto a live id")
@@ -121,6 +151,15 @@ func Supervise(ctx context.Context, factory Factory, policy Policy) (*Supervisor
 	}
 	if policy.Window <= 0 {
 		return nil, errZeroWindow
+	}
+	if policy.StartTimeout < 0 || policy.StallTimeout < 0 {
+		return nil, errNegTimeout
+	}
+	if policy.StartTimeout == 0 {
+		policy.StartTimeout = defaultStartTimeout
+	}
+	if policy.StallTimeout == 0 {
+		policy.StallTimeout = defaultStallTimeout
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	return &Supervisor{
@@ -440,7 +479,12 @@ func (s *Supervisor) finishAttempt(att *startAttempt) {
 		return
 	}
 	notice := make(chan struct{}, 1)
-	p, err := start(s.ctx, cmd, notice)
+	// The timeout wraps start only. The lifetime context stays the parent, so
+	// Close still aborts a handshake, and a timeout is a failed hello that
+	// spends a restart where a cancelled lifetime does not.
+	sctx, cancel := context.WithTimeout(s.ctx, s.policy.StartTimeout)
+	p, err := start(sctx, cmd, notice, s.policy.StallTimeout)
+	cancel()
 	if err != nil {
 		// A lifetime cancellation is Close (or the caller's ctx ending the
 		// supervisor). That is not a spent restart. A handshake or factory
