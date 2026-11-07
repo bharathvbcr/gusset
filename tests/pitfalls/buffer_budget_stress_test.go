@@ -1016,6 +1016,15 @@ func TestBufferBudget_ConcurrentChaos_TightBulkhead_Mode18(t *testing.T) {
 	if peakInRust > poolSize {
 		t.Fatalf("INVARIANT I1 VIOLATION: peak in-engine jobs (%d) exceeded poolSize (%d)", peakInRust, poolSize)
 	}
+	// An upper bound alone passes with a dead gauge (peak 0). Mode 17 must have
+	// run, and the engine must have seen at least two of its jobs at once.
+	if mode17Submits.Load() == 0 {
+		t.Fatalf("no mode 17 job was admitted, so the I1 gauge was never exercised")
+	}
+	if peakInRust < 2 {
+		t.Fatalf("I1 gauge saw a peak of %d after %d mode 17 submits on a %d-worker pool; want at least 2 (dead gauge or no concurrency)",
+			peakInRust, mode17Submits.Load(), poolSize)
+	}
 
 	// Invariant I6 & I3 Assertions: Stats Monotonicity and Zero Leaks
 	finalStats := gusset.Stats()

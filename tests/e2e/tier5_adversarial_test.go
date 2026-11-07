@@ -1,6 +1,7 @@
 package e2e_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -116,22 +117,141 @@ func TestTier5_Adversarial_AsyncCancellation_RingSaturationStorm(t *testing.T) {
 	// Settle: wait for any abandoned mode 9 jobs to exit and return permits
 	time.Sleep(100 * time.Millisecond)
 
-	// Verify Invariant I4 (Bounded concurrency and permit conservation):
-	// All pool permits must be intact; a burst of poolSize calls must succeed cleanly.
-	settleCtx, settleCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer settleCancel()
-
-	for p := 0; p < poolSize; p++ {
-		res, err := h.Call(settleCtx, []byte{0, 0xAA, byte(p)})
-		requireNoError(t, err, fmt.Sprintf("post-storm settlement call %d", p))
-		assertBytesEqual(t, res, []byte{0, 0xAA, byte(p)}, "post-storm settlement echo")
+	// The storm must have exercised both outcomes it claims to mix; a storm in
+	// which nothing completed or nothing was cancelled proves nothing about the
+	// permits those paths return.
+	if completedCount.Load() == 0 {
+		t.Fatalf("no storm operation completed: the completion path was never exercised")
 	}
+	if cancelledCount.Load() == 0 {
+		t.Fatalf("no storm operation was cancelled: the cancel and abandon paths were never exercised")
+	}
+
+	// Verify Invariant I4 (Bounded concurrency and permit conservation):
+	// every one of the pool's permits must be back. Sequential calls cannot show
+	// that, since one permit serves them all, so hold poolSize at once.
+	assertAllPermitsHeldAtOnce(t, h, poolSize)
+}
+
+const (
+	// permitHold is the most diagnostic mode 17 can hold a job (its argument is
+	// one byte of milliseconds). A sleep is never shorter than asked, so a job
+	// submitted at T is certainly still in the engine at T+permitHold.
+	permitHold = 250 * time.Millisecond
+
+	// permitProbeBy is how long after the first holder's Submit the poolSize+1th
+	// submit may finish and still count: later than this the host stalled the
+	// test and the holders may have ended. It chooses between running the check
+	// again and judging it, never a verdict.
+	permitProbeBy = 200 * time.Millisecond
+
+	permitAttempts = 5
+)
+
+// readEngineGauge reads and resets diagnostic mode 18, the peak number of mode 17
+// jobs the engine ran at once since the last read.
+func readEngineGauge(t *testing.T, h *gusset.Handle) uint64 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := h.Call(ctx, []byte{18})
+	requireNoError(t, err, "reading the engine gauge (mode 18)")
+	if len(out) != 8 {
+		t.Fatalf("engine gauge returned %d bytes, want 8", len(out))
+	}
+	return binary.LittleEndian.Uint64(out)
+}
+
+// assertAllPermitsHeldAtOnce proves h has all poolSize permits: poolSize
+// non-cooperative jobs are admitted together and the engine's own gauge peaks
+// at poolSize, while one more submit is neither admitted nor answered.
+func assertAllPermitsHeldAtOnce(t *testing.T, h *gusset.Handle, poolSize int) {
+	t.Helper()
+	for attempt := 1; attempt <= permitAttempts; attempt++ {
+		readEngineGauge(t, h) // reset the peak left by the storm or an earlier attempt
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		submitted := time.Now()
+		tickets := make([]uint64, poolSize)
+		for i := range tickets {
+			tk, err := h.Submit(ctx, []byte{17, byte(permitHold / time.Millisecond)})
+			if err != nil {
+				cancel()
+				t.Fatalf("I4: only %d of %d pool permits could be taken after the storm: Submit %d: %v", i, poolSize, i, err)
+			}
+			tickets[i] = tk
+		}
+
+		// poolSize jobs hold every permit. One more must wait for a permit.
+		probeCtx, probeCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		probe, probeErr := h.Submit(probeCtx, []byte{0})
+		probeCancel()
+		sinceFirst := time.Since(submitted)
+		if probeErr == nil {
+			if _, err := h.Wait(ctx, probe); err != nil {
+				cancel()
+				t.Fatalf("collecting the extra job: %v", err)
+			}
+		}
+		stalled := sinceFirst >= permitProbeBy
+
+		for i, tk := range tickets {
+			if _, err := h.Wait(ctx, tk); err != nil {
+				cancel()
+				t.Fatalf("holder %d: %v", i, err)
+			}
+		}
+		cancel()
+
+		if stalled {
+			continue // the holders may have ended before the probe; run it again
+		}
+		if probeErr == nil {
+			t.Fatalf("I4: a pool of %d admitted job %d while %d non-cooperative jobs were holding it", poolSize, poolSize+1, poolSize)
+		}
+		if !errors.Is(probeErr, context.DeadlineExceeded) {
+			t.Fatalf("I4: the extra submit must wait for a permit, not fail with %v", probeErr)
+		}
+		if peak := readEngineGauge(t, h); peak != uint64(poolSize) {
+			t.Fatalf("I4: the engine saw a peak of %d concurrent jobs, want exactly the pool size %d", peak, poolSize)
+		}
+		return
+	}
+	// Not a skip: a pool that is short of permits looks the same as a stalled
+	// host (the holders cannot all be admitted before the first one ends), and a
+	// check that could not run must not read as one that passed.
+	t.Fatalf("I4: %d runs in a row could not admit %d holders and probe within %v of the first Submit: either the host stalled every run or the pool is short of permits",
+		permitAttempts, poolSize, permitProbeBy)
+}
+
+// closeRaceOutcome is what one caller saw: the operation it ran and the error it
+// got (nil for a completed operation whose result was checked).
+type closeRaceOutcome struct {
+	cid int
+	op  string
+	err error
+}
+
+// closeRaceNamedError reports whether err is one of the answers an operation may
+// give when the handle is closed under it: the handle is closed, a ticket is no
+// longer there, or the caller's own context ended. Anything else is a bug.
+func closeRaceNamedError(err error) bool {
+	return errors.Is(err, gusset.ErrClosed) ||
+		errors.Is(err, gusset.ErrUnknownTicket) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
 }
 
 // TestTier5_Adversarial_HandleCloseRaces_InFlightTickets tests concurrent handle Close()
 // while goroutines are actively submitting, waiting, allocating, and running slow Rust jobs.
+//
+// Every caller records what it saw. Each outcome must be a valid echo or a named
+// error, both Closes must return nil or ErrClosed, and the buffer bytes the
+// handle held must be back at the baseline once everything has returned.
 func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
+	var echoes, namedErrors int
 	for iteration := 0; iteration < 8; iteration++ {
+		baselineLive := gusset.Stats().LiveBytes
 		h, err := gusset.Open(
 			gusset.WithPoolSize(4),
 			gusset.WithDiagnosticEngine(),
@@ -141,8 +261,14 @@ func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 
 		const numCallers = 16
 		var wg sync.WaitGroup
-		var activeOps atomic.Int64
 		startGate := make(chan struct{})
+		var mu sync.Mutex
+		var outcomes []closeRaceOutcome
+		record := func(cid int, op string, err error) {
+			mu.Lock()
+			outcomes = append(outcomes, closeRaceOutcome{cid, op, err})
+			mu.Unlock()
+		}
 
 		for c := 0; c < numCallers; c++ {
 			wg.Add(1)
@@ -153,40 +279,64 @@ func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 				defer cancel()
 
-				activeOps.Add(1)
 				switch cid % 4 {
 				case 0:
-					// Slow non-cooperative job (mode 9 sleeps 20ms)
-					_, _ = h.Call(ctx, []byte{9, 2, 0, byte(cid)})
+					// Slow non-cooperative job (mode 9 sleeps 20ms, then echoes)
+					res, err := h.Call(ctx, []byte{9, 2, 0, byte(cid)})
+					if err == nil && !bytes.Equal(res, []byte{0, byte(cid)}) {
+						err = fmt.Errorf("mode 9 echo returned %v, want %v", res, []byte{0, byte(cid)})
+						record(cid, "call-slow-bad-echo", err)
+						return
+					}
+					record(cid, "call-slow", err)
 				case 1:
 					// Fast async submit and wait
 					ticket, err := h.Submit(ctx, []byte{0, byte(cid)})
-					if err == nil {
-						_, _ = h.Wait(ctx, ticket)
+					if err != nil {
+						record(cid, "submit", err)
+						return
 					}
+					res, err := h.Wait(ctx, ticket)
+					if err == nil && !bytes.Equal(res, []byte{0, byte(cid)}) {
+						record(cid, "wait-bad-echo", fmt.Errorf("echo returned %v, want %v", res, []byte{0, byte(cid)}))
+						return
+					}
+					record(cid, "wait", err)
 				case 2:
 					// Buffer allocation roundtrip
 					buf, err := h.NewBuffer(8192)
-					if err == nil {
-						data := buf.Bytes()
-						if data != nil {
-							data[0] = 0
-						}
-						ticket, err := h.Submit(ctx, buf)
-						if err == nil {
-							outBuf, err := h.WaitBuffer(ctx, ticket)
-							if err == nil && outBuf != nil {
-								_ = outBuf.Free()
-							}
-						}
-						_ = buf.Free()
+					if err != nil {
+						record(cid, "newbuffer", err)
+						return
 					}
+					defer func() { record(cid, "buffer-free", buf.Free()) }()
+					if data := buf.Bytes(); data != nil {
+						data[0] = 0
+					}
+					ticket, err := h.Submit(ctx, buf)
+					if err != nil {
+						record(cid, "submit-buffer", err)
+						return
+					}
+					outBuf, err := h.WaitBuffer(ctx, ticket)
+					if err != nil {
+						record(cid, "waitbuffer", err)
+						return
+					}
+					if got := outBuf.Bytes(); got != nil && (len(got) != 8192 || got[0] != 0) {
+						record(cid, "waitbuffer-bad-echo", fmt.Errorf("buffer echo has len %d first byte %d, want 8192 and 0", len(got), got[0]))
+					} else {
+						record(cid, "waitbuffer", nil)
+					}
+					record(cid, "outbuf-free", outBuf.Free())
 				case 3:
 					// Async submit and immediate discard
 					ticket, err := h.Submit(ctx, []byte{0, byte(cid)})
-					if err == nil {
-						_ = h.Discard(ticket)
+					if err != nil {
+						record(cid, "submit", err)
+						return
 					}
+					record(cid, "discard", h.Discard(ticket))
 				}
 			}(c)
 		}
@@ -196,20 +346,50 @@ func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 		time.Sleep(time.Duration(5+iteration*2) * time.Millisecond)
 
 		// Race Close() from multiple goroutines concurrently
+		closeErrs := make([]error, 2)
 		var closeWg sync.WaitGroup
 		closeWg.Add(2)
-		go func() {
-			defer closeWg.Done()
-			_ = h.Close()
-		}()
-		go func() {
-			defer closeWg.Done()
-			_ = h.Close()
-		}()
+		for i := range closeErrs {
+			go func() {
+				defer closeWg.Done()
+				closeErrs[i] = h.Close()
+			}()
+		}
 		closeWg.Wait()
 
 		// Wait for all callers to return
 		wg.Wait()
+
+		for i, err := range closeErrs {
+			if err != nil && !errors.Is(err, gusset.ErrClosed) {
+				t.Errorf("iteration %d: concurrent Close #%d returned %v, want nil or ErrClosed", iteration, i, err)
+			}
+		}
+		if len(outcomes) == 0 {
+			t.Fatalf("iteration %d: no caller recorded an outcome", iteration)
+		}
+		for _, o := range outcomes {
+			switch {
+			case o.err == nil:
+				echoes++
+			case closeRaceNamedError(o.err):
+				namedErrors++
+			default:
+				t.Errorf("iteration %d: caller %d (%s) got %v, want a valid result or ErrClosed, ErrUnknownTicket or a context error",
+					iteration, o.cid, o.op, o.err)
+			}
+		}
+
+		// Everything has returned and the handle is closed: the buffers it held
+		// must be back, however Close interleaved with the callers.
+		settleBy := time.Now().Add(5 * time.Second)
+		for gusset.Stats().LiveBytes != baselineLive && time.Now().Before(settleBy) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if live := gusset.Stats().LiveBytes; live != baselineLive {
+			t.Errorf("iteration %d: LiveBytes settled at %d, want the baseline %d (delta %d)",
+				iteration, live, baselineLive, int64(live)-int64(baselineLive))
+		}
 
 		// Assert handle is deterministically closed and post-close calls are rejected
 		ctxClosed := context.Background()
@@ -227,6 +407,10 @@ func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 		if !errors.Is(errBuf, gusset.ErrClosed) {
 			t.Fatalf("iteration %d: expected ErrClosed on post-close NewBuffer, got: %v", iteration, errBuf)
 		}
+	}
+	t.Logf("close races: %d valid results, %d named errors across 8 iterations", echoes, namedErrors)
+	if echoes == 0 {
+		t.Fatalf("no operation completed before Close in any iteration; the race was never run against live work")
 	}
 }
 
