@@ -239,12 +239,13 @@ step_version_parity() {
 }
 
 # install.sh's GUSSET_DEFAULT_COMMIT is the commit a default install of
-# GUSSET_DEFAULT_REF must resolve to. It must be one 40-hex commit and, when the
-# tag exists in this checkout, the tag's commit. A checkout without the tag (a
-# shallow CI clone, or a release PR before the tag exists) cannot be compared:
-# that is reported as not verified, never as a match. Release order: the PR that
-# bumps the version leaves the old commit, so a default install refuses until the
-# tag exists and a second change bakes the tag's real commit (see DECISIONS.md).
+# GUSSET_DEFAULT_REF must resolve to. It must be one 40-hex commit and equal the
+# tag's commit. The tag is read from this checkout, else from origin with a
+# read-only `git ls-remote` (a CI checkout has no tags). If origin cannot be
+# asked, the commit was not verified and that is a FAIL. If origin answers and
+# has no such tag, this is the release window (the release PR bumps the version
+# before the tag exists): a ::warning:: and a pass. Release order: bump the
+# version and GUSSET_DEFAULT_REF, tag, then bake the tag's commit (DECISIONS.md).
 vp_baked_commit() {
 	vp_ref=$(sed -n 's/^GUSSET_DEFAULT_REF="\([^"]*\)"$/\1/p' install.sh)
 	vp_sha=$(sed -n 's/^GUSSET_DEFAULT_COMMIT="\([^"]*\)"$/\1/p' install.sh)
@@ -252,16 +253,27 @@ vp_baked_commit() {
 		echo "::error::version-parity: install.sh GUSSET_DEFAULT_COMMIT: '$vp_sha' is not exactly one 40-hex commit"
 		return 1
 	fi
+	vp_where="this checkout"
 	vp_tagged=$(git rev-parse -q --verify "refs/tags/$vp_ref^{commit}" 2>/dev/null) || vp_tagged=""
 	if [ -z "$vp_tagged" ]; then
-		echo "  install.sh GUSSET_DEFAULT_COMMIT: $vp_sha (NOT VERIFIED: tag $vp_ref is not in this checkout; fetch tags)"
-		return 0
+		vp_where="origin"
+		if ! vp_remote=$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags origin "refs/tags/$vp_ref" "refs/tags/$vp_ref^{}" 2>&1); then
+			echo "::error::version-parity: install.sh GUSSET_DEFAULT_COMMIT $vp_sha was not verified: tag $vp_ref is not in this checkout and origin could not be asked: $vp_remote"
+			return 1
+		fi
+		# The peeled line is the commit of an annotated tag; a lightweight tag has only the first.
+		vp_tagged=$(printf '%s\n' "$vp_remote" | awk -v r="refs/tags/$vp_ref" '$2 == r "^{}" { p = $1 } $2 == r { t = $1 } END { print (p != "" ? p : t) }')
+		if [ -z "$vp_tagged" ]; then
+			echo "::warning::version-parity: install.sh GUSSET_DEFAULT_COMMIT $vp_sha NOT VERIFIED: tag $vp_ref exists neither here nor on origin (the release window; bake the tag's commit after tagging)"
+			echo "  install.sh GUSSET_DEFAULT_COMMIT: $vp_sha (NOT VERIFIED: no tag $vp_ref yet)"
+			return 0
+		fi
 	fi
 	if [ "$vp_tagged" != "$vp_sha" ]; then
-		echo "::error::version-parity: install.sh GUSSET_DEFAULT_COMMIT $vp_sha, but tag $vp_ref is $vp_tagged"
+		echo "::error::version-parity: install.sh GUSSET_DEFAULT_COMMIT $vp_sha, but tag $vp_ref is $vp_tagged ($vp_where)"
 		return 1
 	fi
-	echo "  install.sh GUSSET_DEFAULT_COMMIT: $vp_sha (= $vp_ref)"
+	echo "  install.sh GUSSET_DEFAULT_COMMIT: $vp_sha (= $vp_ref, from $vp_where)"
 }
 
 # --all-targets: without it clippy skips test targets, and the R3

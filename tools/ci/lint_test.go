@@ -51,6 +51,14 @@ func lintWith(t *testing.T, files map[string]string, env []string, setup func(ro
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
+	// An empty bare origin: version-parity asks origin for a tag the checkout
+	// lacks, and an origin that answers with nothing is the release window.
+	origin := t.TempDir()
+	for _, c := range [][]string{{"-C", origin, "init", "-q", "--bare"}, {"-C", root, "remote", "add", "origin", origin}} {
+		if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", c, err, out)
+		}
+	}
 	if setup != nil {
 		setup(root)
 	}

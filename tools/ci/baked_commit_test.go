@@ -12,11 +12,21 @@ import (
 // so the tests that need the tag to exist plant one.
 const bakedCommit = "0123456789abcdef0123456789abcdef01234567"
 
-// tagFixture commits the tree, tags it v1.2.3 (annotated when annotated), and
-// rewrites install.sh's baked commit to bake, or to the tag's commit when bake
-// is empty. The tag's own tree cannot name the tag's commit, so the rewrite
-// happens after tagging, in the working tree the step reads.
-func tagFixture(t *testing.T, annotated bool, bake string) func(root string) {
+// tagWhere says where the fixture's v1.2.3 tag lives after setup.
+type tagWhere int
+
+const (
+	tagLocal   tagWhere = iota // in the checkout
+	tagOrigin                  // only on origin, as in a CI checkout without tags
+	tagNowhere                 // not yet created: the release window
+)
+
+// tagFixture commits the tree, tags it v1.2.3 (annotated when annotated) where
+// the tag says, and rewrites install.sh's baked commit to bake, or to the tag's
+// commit when bake is empty. The tag's own tree cannot name the tag's commit, so
+// the rewrite happens after tagging, in the working tree the step reads.
+// unreachable points origin at a path that does not exist.
+func tagFixture(t *testing.T, where tagWhere, annotated bool, bake string, unreachable bool) func(root string) {
 	return func(root string) {
 		t.Helper()
 		git := func(args ...string) string {
@@ -29,13 +39,23 @@ func tagFixture(t *testing.T, annotated bool, bake string) func(root string) {
 			return strings.TrimSpace(string(out))
 		}
 		git("commit", "-q", "-m", "release")
-		if annotated {
-			git("tag", "-a", "-m", "v1.2.3", "v1.2.3")
-		} else {
-			git("tag", "v1.2.3")
+		tagged := git("rev-parse", "HEAD")
+		if where != tagNowhere {
+			if annotated {
+				git("tag", "-a", "-m", "v1.2.3", "v1.2.3")
+			} else {
+				git("tag", "v1.2.3")
+			}
+		}
+		if where == tagOrigin {
+			git("push", "-q", "origin", "refs/tags/v1.2.3")
+			git("tag", "-d", "v1.2.3")
+		}
+		if unreachable {
+			git("remote", "set-url", "origin", filepath.Join(root, "no-such-origin"))
 		}
 		if bake == "" {
-			bake = git("rev-parse", "v1.2.3^{commit}")
+			bake = tagged
 		}
 		p := filepath.Join(root, "install.sh")
 		body, err := os.ReadFile(p)
@@ -48,23 +68,28 @@ func tagFixture(t *testing.T, annotated bool, bake string) func(root string) {
 	}
 }
 
-// The baked commit is held to the tag it belongs to. A moved tag, or a bump of
-// the tag without the commit, is the disagreement that lets a default install
-// build a tree nobody reviewed.
+// The baked commit is held to the tag it belongs to, wherever the checkout can
+// read the tag from. A moved tag, or a bump of the tag without the commit, is the
+// disagreement that lets a default install build a tree nobody reviewed.
 func TestVersionParityHoldsBakedCommitToTheTag(t *testing.T) {
 	other := strings.Repeat("ab", 20)
 	for name, c := range map[string]struct {
+		where     tagWhere
 		annotated bool
 		bake      string
 		wantFail  bool
 		want      string
 	}{
-		"lightweight tag matches":  {false, "", false, "(= v1.2.3)"},
-		"annotated tag matches":    {true, "", false, "(= v1.2.3)"},
-		"tag moved off the commit": {false, other, true, "tag v1.2.3 is "},
-		"annotated tag moved":      {true, other, true, "tag v1.2.3 is "},
+		"local lightweight matches":     {tagLocal, false, "", false, "(= v1.2.3, from this checkout)"},
+		"local annotated matches":       {tagLocal, true, "", false, "(= v1.2.3, from this checkout)"},
+		"local tag moved":               {tagLocal, false, other, true, "tag v1.2.3 is "},
+		"local annotated moved":         {tagLocal, true, other, true, "tag v1.2.3 is "},
+		"origin only lightweight match": {tagOrigin, false, "", false, "from origin)"},
+		"origin only annotated match":   {tagOrigin, true, "", false, "from origin)"},
+		"origin only lightweight moved": {tagOrigin, false, other, true, "(origin)"},
+		"origin only annotated moved":   {tagOrigin, true, other, true, "(origin)"},
 	} {
-		out, err := lintWith(t, versionTree(), nil, tagFixture(t, c.annotated, c.bake), "version-parity")
+		out, err := lintWith(t, versionTree(), nil, tagFixture(t, c.where, c.annotated, c.bake, false), "version-parity")
 		switch {
 		case c.wantFail && (err == nil || !strings.Contains(out, "::error::version-parity: install.sh GUSSET_DEFAULT_COMMIT")):
 			t.Errorf("%s: a baked commit that is not the tag's passed: %v\n%s", name, err, out)
@@ -76,12 +101,40 @@ func TestVersionParityHoldsBakedCommitToTheTag(t *testing.T) {
 	}
 }
 
-// With no tag in the checkout nothing can be compared. That passes the step but
-// says so on the line: it must not read like a verified match.
-func TestVersionParityReportsAnUncheckableBakedCommit(t *testing.T) {
-	out, err := lint(t, versionTree(), nil, "version-parity")
-	if err != nil || !strings.Contains(out, "NOT VERIFIED") {
-		t.Fatalf("a checkout without the tag did not say the commit was unverified: %v\n%s", err, out)
+// Neither here nor on origin: origin answered and has no such tag, which is the
+// release window. It passes, with a warning that says the commit was not checked.
+func TestVersionParityWarnsInTheReleaseWindow(t *testing.T) {
+	out, err := lintWith(t, versionTree(), nil, tagFixture(t, tagNowhere, false, "", false), "version-parity")
+	if err != nil || !strings.Contains(out, "version-parity PASS") {
+		t.Fatalf("the release window failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "::warning::version-parity:") || !strings.Contains(out, "NOT VERIFIED") {
+		t.Errorf("the release window did not warn that the commit was not verified:\n%s", out)
+	}
+}
+
+// A checkout without the tag whose origin cannot be asked verified nothing, and
+// must not exit like a pass. Both an unreachable origin and no origin at all.
+func TestVersionParityFailsWhenOriginCannotBeAsked(t *testing.T) {
+	noOrigin := func(root string) {
+		cmd := exec.Command("git", "remote", "remove", "origin")
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git remote remove: %v\n%s", err, out)
+		}
+	}
+	for name, setup := range map[string]func(string){
+		"origin unreachable": tagFixture(t, tagNowhere, false, "", true),
+		"no origin":          noOrigin,
+	} {
+		out, err := lintWith(t, versionTree(), nil, setup, "version-parity")
+		if err == nil || !strings.Contains(out, "version-parity FAIL") {
+			t.Errorf("%s: an unverifiable baked commit passed: %v\n%s", name, err, out)
+			continue
+		}
+		if !strings.Contains(out, "::error::version-parity: install.sh GUSSET_DEFAULT_COMMIT") || !strings.Contains(out, "was not verified") {
+			t.Errorf("%s: the failure does not say the commit was not verified:\n%s", name, out)
+		}
 	}
 }
 
