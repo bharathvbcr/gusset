@@ -23,6 +23,13 @@ const (
 // the steps that read tracked sources are exercised on known inputs.
 func lint(t *testing.T, files map[string]string, env []string, steps ...string) (string, error) {
 	t.Helper()
+	return lintWith(t, files, env, nil, steps...)
+}
+
+// lintWith is lint plus a hook that runs in the repository after `git add`, for
+// the steps that read commits or tags.
+func lintWith(t *testing.T, files map[string]string, env []string, setup func(root string), steps ...string) (string, error) {
+	t.Helper()
 	script, err := filepath.Abs("lint.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +50,9 @@ func lint(t *testing.T, files map[string]string, env []string, steps ...string) 
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
+	}
+	if setup != nil {
+		setup(root)
 	}
 	cmd := exec.Command("sh", append([]string{script}, steps...)...)
 	cmd.Env = append(os.Environ(), append([]string{"LINT_ROOT=" + root}, env...)...)
@@ -197,7 +207,7 @@ func versionTree() map[string]string {
 			"## [1.2.3] - 2026-10-24\n\n### Security\n- a note\n\n## [1.2.2] - 2026-09-26\n",
 		"SECURITY.md": "## Supported Versions\n\n| Version | Supported |\n| :--- | :--- |\n" +
 			"| `v1.2.3` | :white_check_mark: |\n| `< v1.2.3` | :x: |\n",
-		"install.sh":       "#!/usr/bin/env bash\nset -euo pipefail\n\nGUSSET_DEFAULT_REF=\"v1.2.3\"\nGUSSET_UPSTREAM_URL=\"https://example.invalid/x.git\"\n",
+		"install.sh":       "#!/usr/bin/env bash\nset -euo pipefail\n\nGUSSET_DEFAULT_REF=\"v1.2.3\"\nGUSSET_DEFAULT_COMMIT=\"" + bakedCommit + "\"\nGUSSET_UPSTREAM_URL=\"https://example.invalid/x.git\"\n",
 		"docs/adoption.md": "```toml\n[dependencies]\n# pin a release tag\ngusset_core = { package = \"gusset\", git = \"https://github.com/bharathvbcr/gusset\", tag = \"v1.2.3\" }\n```\n",
 	}
 }

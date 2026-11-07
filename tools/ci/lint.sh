@@ -189,6 +189,7 @@ step_forbidden_patterns() {
 #   CHANGELOG.md      the newest `## [x.y.z]` heading ([Unreleased] ones skipped)
 #   SECURITY.md       the one supported row `vx.y.z` and the `< vx.y.z` row
 #   install.sh        GUSSET_DEFAULT_REF="vx.y.z", the tag a piped install clones
+#                     (and GUSSET_DEFAULT_COMMIT, its commit; see vp_baked_commit)
 #   docs/adoption.md  the gusset_core git dependency's tag = "vx.y.z"
 # Each must yield exactly one x.y.z: an input this cannot read is a FAIL, not a
 # match nobody checked.
@@ -233,7 +234,34 @@ step_version_parity() {
 		"$(sed -n 's/^GUSSET_DEFAULT_REF="v\([^"]*\)"$/\1/p' install.sh)" || fail=1
 	vp_check "docs/adoption.md gusset_core tag" \
 		"$(sed -n 's/^gusset_core = {.* git = .*tag = "v\([^"]*\)".*/\1/p' docs/adoption.md)" || fail=1
+	vp_baked_commit || fail=1
 	return $fail
+}
+
+# install.sh's GUSSET_DEFAULT_COMMIT is the commit a default install of
+# GUSSET_DEFAULT_REF must resolve to. It must be one 40-hex commit and, when the
+# tag exists in this checkout, the tag's commit. A checkout without the tag (a
+# shallow CI clone, or a release PR before the tag exists) cannot be compared:
+# that is reported as not verified, never as a match. Release order: the PR that
+# bumps the version leaves the old commit, so a default install refuses until the
+# tag exists and a second change bakes the tag's real commit (see DECISIONS.md).
+vp_baked_commit() {
+	vp_ref=$(sed -n 's/^GUSSET_DEFAULT_REF="\([^"]*\)"$/\1/p' install.sh)
+	vp_sha=$(sed -n 's/^GUSSET_DEFAULT_COMMIT="\([^"]*\)"$/\1/p' install.sh)
+	if [ "$(printf '%s' "$vp_sha" | grep -c '')" -ne 1 ] || ! printf '%s\n' "$vp_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+		echo "::error::version-parity: install.sh GUSSET_DEFAULT_COMMIT: '$vp_sha' is not exactly one 40-hex commit"
+		return 1
+	fi
+	vp_tagged=$(git rev-parse -q --verify "refs/tags/$vp_ref^{commit}" 2>/dev/null) || vp_tagged=""
+	if [ -z "$vp_tagged" ]; then
+		echo "  install.sh GUSSET_DEFAULT_COMMIT: $vp_sha (NOT VERIFIED: tag $vp_ref is not in this checkout; fetch tags)"
+		return 0
+	fi
+	if [ "$vp_tagged" != "$vp_sha" ]; then
+		echo "::error::version-parity: install.sh GUSSET_DEFAULT_COMMIT $vp_sha, but tag $vp_ref is $vp_tagged"
+		return 1
+	fi
+	echo "  install.sh GUSSET_DEFAULT_COMMIT: $vp_sha (= $vp_ref)"
 }
 
 # --all-targets: without it clippy skips test targets, and the R3

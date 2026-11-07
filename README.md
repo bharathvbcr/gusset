@@ -222,7 +222,7 @@ curl -fsSLO https://raw.githubusercontent.com/bharathvbcr/gusset/<tag>/install.s
 less install.sh
 bash install.sh
 ```
-`GUSSET_REF` overrides the ref to clone. To verify what gets built, pin the commit you reviewed: `GUSSET_REF=<tag> GUSSET_COMMIT=<sha> bash install.sh` stops before building if the tag resolves to any other commit (`git ls-remote https://github.com/bharathvbcr/gusset <tag>` prints it). Piped into `bash`, the script never builds the current directory. Scripts from tags up to and including v0.0.2 predate this and clone `main`; use a later tag's script.
+The script checks that the tag it clones is still the commit it was released with: `install.sh` carries `GUSSET_DEFAULT_COMMIT`, and a default install whose tag resolves anywhere else stops before building anything. That check cannot protect a script fetched from the tag itself, because a moved tag brings its own script. So fetch `install.sh` from `main` (protected) or from a commit you have reviewed, not from the tag, or pass the commit yourself: `GUSSET_REF=<tag> GUSSET_COMMIT=<sha> bash install.sh`, where `<sha>` is what `git ls-remote https://github.com/bharathvbcr/gusset <tag>^{}` prints for the tag. An explicit `GUSSET_COMMIT` replaces the baked one. A `GUSSET_REF` other than the default is cloned unchecked unless you also set `GUSSET_COMMIT`. `GUSSET_REF` overrides the ref to clone. Piped into `bash`, the script never builds the current directory. Scripts from tags up to and including v0.0.2 predate this and clone `main`; use a later tag's script.
 
 ### Local / From Source
 ```bash
