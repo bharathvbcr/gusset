@@ -140,7 +140,8 @@ jobs:
           GUSSET_EXPECT_ALLOCATOR_API: '1'
         run: |
           cargo test --locked -p gusset --target x86_64-unknown-linux-gnu \
-            --test rust_allocator_api --test rust_allocator_counting --test rust_sigpipe
+            --test rust_allocator_api --test rust_allocator_counting --test rust_sigpipe \
+            --test rust_unwind_reclaim
 
       # R4's deliberate cross-free, which this job named and did not have. Without
       # a violation ASan is supposed to catch, a green ASan run only shows the code
@@ -156,16 +157,78 @@ jobs:
       # go test -asan is linux-only; it is unsupported on darwin/arm64, so this
       # assertion cannot run on a developer Mac and the test reports SKIP there
       # rather than passing.
+      #
+      # The step needs the archive internal/ffi links (target/release/libgusset.a)
+      # and go generate's record of it; without them the build fails at
+      # `cannot find -lgusset` and, with no pipefail, tee's status hid that for
+      # months (runs 40179055849 to 42213999483). The archive is built the way
+      # the hammer job's ASan step builds it (below): instrumented, prebuilt std,
+      # no -Zbuild-std, because the Go -asan binary supplies the ASan runtime and
+      # links the archive as an ordinary staticlib. The pass condition is the
+      # literal PASS line, not the absence of SKIP: a build failure, a filtered-out
+      # test and a skip all lack it.
+      - name: Build the ASan release archive for the Go -asan link
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+        run: |
+          cargo build --locked --release -p gusset --target x86_64-unknown-linux-gnu
+          mkdir -p target/release
+          cp target/x86_64-unknown-linux-gnu/release/libgusset.a target/release/libgusset.a
+          go generate ./internal/ffi
+
       - name: R4 cross-free must be detected
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
+          set -o pipefail
           go test -asan -v -count=1 -timeout 10m \
             -run 'TestR4_CrossFreeIsDetectedUnderASan' ./tests/pitfalls/ | tee asan_go.txt
-          if grep -q 'SKIP' asan_go.txt; then
-            echo "::error::the cross-free test skipped under -asan; the asan build tag is not set"
+          if ! grep -qE '^--- PASS: TestR4_CrossFreeIsDetectedUnderASan( |$)' asan_go.txt; then
+            echo "::error::--- PASS: TestR4_CrossFreeIsDetectedUnderASan is not in the output; the R4 cross-free test did not run and pass under -asan"
             exit 1
           fi
+
+      # The rest of the Rust test binaries, in steps of their own so each failure
+      # names its cause and none hides R4 above or another below. Prebuilt std
+      # and --locked, like the allocator suite: -Zbuild-std buys nothing for tests
+      # that do not read the sysroot, and it is the one place --locked is unproven.
+      - name: Run the remaining Rust suite under ASan
+        if: ${{ !cancelled() }}
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: detect_leaks=1:detect_stack_use_after_return=1
+        run: |
+          cargo test --locked -p gusset --target x86_64-unknown-linux-gnu \
+            --test rust_deadline --test rust_counting_flip \
+            --test engine_registry_recovery --test boundary_props \
+            --test log_ring_props --test log_ring_contention
+
+      # These compare /proc/self/{fd,task,maps} with a baseline. ASan maps and
+      # quarantines memory of its own, so this is the step most likely to need
+      # tuning the first time it runs on the runner; it fails loudly, it is
+      # never skipped.
+      - name: Run the resource-hygiene suite under ASan
+        if: ${{ !cancelled() }}
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: detect_leaks=1:detect_stack_use_after_return=1
+        run: |
+          cargo test --locked -p gusset --target x86_64-unknown-linux-gnu \
+            --test resource_hygiene --test hygiene_baseline --test handle_fd_reuse
+
+      # Leak detection is off for these two because they leak on purpose, and
+      # LeakSanitizer would fail them for it: rust_status_overwrite's control arm
+      # reproduces the pre-fix overwrite (10,000 unreleased 256-byte messages),
+      # and rust_worker_containment drives the guard that std::mem::forgets a
+      # double-panic payload. Every other ASan check stays on.
+      - name: Run the deliberately leaking tests under ASan
+        if: ${{ !cancelled() }}
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: detect_leaks=0:detect_stack_use_after_return=1
+        run: |
+          cargo test --locked -p gusset --target x86_64-unknown-linux-gnu \
+            --test rust_status_overwrite --test rust_worker_containment
 
   # The chaos hammer runs 2 s in every `go test`; that is a smoke test. Its
   # value is duration: the use-after-free and double-Wait park it found

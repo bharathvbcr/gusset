@@ -42,21 +42,50 @@ var (
 	cargoSubcmd = regexp.MustCompile(`\bcargo(?: \+\S+| \+\$\{\{[^}]*\}\}| \$\{[^}]*\})? (build|test|clippy|check|run|bench|doc|metadata)\b`)
 	cargoRun    = regexp.MustCompile(`\bcargo(?: \+\S+| \+\$\{\{[^}]*\}\}| \$\{[^}]*\})? install\b`)
 	envAssign   = regexp.MustCompile(`^\s+[A-Za-z_][A-Za-z0-9_]*:\s*\$\{\{`)
-	untrusted   = regexp.MustCompile(`\$\{\{\s*(inputs\.|github\.event\.|github\.head_ref)`)
+	// needs.<job>.outputs and steps.<id>.outputs carry whatever an earlier job or
+	// step computed, which can be a branch name, a title or a file's content.
+	untrusted = regexp.MustCompile(`\$\{\{\s*(inputs\.|github\.event\.|github\.head_ref|needs\.[\w-]+\.outputs\.|steps\.[\w-]+\.outputs\.)`)
 )
+
+// buildStdExempt lists the commands exempt from --locked because they build
+// with -Zbuild-std, keyed by workflow file and the command's leading text. The
+// flag is not verified to compose with the std workspace's own lockfile, and
+// the reason is recorded per command instead of waving through every segment
+// that happens to mention the flag. TestBuildStdExemptionsAreLive fails an
+// entry that matches no command; delete the entry, and add --locked, once a
+// dispatched nightly shows the combination builds.
+var buildStdExempt = map[string]string{
+	"nightly.yml\x00cargo test -p gusset -Zbuild-std --target x86_64-unknown-linux-gnu": "the ASan Rust suite under -Zbuild-std; --locked together with the build-std sysroot lockfile has not been run on this runner",
+}
+
+// buildStdExemptions returns the buildStdExempt keys that cover seg. Whitespace
+// is collapsed first: a joined continuation line leaves double spaces.
+func buildStdExemptions(name, seg string) []string {
+	var keys []string
+	for k := range buildStdExempt {
+		file, prefix, _ := strings.Cut(k, "\x00")
+		if name == file && strings.HasPrefix(strings.Join(strings.Fields(seg), " "), prefix) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+func buildStdExempted(name, seg string) bool { return len(buildStdExemptions(name, seg)) > 0 }
 
 // lockedViolations reports cargo build/test/clippy/check invocations that do
 // not pass --locked, so a stale or missing Cargo.lock fails the job instead of
 // resolving newer dependencies than the ones that were reviewed.
 //
-// Two exemptions, both because the flag is not verified to compose: -Zbuild-std
-// (the std workspace carries its own lockfile) and `cargo miri` (it drives its
-// own sysroot build). Echo lines print a command and do not run it.
+// Two exemptions, both because the flag is not verified to compose: the
+// -Zbuild-std commands listed one by one in buildStdExempt (the std workspace
+// carries its own lockfile) and `cargo miri` (it drives its own sysroot
+// build). Echo lines print a command and do not run it.
 func lockedViolations(name string, lines []string) []string {
 	var out []string
 	for _, ll := range logicalLines(lines) {
 		for _, seg := range commandSegments(ll.text) {
-			if strings.Contains(seg, "-Zbuild-std") || strings.Contains(seg, "cargo miri") {
+			if buildStdExempted(name, seg) || strings.Contains(seg, "cargo miri") {
 				continue
 			}
 			if cargoSubcmd.MatchString(seg) && !strings.Contains(seg, "--locked") {
@@ -211,9 +240,16 @@ func TestWorkflowScriptsAreAudited(t *testing.T) {
 	for _, p := range buildFiles {
 		audited[strings.TrimPrefix(p, "../../")] = true
 	}
+	invocations := 0
+	defer func() {
+		if invocations == 0 {
+			t.Error("no workflow runs a tests/, tools/ or bench/ script: the audit matched nothing, so it proves nothing")
+		}
+	}()
 	for name, lines := range workflows(t) {
 		for _, ll := range logicalLines(lines) {
 			if m := scriptInvocation.FindStringSubmatch(ll.text); m != nil {
+				invocations++
 				s := strings.TrimPrefix(m[1], "./")
 				if _, err := os.Stat("../../" + s); err != nil {
 					t.Errorf("%s:%d runs %s, which does not exist", name, ll.n, s)
@@ -258,11 +294,42 @@ func TestUntrustedExpressionsReachShellOnlyThroughEnv(t *testing.T) {
 // pinned github-script action: no checkout (covered elsewhere) and no shell
 // that a build job's output could steer.
 func TestWriteTokenJobsRunNoShell(t *testing.T) {
+	jobs := 0
 	for name, lines := range workflows(t) {
 		for _, job := range splitJobs(lines) {
+			jobs++
 			if strings.Contains(job, ": write") && regexp.MustCompile(`(?m)^\s+(- )?run:`).MatchString(job) {
 				t.Errorf("%s %s: a job with a write permission has a run: step", name, strings.TrimSpace(strings.SplitN(job, "\n", 2)[0]))
 			}
+		}
+	}
+	if jobs == 0 {
+		t.Error("splitJobs found no job in any workflow: the rule matched nothing, so it proves nothing")
+	}
+}
+
+// Every -Zbuild-std command that cargo runs must be listed, and every listed
+// entry must still match one, so the exemption can neither widen nor rot.
+func TestBuildStdExemptionsAreLive(t *testing.T) {
+	used := map[string]bool{}
+	for name, lines := range workflows(t) {
+		for _, ll := range logicalLines(lines) {
+			for _, seg := range commandSegments(ll.text) {
+				if !strings.Contains(seg, "-Zbuild-std") || !cargoSubcmd.MatchString(seg) {
+					continue
+				}
+				for _, k := range buildStdExemptions(name, seg) {
+					used[k] = true
+				}
+			}
+		}
+	}
+	for k, reason := range buildStdExempt {
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("exemption %q has no recorded reason", k)
+		}
+		if !used[k] {
+			t.Errorf("exemption %q matches no -Zbuild-std command in any workflow; delete it", k)
 		}
 	}
 }
@@ -910,6 +977,8 @@ func TestPlantedViolationsAreCaught(t *testing.T) {
 		{"run: is the expression", untrustedExpressionViolations("x", []string{"      - name: s", "        run: ${{ inputs.hammer_seed }}"}), nil},
 		{"github-script script: is the expression", untrustedExpressionViolations("x", []string{"        with:", "          script: ${{ github.event.issue.title }}"}), nil},
 		{"expression in a block-scalar body", untrustedExpressionViolations("x", []string{"        run: |", "          echo ${{ github.head_ref }}"}), nil},
+		{"needs output in a run body", untrustedExpressionViolations("x", []string{"        run: echo ${{ needs.build.outputs.ref }}"}), untrustedExpressionViolations("x", []string{"        env:", "          REF: ${{ needs.build.outputs.ref }}"})},
+		{"steps output in a run body", untrustedExpressionViolations("x", []string{"        run: echo ${{ steps.meta.outputs.title }}"}), untrustedExpressionViolations("x", []string{"        env:", "          TITLE: ${{ steps.meta.outputs.title }}"})},
 		{"with: input carrying head_ref", untrustedExpressionViolations("x", []string{"        with:", "          ref: ${{ github.head_ref }}"}), nil},
 		{"echo hides an unlocked cargo", lockedViolations("x", []string{"        run: cargo test -p gusset && echo ok"}), lockedViolations("x", []string{"        run: cargo test --locked -p gusset && echo ok"})},
 		{"unlocked cargo run", lockedViolations("x", []string{"  cargo run --release"}), nil},
@@ -927,7 +996,17 @@ func TestPlantedViolationsAreCaught(t *testing.T) {
 			t.Errorf("%s: the compliant form was flagged: %v", c.name, c.good)
 		}
 	}
-	if len(lockedViolations("x", []string{"  cargo test -p gusset -Zbuild-std"})) != 0 {
-		t.Error("the documented -Zbuild-std exemption stopped working")
+	const buildStd = "  cargo test -p gusset -Zbuild-std --target x86_64-unknown-linux-gnu --test a"
+	if len(lockedViolations("nightly.yml", []string{buildStd})) != 0 {
+		t.Error("the listed -Zbuild-std exemption stopped working")
+	}
+	if len(lockedViolations("nightly.yml", []string{"  cargo test -p gusset -Zbuild-std --target aarch64-apple-darwin"})) == 0 {
+		t.Error("an unlisted -Zbuild-std command in a listed file was exempted")
+	}
+	if len(lockedViolations("x", []string{buildStd})) == 0 {
+		t.Error("the -Zbuild-std exemption is not per file")
+	}
+	if len(lockedViolations("x", []string{"  cargo test --locked -p gusset -Zbuild-std"})) != 0 {
+		t.Error("a -Zbuild-std command that passes --locked was flagged")
 	}
 }
