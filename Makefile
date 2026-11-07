@@ -1,4 +1,4 @@
-.PHONY: all linked-target-dir build test bench bench-crossover bench-scaling bench-dispatch bench-alloc-counters lint alloc-gate ci-local docs docs-check cross fuzz clean install install-build uninstall
+.PHONY: all linked-target-dir build test test-uniffi-link bench bench-crossover bench-scaling bench-dispatch bench-alloc-counters lint alloc-gate ci-local docs docs-check cross fuzz clean install install-build uninstall
 
 export PATH := $(PATH):$(shell go env GOPATH)/bin
 
@@ -104,6 +104,21 @@ test: linked-target-dir
 	cargo test --locked --workspace
 	cargo test --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml
 	go test -v ./...
+
+# The typed Go client of examples/uniffi_bindgen_go against its compiled Rust
+# engine, through a real handle. The example crate is the umbrella of
+# docs/adoption.md step 1: its libgusset.a holds Gusset and the engine, the one
+# unsealed staticlib R14 allows. CGO_LDFLAGS comes before internal/ffi's own -L,
+# so -lgusset resolves to the umbrella and target/'s archive is never opened;
+# if it were, the shim's init_uniffi_engine would be undefined and the link
+# would fail. --target-dir pins the umbrella's output, so a global
+# CARGO_TARGET_DIR cannot land it on top of Gusset's own libgusset.a. Nothing
+# here builds target/ or regenerates internal/ffi's archive hash. -count=1: the
+# test registers the engine and replays the golden counters, both process-wide.
+test-uniffi-link:
+	cargo build --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml --target-dir examples/uniffi_bindgen_go/rust/target
+	go run ./tools/gussetvet -tags gusset_uniffi_engine examples/uniffi_bindgen_go
+	CGO_LDFLAGS="-L$(CURDIR)/examples/uniffi_bindgen_go/rust/target/debug" go test -count=1 -tags gusset_uniffi_engine -v ./examples/uniffi_bindgen_go/...
 
 # -count=10: benchstat refuses to quote a confidence interval below 6 samples, and
 # the committed data used to have 5 — so every README figure was a point estimate

@@ -4,12 +4,17 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# The umbrella crate of docs/adoption.md step 1: the staticlib holds Gusset and
+# this engine, so a Go binary links one Rust archive (R14). cgo links
+# `-lgusset`, so the output must be libgusset.a whatever the package is called.
+# `make test-uniffi-link` builds it into rust/target and links the Go tests
+# against it; the rlib is what `cargo test` runs.
 [lib]
-name = "uniffi_gusset_example"
-crate-type = ["rlib"]
+name = "gusset"
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-# Depends on gusset core runtime contract
-gusset = { path = "../../../crates/gusset" }
+# Renamed, because this crate's lib is itself called `gusset`.
+gusset_core = { package = "gusset", path = "../../../crates/gusset" }
 
 [workspace]

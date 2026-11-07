@@ -1,7 +1,11 @@
 //! Reference Rust engine implementing UniFFI-compatible serialization and
-//! execution on top of the Gusset runtime contract (`gusset::JobContext`, `set_engine_handler`).
+//! execution on top of the Gusset runtime contract (`gusset::JobContext`, `register_engine`).
+//!
+//! This crate is also the umbrella staticlib (docs/adoption.md step 1): its
+//! `libgusset.a` holds Gusset and this engine, and Go registers the engine
+//! through the one C export below, [`init_uniffi_engine`].
 
-use gusset::{set_engine_handler, JobContext, JobOutput};
+use gusset_core::{register_engine, JobContext, JobOutput};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -31,10 +35,21 @@ const MATH_ERR_NEGATIVE_ROOT: i32 = 3;
 
 static OPERATIONS_COUNTER: AtomicI64 = AtomicI64::new(0);
 
-/// Initializes the UniFFI engine handler with Gusset.
-/// In an adopter service, this is called once at process startup.
-pub fn init_uniffi_engine() {
-    set_engine_handler(uniffi_dispatch_handler);
+/// Registers the UniFFI engine with Gusset under `opcode`, for Go to call once
+/// at startup before the first submission. A Go handle reaches it with
+/// `gusset.WithOpcode(opcode)`.
+///
+/// Returns 0 when the engine is registered, and -1 when `register_engine`
+/// refused: `opcode` is 0, or an engine already holds it. A nonzero opcode
+/// rather than `set_engine_handler`'s global slot, so registering this engine
+/// never displaces another one, nor the diagnostic engine Gusset's own tests
+/// use on opcode 0, in the same process.
+#[no_mangle]
+pub extern "C" fn init_uniffi_engine(opcode: u32) -> i32 {
+    match register_engine(opcode, uniffi_dispatch_handler) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
 }
 
 /// Dispatch handler registered with Gusset's worker pool.
@@ -241,7 +256,7 @@ fn write_string(out: &mut Vec<u8>, s: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gusset::CallHeader;
+    use gusset_core::{clear_engine_handlers, CallHeader};
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
@@ -359,6 +374,18 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, "cancelled: Explicit");
+    }
+
+    /// The C export reports `register_engine`'s answer: 0 for a registration,
+    /// -1 for opcode 0 and for an opcode already held. The only test in this
+    /// binary that touches the process-global registry; it clears it after.
+    #[test]
+    fn init_registers_once_per_opcode_and_refuses_opcode_zero() {
+        assert_eq!(init_uniffi_engine(0), -1, "opcode 0 must be refused");
+        assert_eq!(init_uniffi_engine(0x55), 0, "first registration");
+        assert_eq!(init_uniffi_engine(0x55), -1, "duplicate must be refused");
+        assert_eq!(init_uniffi_engine(0x56), 0, "another opcode is free");
+        clear_engine_handlers();
     }
 
     #[test]

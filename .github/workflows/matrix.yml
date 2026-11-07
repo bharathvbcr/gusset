@@ -91,6 +91,16 @@ jobs:
           cargo clippy --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml --all-targets -- -D warnings
           cargo test --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml
 
+      # The golden bytes above tie each half to a file, not to each other. This
+      # links the typed Go client to the compiled engine: the example crate's
+      # umbrella libgusset.a (Gusset plus the engine) goes first in CGO_LDFLAGS,
+      # and TestCompiledEngine_TypedClientMatchesGolden replays the golden
+      # vectors through a real handle. It never builds target/ or regenerates
+      # internal/ffi's archive hash, so the default link is untouched.
+      - name: Link the typed Go client to the compiled uniffi engine
+        if: success() || failure()
+        run: make test-uniffi-link
+
       # 1.27 has the goroutineleak profile, so the leak gate must run here,
       # never skip.
       - name: Run Go test suite (Panic Zoo & Pitfalls)
