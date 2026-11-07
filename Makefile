@@ -102,6 +102,7 @@ uninstall:
 
 test: linked-target-dir
 	cargo test --locked --workspace
+	cargo test --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml
 	go test -v ./...
 
 # -count=10: benchstat refuses to quote a confidence interval below 6 samples, and

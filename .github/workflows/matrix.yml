@@ -79,6 +79,17 @@ jobs:
       - name: Run Rust tests (release)
         run: cargo test --locked --workspace --release
 
+      # examples/uniffi_bindgen_go/rust declares its own [workspace], so the
+      # `--workspace` runs above never build it. Without this step a change that
+      # stopped lib.rs compiling against gusset, or altered the wire bytes in
+      # examples/uniffi_bindgen_go/testdata/golden.txt, left every check green.
+      # The Go tests read the same golden file under `go test ./...` below.
+      - name: Build and test the uniffi example engine
+        if: success() || failure()
+        run: |
+          cargo clippy --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml
+
       # 1.27 has the goroutineleak profile, so the leak gate must run here,
       # never skip.
       - name: Run Go test suite (Panic Zoo & Pitfalls)
