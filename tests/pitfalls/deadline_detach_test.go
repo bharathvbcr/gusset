@@ -35,6 +35,7 @@ import (
 
 	"github.com/bharathvbcr/gusset"
 	"github.com/bharathvbcr/gusset/internal/hostprobe"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // nonCoop builds a mode 9 payload that sleeps for d without ever checking for
@@ -291,7 +292,7 @@ func TestDeadline_AbandonedLargeResultDoesNotLeakRustMemory(t *testing.T) {
 		t.Fatalf("Free failed: %v", err)
 	}
 
-	baseline := gusset.Stats().LiveBytes
+	baseline := livebytes.Quiesce(t)
 	abandonedRounds := 0
 
 	for i := 0; i < rounds; i++ {
@@ -325,22 +326,16 @@ func TestDeadline_AbandonedLargeResultDoesNotLeakRustMemory(t *testing.T) {
 	}
 
 	// Let every abandoned completion land and be reclaimed.
-	deadline := time.Now().Add(30 * time.Second)
-	var live uint64
-	for time.Now().Before(deadline) {
-		live = gusset.Stats().LiveBytes
-		if live <= baseline+payload {
-			t.Logf("%d abandoned %d-byte results reclaimed; live %d vs baseline %d",
-				rounds, payload, live, baseline)
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+	live, ok := livebytes.WaitUntil(func(live uint64) bool { return live <= baseline+payload })
+	if !ok {
+		t.Fatalf(
+			"abandoned large results were not reclaimed: live bytes %d, baseline %d, "+
+				"%d rounds of %d-byte results",
+			live, baseline, rounds, payload,
+		)
 	}
-	t.Fatalf(
-		"abandoned large results were not reclaimed: live bytes %d, baseline %d, "+
-			"%d rounds of %d-byte results",
-		live, baseline, rounds, payload,
-	)
+	t.Logf("%d abandoned %d-byte results reclaimed; live %d vs baseline %d",
+		rounds, payload, live, baseline)
 }
 
 // A panic in an abandoned job must still poison the handle (I2).

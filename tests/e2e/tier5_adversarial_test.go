@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // TestTier5_Adversarial_AsyncCancellation_RingSaturationStorm stresses the interop boundary
@@ -255,7 +256,7 @@ func closeRaceNamedError(err error) bool {
 func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 	var echoes, namedErrors int
 	for iteration := 0; iteration < 8; iteration++ {
-		baselineLive := gusset.Stats().LiveBytes
+		baselineLive := livebytes.Quiesce(t)
 		h, err := gusset.Open(
 			gusset.WithPoolSize(4),
 			gusset.WithDiagnosticEngine(),
@@ -386,12 +387,8 @@ func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 
 		// Everything has returned and the handle is closed: the buffers it held
 		// must be back, however Close interleaved with the callers.
-		settleBy := time.Now().Add(5 * time.Second)
-		for gusset.Stats().LiveBytes != baselineLive && time.Now().Before(settleBy) {
-			time.Sleep(5 * time.Millisecond)
-		}
-		if live := gusset.Stats().LiveBytes; live != baselineLive {
-			t.Errorf("iteration %d: LiveBytes settled at %d, want the baseline %d (delta %d)",
+		if live, ok := livebytes.Settle(baselineLive); !ok {
+			t.Errorf("iteration %d: LiveBytes settled at %d, want at most the baseline %d (delta %d)",
 				iteration, live, baselineLive, int64(live)-int64(baselineLive))
 		}
 
