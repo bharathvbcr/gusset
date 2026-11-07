@@ -102,7 +102,7 @@ uninstall:
 
 test: linked-target-dir
 	cargo test --locked --workspace
-	cargo test --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml
+	cargo test --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml --target-dir examples/uniffi_bindgen_go/rust/target
 	go test -v ./...
 
 # The typed Go client of examples/uniffi_bindgen_go against its compiled Rust

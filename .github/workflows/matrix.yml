@@ -88,8 +88,8 @@ jobs:
       - name: Build and test the uniffi example engine
         if: success() || failure()
         run: |
-          cargo clippy --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml --all-targets -- -D warnings
-          cargo test --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml
+          cargo clippy --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml --target-dir examples/uniffi_bindgen_go/rust/target --all-targets -- -D warnings
+          cargo test --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml --target-dir examples/uniffi_bindgen_go/rust/target
 
       # The golden bytes above tie each half to a file, not to each other. This
       # links the typed Go client to the compiled engine: the example crate's
