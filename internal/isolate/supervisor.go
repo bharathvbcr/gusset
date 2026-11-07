@@ -314,8 +314,9 @@ func validateInput(in any) error {
 
 // Wait waits for the supervisor ticket. A result stored on a retired
 // generation is still returned. A ticket with no stored result and no
-// in-flight response fails with that generation's error. The cancel frame,
-// when the deadline wins, carries the child id.
+// in-flight response fails with that generation's error, without the advice to
+// Close (supervisedRefusal): the next call is served by a replacement. The
+// cancel frame, when the deadline wins, carries the child id.
 func (s *Supervisor) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	if s == nil {
 		return nil, gusset.ErrNilHandle
@@ -338,7 +339,7 @@ func (s *Supervisor) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
 		return out, err
 	}
 	s.forget(ticket)
-	return out, err
+	return out, supervisedRefusal(err)
 }
 
 // Discard gives up the supervisor ticket and the child ticket under it.
