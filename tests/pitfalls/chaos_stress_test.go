@@ -476,6 +476,7 @@ func TestConcurrentChaos_Invariants_I1_to_I6(t *testing.T) {
 		opClosedHandled    atomic.Int64
 		opPanicsCaught     atomic.Int64
 		handleChurnCount   atomic.Int64
+		mode17Submits      atomic.Int64
 	)
 
 	// Mode 16 payload: [16, len_le_u32, seed]
@@ -587,7 +588,14 @@ func TestConcurrentChaos_Invariants_I1_to_I6(t *testing.T) {
 					// Mode 17 holds in engine for 3 ms
 					tk, err := curH.Submit(ctx, []byte{17, 3})
 					cancel()
-					if err == nil {
+					if err != nil {
+						// The handle may be mid-rotation or the pool full; anything else is a bug.
+						if !errors.Is(err, gusset.ErrClosed) && !errors.Is(err, context.DeadlineExceeded) &&
+							!errors.Is(err, context.Canceled) && !errors.Is(err, gusset.ErrTooManyUncollected) {
+							t.Errorf("mode 17 Submit: unexpected error: %v", err)
+						}
+					} else {
+						mode17Submits.Add(1)
 						wCtx, wCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 						_, werr := curH.Wait(wCtx, tk)
 						wCancel()
@@ -704,6 +712,15 @@ func TestConcurrentChaos_Invariants_I1_to_I6(t *testing.T) {
 	t.Logf("Invariant I1: Peak in-engine concurrent jobs = %d (configured poolSize = %d)", peakInRust, poolSize)
 	if peakInRust > poolSize {
 		t.Fatalf("INVARIANT I1 VIOLATION: peak concurrent jobs in Rust (%d) exceeded poolSize (%d)", peakInRust, poolSize)
+	}
+	// An upper bound alone passes with a dead gauge (peak 0). Mode 17 must have
+	// run, and the engine must have seen at least two of its jobs at once.
+	if mode17Submits.Load() == 0 {
+		t.Fatalf("no mode 17 job was admitted, so the I1 gauge was never exercised")
+	}
+	if peakInRust < 2 {
+		t.Fatalf("I1 gauge saw a peak of %d after %d mode 17 submits on a %d-worker pool; want at least 2 (dead gauge or no concurrency)",
+			peakInRust, mode17Submits.Load(), poolSize)
 	}
 
 	// Invariant I2: Assert panics were caught

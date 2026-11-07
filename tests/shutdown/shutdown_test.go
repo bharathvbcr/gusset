@@ -17,6 +17,8 @@ package shutdown_test
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -30,8 +32,9 @@ import (
 // assert the transition once per process. Under `go test -count=2` the second
 // run would open a handle against a runtime that is already refusing work and
 // fail on its own warm-up call — a failure that says nothing about Gusset and
-// everything about the test having run twice. Detecting it and skipping is the
-// honest answer; asserting the transition again is not possible.
+// everything about the test having run twice. Skipping would turn that run into
+// a green test that examined nothing, so the transition is re-asserted in a
+// fresh process instead (runInFreshProcess).
 func alreadyShutDown(t *testing.T) bool {
 	t.Helper()
 	probe, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
@@ -45,9 +48,40 @@ func alreadyShutDown(t *testing.T) bool {
 	return err != nil && strings.Contains(err.Error(), "shutting down")
 }
 
+// freshProcessEnv marks the child started by runInFreshProcess, so a child that
+// somehow finds the latch already set fails instead of re-executing forever.
+const freshProcessEnv = "GUSSET_SHUTDOWN_FRESH_PROCESS"
+
+// runInFreshProcess re-executes this test binary for the one test named, in a
+// process whose latch is still open, and requires that the test ran and passed
+// there. Not a skip: the child's -v output must report PASS for the test and no
+// SKIP, or this fails.
+func runInFreshProcess(t *testing.T, name string) {
+	t.Helper()
+	if os.Getenv(freshProcessEnv) == "1" {
+		t.Fatalf("%s found the shutdown latch already set in a process started to run it alone", name)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locating the test binary to re-execute %s: %v", name, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "-test.run=^"+name+"$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), freshProcessEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed in a fresh process: %v\n%s", name, err, out)
+	}
+	if !strings.Contains(string(out), "--- PASS: "+name) || strings.Contains(string(out), "--- SKIP") {
+		t.Fatalf("%s did not run to a pass in a fresh process:\n%s", name, out)
+	}
+}
+
 func TestShutdown_DrainsInFlightWorkThenRefusesSubmissions(t *testing.T) {
 	if alreadyShutDown(t) {
-		t.Skip("runtime already shut down in this process; the latch is one-way, so this can only be asserted once")
+		runInFreshProcess(t, "TestShutdown_DrainsInFlightWorkThenRefusesSubmissions")
+		return
 	}
 
 	h, err := gusset.Open(gusset.WithPoolSize(4), gusset.WithDiagnosticEngine())
@@ -141,16 +175,15 @@ func TestShutdown_DrainsInFlightWorkThenRefusesSubmissions(t *testing.T) {
 	}
 }
 
-// A budget that cannot be met must be reported, not rounded up to success.
+// Shutdown with nothing in flight answers promptly and cleanly for every
+// budget, including zero, negative and past MaxDrain.
 //
-// Cancellation is cooperative, so a non-cooperative engine cannot be drained at
-// all. Reporting that is the whole point: an operator who is told the drain was
-// clean will move on to killing the process.
-func TestShutdown_ReportsWorkItCouldNotDrain(t *testing.T) {
+// This is not the test of an undrained budget: its work is cooperative and
+// already drained, so there is nothing to report. ErrShutdownIncomplete with
+// non-cooperative work in flight is asserted in tests/shutdown_incomplete.
+func TestShutdown_WithNothingInFlightReturnsCleanlyForAnyBudget(t *testing.T) {
 	// Runs after the test above in file order, so the latch is already set and
-	// no new work can be submitted. Assert the shape of the contract instead:
-	// a zero budget must return promptly and must not claim success while work
-	// is outstanding.
+	// all its work was drained and collected.
 	start := time.Now()
 	err := gusset.Shutdown(0)
 	elapsed := time.Since(start)
@@ -158,10 +191,11 @@ func TestShutdown_ReportsWorkItCouldNotDrain(t *testing.T) {
 	if elapsed > 2*time.Second {
 		t.Fatalf("Shutdown(0) took %v; a zero budget must return promptly", elapsed)
 	}
-	// With nothing in flight this is a clean drain; the assertion is that it
-	// answers at all and does not wedge.
-	if err != nil && !errors.Is(err, gusset.ErrShutdownIncomplete) {
-		t.Fatalf("Shutdown(0) must report an undrained budget as ErrShutdownIncomplete, got %v", err)
+	// Nothing is outstanding, so a zero budget is met. Reporting
+	// ErrShutdownIncomplete here would tell an operator to kill a process that
+	// has nothing left to kill.
+	if err != nil {
+		t.Fatalf("Shutdown(0) with nothing in flight must be a clean drain, got %v", err)
 	}
 
 	// A negative budget must be treated as zero rather than wrapping into a
