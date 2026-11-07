@@ -1659,6 +1659,13 @@ mod argument_refusal_tests {
     }
 }
 
+/// Held by every unit test that logs a line and then drains the process-wide
+/// log ring to find it. Draining consumes, and tests in this binary run in
+/// parallel, so without it one test's drain can take another's line between
+/// that test's log and its own drain.
+#[cfg(test)]
+pub(crate) static LOG_RING_DRAIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A panic caught inside `gusset_shutdown` or `gusset_init` is reported as
 /// `FFI_PANIC`. Both returned `FFI_ERR`, and for shutdown that is the
 /// drain-budget-expired code, so Go told the caller "work still in flight" when
@@ -1695,6 +1702,9 @@ mod lifecycle_panic_tests {
     /// reported only through the log ring; `ffi.Init` drains it from there.
     #[test]
     fn an_init_panic_text_lands_in_the_log_ring() {
+        let _drain = LOG_RING_DRAIN_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         fault::arm();
         // SAFETY: no pointer arguments.
         assert_eq!(unsafe { gusset_init() }, FFI_PANIC);

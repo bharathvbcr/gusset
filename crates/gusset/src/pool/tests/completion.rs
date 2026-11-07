@@ -97,6 +97,7 @@ fn an_os_enotconn_on_the_completion_write_poisons_and_logs() {
 
     // A ticket no other test in this binary issues, to find its log line.
     let ticket = 0x0E07_C0DE_u64;
+    let _drain = lock_recover(&crate::ffi::LOG_RING_DRAIN_LOCK);
     handle.complete(ticket, JobResult::Ok(Vec::new()), false);
 
     assert!(
