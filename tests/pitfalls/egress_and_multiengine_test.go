@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // TestZeroCopyEgress_WaitBufferReturnsBufferDirectly validates the R16 zero-copy egress path:
@@ -64,48 +65,6 @@ func TestZeroCopyEgress_WaitBufferReturnsBufferDirectly(t *testing.T) {
 	}
 }
 
-// liveBytesNotLeaked is the leak predicate for the process-wide LiveBytes
-// gauge. A drop under the quiesced baseline is an earlier test's AddCleanup,
-// not a leak. A leak is a reading that stays above that baseline.
-func liveBytesNotLeaked(baseline, live uint64) bool {
-	return live <= baseline
-}
-
-// quiesceLiveBytes GCs until two consecutive LiveBytes readings match, and
-// returns that reading. Snapshotting while an earlier test's cleanup is still
-// running lets the counter fall under the snapshot; an equality wait then
-// spins for 30s and reports a leak.
-func quiesceLiveBytes(t *testing.T) uint64 {
-	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	prev := gusset.Stats().LiveBytes
-	for {
-		runtime.GC()
-		time.Sleep(10 * time.Millisecond)
-		live := gusset.Stats().LiveBytes
-		if live == prev {
-			return live
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("LiveBytes did not quiesce: last=%d prev=%d", live, prev)
-		}
-		prev = live
-	}
-}
-
-// settleLiveBytes polls until liveBytesNotLeaked accepts the reading, with
-// the same 10ms/30s settle as waitLiveBytes. collect forces a GC on each pass
-// so an abandoned *Buffer's AddCleanup can run; the sample waitLiveBytes
-// already took is from before that GC, and the next pass observes it.
-func settleLiveBytes(baseline uint64, collect bool) (uint64, bool) {
-	return waitLiveBytes(func(live uint64) bool {
-		if collect {
-			runtime.GC()
-		}
-		return liveBytesNotLeaked(baseline, live)
-	})
-}
-
 // TestZeroCopyEgress_WaitBufferAddCleanupFreesOnGC verifies that if an adopter
 // abandons a *Buffer returned by WaitBuffer without calling Free(), the
 // runtime.AddCleanup backstop automatically reclaims it in Rust memory (R4).
@@ -119,7 +78,7 @@ func TestZeroCopyEgress_WaitBufferAddCleanupFreesOnGC(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	baseline := quiesceLiveBytes(t)
+	baseline := livebytes.Quiesce(t)
 
 	// Create and abandon 10 buffers in an inner function
 	abandonBuffers := func() {
@@ -144,7 +103,7 @@ func TestZeroCopyEgress_WaitBufferAddCleanupFreesOnGC(t *testing.T) {
 	// quiesced baseline. A buffer nothing reclaims stays above it and fails
 	// when the deadline passes. A counter that drops further is an earlier
 	// test's cleanup, not a leak (I4/R16).
-	if live, ok := settleLiveBytes(baseline, true); !ok {
+	if live, ok := livebytes.SettleGC(baseline); !ok {
 		t.Fatalf("unfreed buffers leaked memory: baseline=%d live=%d", baseline, live)
 	}
 }
@@ -159,7 +118,7 @@ func TestZeroCopyEgress_WaitBufferTimeoutCleansUpBuffer(t *testing.T) {
 	}
 	defer h.Close()
 
-	baseline := quiesceLiveBytes(t)
+	baseline := livebytes.Quiesce(t)
 
 	// Mode 5: delay iterations (each iteration takes 10ms)
 	// Mode 5 with 10 iterations takes ~100ms
@@ -183,7 +142,7 @@ func TestZeroCopyEgress_WaitBufferTimeoutCleansUpBuffer(t *testing.T) {
 	// host, so a fixed nap measured the host. Poll until LiveBytes is at or
 	// under the quiesced baseline; a leaked buffer stays above it. A drop
 	// under the baseline is an earlier test's cleanup, not a leak (I4/R16).
-	if live, ok := settleLiveBytes(baseline, false); !ok {
+	if live, ok := livebytes.Settle(baseline); !ok {
 		t.Fatalf("timed-out buffer leaked: baseline=%d, live=%d", baseline, live)
 	}
 }
@@ -194,13 +153,13 @@ func TestZeroCopyEgress_WaitBufferTimeoutCleansUpBuffer(t *testing.T) {
 // test's cleanup ran after the snapshot.
 func TestZeroCopyEgress_LiveBytesLeakIsAboveBaselineOnly(t *testing.T) {
 	t.Run("injected readings", func(t *testing.T) {
-		if !liveBytesNotLeaked(1000, 0) {
+		if !livebytes.NotLeaked(1000, 0) {
 			t.Fatal("a reading under the snapshot is an earlier cleanup, not a leak")
 		}
-		if !liveBytesNotLeaked(1000, 1000) {
+		if !livebytes.NotLeaked(1000, 1000) {
 			t.Fatal("the snapshot itself is not a leak")
 		}
-		if liveBytesNotLeaked(1000, 1001) {
+		if livebytes.NotLeaked(1000, 1001) {
 			t.Fatal("a reading above the snapshot is a buffer this test still holds")
 		}
 	})
@@ -212,7 +171,7 @@ func TestZeroCopyEgress_LiveBytesLeakIsAboveBaselineOnly(t *testing.T) {
 		}
 		defer h.Close()
 
-		baseline := quiesceLiveBytes(t)
+		baseline := livebytes.Quiesce(t)
 		// Held on purpose: not Free'd and not left for AddCleanup. A 1 MiB
 		// buffer cannot hide in allocator noise.
 		buf, err := h.NewBuffer(1 << 20)
@@ -225,7 +184,7 @@ func TestZeroCopyEgress_LiveBytesLeakIsAboveBaselineOnly(t *testing.T) {
 			}
 		}()
 		held := gusset.Stats().LiveBytes
-		if liveBytesNotLeaked(baseline, held) {
+		if livebytes.NotLeaked(baseline, held) {
 			t.Fatalf("a buffer this test still holds must fail the leak check: baseline=%d live=%d", baseline, held)
 		}
 
@@ -235,17 +194,17 @@ func TestZeroCopyEgress_LiveBytesLeakIsAboveBaselineOnly(t *testing.T) {
 		// `held` includes this buffer. Free drops the gauge under that
 		// snapshot; the same predicate must accept the drop, and must not
 		// leave the buffer charged against the quiesced baseline.
-		live, ok := settleLiveBytes(held, false)
+		live, ok := livebytes.Settle(held)
 		if !ok {
 			t.Fatalf("Free did not bring LiveBytes back: snapshot=%d live=%d", held, live)
 		}
 		if live >= held {
 			t.Fatalf("Free must drop LiveBytes under the snapshot taken while the buffer was held: snapshot=%d live=%d", held, live)
 		}
-		if !liveBytesNotLeaked(held, live) {
+		if !livebytes.NotLeaked(held, live) {
 			t.Fatalf("a drop under the snapshot must pass: snapshot=%d live=%d", held, live)
 		}
-		live, ok = settleLiveBytes(baseline, false)
+		live, ok = livebytes.Settle(baseline)
 		if !ok {
 			t.Fatalf("after Free, LiveBytes stayed above the quiesced baseline: baseline=%d live=%d", baseline, live)
 		}
@@ -644,7 +603,7 @@ func TestZeroCopyEgress_LargeWaitBufferAddCleanupFreesOnGC(t *testing.T) {
 	defer cancel()
 
 	const size = 64 * 1024
-	baseline := quiesceLiveBytes(t)
+	baseline := livebytes.Quiesce(t)
 
 	var peak uint64
 	abandonBuffers := func() {
@@ -672,7 +631,7 @@ func TestZeroCopyEgress_LargeWaitBufferAddCleanupFreesOnGC(t *testing.T) {
 		t.Fatalf("LiveBytes peaked at %d with %d-byte Rust results outstanding over a baseline of %d: the gauge did not count them, so a return to baseline would prove nothing", peak, size, baseline)
 	}
 
-	if live, ok := settleLiveBytes(baseline, true); !ok {
+	if live, ok := livebytes.SettleGC(baseline); !ok {
 		t.Fatalf("unfreed Rust buffers leaked memory: baseline=%d live=%d", baseline, live)
 	}
 }
@@ -695,7 +654,7 @@ func TestZeroCopyEgress_InlineWaitBufferResultIsNotRustMemory(t *testing.T) {
 		count = 64
 		small = 4096
 	)
-	baseline := quiesceLiveBytes(t)
+	baseline := livebytes.Quiesce(t)
 
 	held := make([]*gusset.Buffer, 0, count)
 	for i := 0; i < count; i++ {

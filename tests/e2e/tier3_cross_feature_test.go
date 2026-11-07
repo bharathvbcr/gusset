@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // TestTier3_ConcurrentBuffers_AsyncSubmit_Cancellation_Budget tests concurrent buffer allocation,
@@ -27,7 +28,7 @@ func TestTier3_ConcurrentBuffers_AsyncSubmit_Cancellation_Budget(t *testing.T) {
 	requireNoError(t, err, "gusset.Open")
 	defer h.Close()
 
-	baseStats := gusset.Stats()
+	baseLive := livebytes.Quiesce(t)
 
 	const numWorkers = 16
 	const opsPerWorker = 25
@@ -114,12 +115,12 @@ func TestTier3_ConcurrentBuffers_AsyncSubmit_Cancellation_Budget(t *testing.T) {
 	t.Logf("Tier 3 stress complete: completed=%d, cancelled=%d, budget_exhausted=%d",
 		completedOps.Load(), cancelledOps.Load(), budgetExhaustedOps.Load())
 
-	// Settle and verify memory returns to baseline
-	time.Sleep(50 * time.Millisecond)
-	finalStats := gusset.Stats()
-	if finalStats.LiveBytes != baseStats.LiveBytes {
+	// Settle (GC until the gauge reaches the quiesced baseline) and verify
+	// memory returns to baseline.
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Errorf("Stats().LiveBytes leaked memory: baseline=%d, final=%d",
-			baseStats.LiveBytes, finalStats.LiveBytes)
+			baseLive, finalLive)
 	}
 }
 

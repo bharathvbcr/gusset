@@ -14,6 +14,7 @@ import (
 	"unsafe"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 func isBuffer64Aligned(b []byte) bool {
@@ -40,7 +41,7 @@ func TestAllocatorStress_ConcurrentDoubleFreeProtection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 
 	// Phase 1: Rust-allocated Buffer (ID > 0)
 	for trial := 0; trial < 20; trial++ {
@@ -134,8 +135,8 @@ func TestAllocatorStress_ConcurrentDoubleFreeProtection(t *testing.T) {
 	_ = exactBuf.Free()
 
 	// Verify zero live bytes leak
-	curLive := gusset.Stats().LiveBytes
-	if curLive != baseLive {
+	curLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes delta != 0: base=%d, cur=%d", baseLive, curLive)
 	}
 }
@@ -223,7 +224,7 @@ func TestAllocatorStress_MemoryPoisoningAndPostFreeAccess(t *testing.T) {
 // buf.Free() and h.Close() across multiple goroutines to verify that neither path segfaults,
 // crashes under AddressSanitizer/race detector, or double-frees.
 func TestAllocatorStress_BufferFreeVsHandleCloseRace(t *testing.T) {
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 
 	const iterations = 50
 	for iter := 0; iter < iterations; iter++ {
@@ -271,8 +272,8 @@ func TestAllocatorStress_BufferFreeVsHandleCloseRace(t *testing.T) {
 	}
 
 	// Verify all buffers released across both paths
-	curLive := gusset.Stats().LiveBytes
-	if curLive != baseLive {
+	curLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes leaked across Free/Close races: base=%d, cur=%d", baseLive, curLive)
 	}
 }
@@ -292,6 +293,7 @@ func TestAllocatorStress_AllocatorStatsMonotonicityAndMonotonicPeak(t *testing.T
 	}
 	defer h.Close()
 
+	baseLive := livebytes.Quiesce(t)
 	baseStats := gusset.Stats()
 
 	var (
@@ -365,10 +367,11 @@ func TestAllocatorStress_AllocatorStatsMonotonicityAndMonotonicPeak(t *testing.T
 	}
 
 	// Quiescence check: LiveBytes must return to baseline
+	finalLive, leakFree := livebytes.Settle(baseLive)
 	finalStats := gusset.Stats()
-	if finalStats.LiveBytes != baseStats.LiveBytes {
+	if !leakFree {
 		t.Fatalf("LiveBytes did not return to baseline: base=%d, final=%d",
-			baseStats.LiveBytes, finalStats.LiveBytes)
+			baseLive, finalLive)
 	}
 	if finalStats.PeakBytes < baseStats.PeakBytes {
 		t.Fatalf("final PeakBytes (%d) < base PeakBytes (%d)", finalStats.PeakBytes, baseStats.PeakBytes)
@@ -398,7 +401,7 @@ func TestAllocatorStress_AddCleanupGarbageCollectionBackstop(t *testing.T) {
 	}
 	defer h.Close()
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 
 	// Allocate 32 buffers of 4 KiB each (total 128 KiB, exhausting budget)
 	func() {
@@ -449,8 +452,8 @@ func TestAllocatorStress_AddCleanupGarbageCollectionBackstop(t *testing.T) {
 	_ = fullBuf.Free()
 
 	// Verify LiveBytes returns to baseline
-	curLive := gusset.Stats().LiveBytes
-	if curLive != baseLive {
+	curLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes did not return to baseline: base=%d, cur=%d", baseLive, curLive)
 	}
 }
@@ -474,7 +477,7 @@ func TestAllocatorStress_CleanupVsManualFreeRace(t *testing.T) {
 	}
 	defer h.Close()
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 
 	var (
 		stopFlag atomic.Bool
@@ -535,8 +538,8 @@ func TestAllocatorStress_CleanupVsManualFreeRace(t *testing.T) {
 	_ = testBuf.Free()
 
 	// Verify zero live bytes leak
-	curLive := gusset.Stats().LiveBytes
-	if curLive != baseLive {
+	curLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes delta != 0: base=%d, cur=%d", baseLive, curLive)
 	}
 }
@@ -627,7 +630,7 @@ func TestAllocatorStress_ZeroLeakMixedEgressStress(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 
 	const totalOps = 150
 	var wg sync.WaitGroup
@@ -745,8 +748,8 @@ func TestAllocatorStress_ZeroLeakMixedEgressStress(t *testing.T) {
 
 	wg.Wait()
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("zero-leak invariant violated: base=%d, final=%d, delta=%d",
 			baseLive, finalLive, finalLive-baseLive)
 	}
