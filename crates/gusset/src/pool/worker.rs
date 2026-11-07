@@ -287,6 +287,11 @@ impl Handle {
             #[cfg(test)]
             let fail_altstack = super::tests::sigaltstack_should_fail();
 
+            // Test-only: how long this worker lingers after counting its exit.
+            // Read here for the same reason as `fail_altstack`.
+            #[cfg(test)]
+            let exit_delay_ms = super::tests::injected_delay_ms(&super::tests::DELAY_AFTER_EXIT);
+
             let weak_clone = weak_handle.clone();
             let exited = Arc::clone(&self.exited);
             let receiver_clone = Arc::clone(&self.receiver);
@@ -305,13 +310,19 @@ impl Handle {
                 .spawn(move || {
                     // Counted on any exit, unwinding included, so a dead worker
                     // is always noticed by the next submit.
-                    struct ExitMark(Arc<AtomicUsize>);
+                    struct ExitMark(Arc<AtomicUsize>, #[cfg(test)] u64);
                     impl Drop for ExitMark {
                         fn drop(&mut self) {
                             self.0.fetch_add(1, Ordering::Release);
+                            #[cfg(test)]
+                            std::thread::sleep(std::time::Duration::from_millis(self.1));
                         }
                     }
-                    let _exit_mark = ExitMark(exited);
+                    let _exit_mark = ExitMark(
+                        exited,
+                        #[cfg(test)]
+                        exit_delay_ms,
+                    );
                     // A write to a pipe whose read end is gone raises SIGPIPE on
                     // the writing thread. On a thread Go did not create, Go's
                     // handler re-raises it with the default action and the whole
@@ -525,9 +536,18 @@ impl Handle {
             }
         }
 
+        // `exited` still counts workers whose `ExitMark` ran but whose thread
+        // has not ended, so `is_finished` did not reap them. They are in
+        // `live` and will never take another unit: leaving them out of the
+        // count is what keeps a lone submit from queueing a unit with no
+        // thread to run it. They are reaped by a later submit, for `exited`
+        // stays non-zero until then. (Holding `respawn_lock`, every counted
+        // exit is of a worker still in the vec.)
+        let dying = self.exited.load(Ordering::Acquire).min(workers.len());
+        let running = workers.len() - dying;
         let mut starting = Vec::new();
-        if workers.len() < self.pool_size {
-            let needed = self.pool_size - workers.len();
+        if running < self.pool_size {
+            let needed = self.pool_size - running;
             starting = self.spawn_workers_locked(&mut workers, needed)?;
         }
         // Not across the wait: close takes this lock outside its join budget.
@@ -535,7 +555,11 @@ impl Handle {
         self.await_ready(starting)?;
         #[cfg(test)]
         super::tests::injected_delay(&super::tests::DELAY_BEFORE_CLEAR);
-        self.respawn_pending.store(false, Ordering::Release);
+        // Whole again only if no exit is left to reap; otherwise it stays
+        // raised until the dying workers have been joined.
+        if self.exited.load(Ordering::Acquire) == 0 {
+            self.respawn_pending.store(false, Ordering::Release);
+        }
 
         Ok(())
     }
