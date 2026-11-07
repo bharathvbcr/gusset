@@ -218,7 +218,7 @@ The core architecture guarantees and technical contracts enforced across the Rus
 
 - **Platform targets**: Linux (glibc and musl) and macOS only, by an allow-list in `crates/gusset/src/lib.rs` (`compile_error!` on any other `target_os`). Other unix systems are refused too. `make cross` compile-checks `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `x86_64-apple-darwin` and `aarch64-apple-darwin`. The `cross` job also asserts that Windows, FreeBSD and illumos each fail with the named error (`gusset supports Linux and macOS only`), not a symbol cascade.
 - **Static linking**: `libgusset.a` linked directly. Umbrella crates for multi-engine consumers must set `[lib] name = "gusset"`. Downstream modules link via `-tags gusset_pkgconfig` or `CGO_LDFLAGS`.
-- **Build cache invalidation**: `go generate ./internal/ffi` writes SHA256 archive hash into `internal/ffi/archive_hash.go`.
+- **Build cache invalidation**: `go generate ./internal/ffi` writes the SHA256 archive hash into the gitignored `internal/ffi/zz_archive_hash.go`; the committed `internal/ffi/archive_hash.go` is only a stub that explains this.
 
 ## Repo layout and architecture
 
