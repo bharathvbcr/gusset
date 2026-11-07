@@ -201,7 +201,8 @@ jobs:
           cargo test --locked -p gusset --target x86_64-unknown-linux-gnu \
             --test rust_deadline --test rust_counting_flip \
             --test engine_registry_recovery --test boundary_props \
-            --test log_ring_props --test log_ring_contention
+            --test log_ring_props --test log_ring_contention \
+            --test take_ownership
 
       # These compare /proc/self/{fd,task,maps} with a baseline. ASan maps and
       # quarantines memory of its own, so this is the step most likely to need
