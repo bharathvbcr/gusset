@@ -5,33 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"unicode/utf8"
 )
 
 var (
 	// ErrBufferUnderflow is returned when reading past the end of a RustBuffer.
 	ErrBufferUnderflow = errors.New("uniffi: buffer underflow reading serialized data")
-	// ErrStringTooLong is returned when a string length prefix exceeds max allowed bytes.
+	// ErrStringTooLong is returned when WriteString or WriteBytes is given a value
+	// whose length does not fit the signed 32-bit length prefix (over math.MaxInt32
+	// bytes). Nothing is written in that case.
 	ErrStringTooLong = errors.New("uniffi: string length exceeds maximum allowable capacity")
-	// ErrInvalidEncoding is returned when bytes cannot be decoded as valid UTF-8.
+	// ErrInvalidEncoding is returned by ReadString when the bytes are not valid
+	// UTF-8. The Rust engine rejects the same input.
 	ErrInvalidEncoding = errors.New("uniffi: invalid UTF-8 string encoding")
 )
-
-// RustBuffer mirrors the C-ABI memory layout used by UniFFI (capacity, len, data pointer).
-// In Go, Data represents the byte buffer slice crossing the FFI boundary.
-type RustBuffer struct {
-	Capacity int64
-	Len      int64
-	Data     []byte
-}
-
-// NewRustBuffer allocates a RustBuffer with the given capacity.
-func NewRustBuffer(capacity int) *RustBuffer {
-	return &RustBuffer{
-		Capacity: int64(capacity),
-		Len:      0,
-		Data:     make([]byte, 0, capacity),
-	}
-}
 
 // RustBufferWriter encodes typed primitives into the big-endian wire format expected by UniFFI.
 type RustBufferWriter struct {
@@ -104,17 +91,39 @@ func (w *RustBufferWriter) WriteBool(v bool) {
 	}
 }
 
+// lengthPrefix converts a byte length to the signed 32-bit wire prefix. A length
+// above math.MaxInt32 would wrap to a negative prefix that a reader takes for a
+// corrupt buffer, so it is refused with ErrStringTooLong instead.
+func lengthPrefix(n int) (int32, error) {
+	if int64(n) > math.MaxInt32 {
+		return 0, fmt.Errorf("%w: %d bytes, limit %d", ErrStringTooLong, n, math.MaxInt32)
+	}
+	return int32(n), nil
+}
+
 // WriteString writes a length-prefixed UTF-8 string (4-byte big-endian length + bytes).
-func (w *RustBufferWriter) WriteString(s string) {
-	data := []byte(s)
-	w.WriteInt32(int32(len(data)))
-	w.buf = append(w.buf, data...)
+// It returns ErrStringTooLong, and writes nothing, when s is over math.MaxInt32 bytes.
+// It does not check that s is valid UTF-8; ReadString and the Rust engine do.
+func (w *RustBufferWriter) WriteString(s string) error {
+	n, err := lengthPrefix(len(s))
+	if err != nil {
+		return err
+	}
+	w.WriteInt32(n)
+	w.buf = append(w.buf, s...)
+	return nil
 }
 
 // WriteBytes writes a length-prefixed byte array (4-byte big-endian length + bytes).
-func (w *RustBufferWriter) WriteBytes(b []byte) {
-	w.WriteInt32(int32(len(b)))
+// It returns ErrStringTooLong, and writes nothing, when b is over math.MaxInt32 bytes.
+func (w *RustBufferWriter) WriteBytes(b []byte) error {
+	n, err := lengthPrefix(len(b))
+	if err != nil {
+		return err
+	}
+	w.WriteInt32(n)
 	w.buf = append(w.buf, b...)
+	return nil
 }
 
 // RustBufferReader decodes big-endian typed primitives from a serialized byte stream.
@@ -228,9 +237,12 @@ func (r *RustBufferReader) ReadString() (string, error) {
 	if int(l) > r.Remaining() {
 		return "", fmt.Errorf("%w: requested string of %d bytes, only %d available", ErrBufferUnderflow, l, r.Remaining())
 	}
-	s := string(r.buf[r.offset : r.offset+int(l)])
+	raw := r.buf[r.offset : r.offset+int(l)]
+	if !utf8.Valid(raw) {
+		return "", fmt.Errorf("%w: %d-byte string", ErrInvalidEncoding, l)
+	}
 	r.offset += int(l)
-	return s, nil
+	return string(raw), nil
 }
 
 // ReadBytes reads a 4-byte length-prefixed byte slice.

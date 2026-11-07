@@ -1,8 +1,6 @@
 //! Reference Rust engine implementing UniFFI-compatible serialization and
 //! execution on top of the Gusset runtime contract (`gusset::JobContext`, `set_engine_handler`).
 
-#![allow(dead_code)]
-
 use gusset::{set_engine_handler, JobContext, JobOutput};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
@@ -41,6 +39,12 @@ pub fn init_uniffi_engine() {
 
 /// Dispatch handler registered with Gusset's worker pool.
 pub fn uniffi_dispatch_handler(ctx: &JobContext, input: &[u8]) -> Result<JobOutput, String> {
+    dispatch(ctx, input, &OPERATIONS_COUNTER)
+}
+
+/// The handler body with the operations counter passed in, so tests drive it
+/// with their own counter instead of the process-wide one.
+fn dispatch(ctx: &JobContext, input: &[u8], counter: &AtomicI64) -> Result<JobOutput, String> {
     if input.is_empty() {
         return Err("uniffi: empty payload".to_string());
     }
@@ -49,7 +53,7 @@ pub fn uniffi_dispatch_handler(ctx: &JobContext, input: &[u8]) -> Result<JobOutp
     let payload = &input[1..];
 
     match fn_id {
-        FN_CALCULATE => handle_calculate(payload),
+        FN_CALCULATE => handle_calculate(payload, counter),
         FN_TRANSFORM_TEXT => handle_transform_text(payload),
         FN_EXECUTE_SLOW_JOB => handle_slow_job(ctx, payload),
         FN_TRIGGER_PANIC => {
@@ -62,7 +66,7 @@ pub fn uniffi_dispatch_handler(ctx: &JobContext, input: &[u8]) -> Result<JobOutp
     }
 }
 
-fn handle_calculate(mut input: &[u8]) -> Result<JobOutput, String> {
+fn handle_calculate(mut input: &[u8], counter: &AtomicI64) -> Result<JobOutput, String> {
     let op = read_string(&mut input)?;
     let a = read_f64(&mut input)?;
     let b = read_f64(&mut input)?;
@@ -71,22 +75,22 @@ fn handle_calculate(mut input: &[u8]) -> Result<JobOutput, String> {
 
     match op.as_str() {
         "Add" => {
-            OPERATIONS_COUNTER.fetch_add(1, Ordering::Relaxed);
+            counter.fetch_add(1, Ordering::Relaxed);
             write_u8(&mut out, STATUS_SUCCESS);
             write_f64(&mut out, a + b);
-            write_i64(&mut out, OPERATIONS_COUNTER.load(Ordering::Relaxed));
+            write_i64(&mut out, counter.load(Ordering::Relaxed));
         }
         "Subtract" => {
-            OPERATIONS_COUNTER.fetch_add(1, Ordering::Relaxed);
+            counter.fetch_add(1, Ordering::Relaxed);
             write_u8(&mut out, STATUS_SUCCESS);
             write_f64(&mut out, a - b);
-            write_i64(&mut out, OPERATIONS_COUNTER.load(Ordering::Relaxed));
+            write_i64(&mut out, counter.load(Ordering::Relaxed));
         }
         "Multiply" => {
-            OPERATIONS_COUNTER.fetch_add(1, Ordering::Relaxed);
+            counter.fetch_add(1, Ordering::Relaxed);
             write_u8(&mut out, STATUS_SUCCESS);
             write_f64(&mut out, a * b);
-            write_i64(&mut out, OPERATIONS_COUNTER.load(Ordering::Relaxed));
+            write_i64(&mut out, counter.load(Ordering::Relaxed));
         }
         "Divide" => {
             if b == 0.0 {
@@ -94,10 +98,10 @@ fn handle_calculate(mut input: &[u8]) -> Result<JobOutput, String> {
                 write_i32(&mut out, MATH_ERR_DIVISION_BY_ZERO);
                 write_string(&mut out, "division by zero");
             } else {
-                OPERATIONS_COUNTER.fetch_add(1, Ordering::Relaxed);
+                counter.fetch_add(1, Ordering::Relaxed);
                 write_u8(&mut out, STATUS_SUCCESS);
                 write_f64(&mut out, a / b);
-                write_i64(&mut out, OPERATIONS_COUNTER.load(Ordering::Relaxed));
+                write_i64(&mut out, counter.load(Ordering::Relaxed));
             }
         }
         "Sqrt" => {
@@ -106,10 +110,10 @@ fn handle_calculate(mut input: &[u8]) -> Result<JobOutput, String> {
                 write_i32(&mut out, MATH_ERR_NEGATIVE_ROOT);
                 write_string(&mut out, "cannot compute square root of negative number");
             } else {
-                OPERATIONS_COUNTER.fetch_add(1, Ordering::Relaxed);
+                counter.fetch_add(1, Ordering::Relaxed);
                 write_u8(&mut out, STATUS_SUCCESS);
                 write_f64(&mut out, a.sqrt());
-                write_i64(&mut out, OPERATIONS_COUNTER.load(Ordering::Relaxed));
+                write_i64(&mut out, counter.load(Ordering::Relaxed));
             }
         }
         unknown => {
@@ -216,10 +220,6 @@ fn write_u8(out: &mut Vec<u8>, v: u8) {
     out.push(v);
 }
 
-fn write_bool(out: &mut Vec<u8>, v: bool) {
-    out.push(if v { 1 } else { 0 });
-}
-
 fn write_i32(out: &mut Vec<u8>, v: i32) {
     out.extend_from_slice(&v.to_be_bytes());
 }
@@ -236,4 +236,135 @@ fn write_string(out: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     write_i32(out, bytes.len() as i32);
     out.extend_from_slice(bytes);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gusset::CallHeader;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    const GOLDEN: &str = include_str!("../../testdata/golden.txt");
+
+    fn ctx() -> JobContext {
+        JobContext::new(CallHeader::default(), Arc::new(AtomicBool::new(false)))
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        assert!(s.len().is_multiple_of(2), "odd-length hex {s:?}");
+        (0..s.len())
+            .step_by(2)
+            .map(|i| {
+                u8::from_str_radix(&s[i..i + 2], 16)
+                    .unwrap_or_else(|e| panic!("bad hex digit in {s:?}: {e}"))
+            })
+            .collect()
+    }
+
+    /// Runs one request and returns the response bytes, failing the test on an
+    /// engine error. (clippy.toml forbids unwrap/expect, tests included.)
+    fn run(req: &[u8], counter: &AtomicI64) -> Vec<u8> {
+        match dispatch(&ctx(), req, counter) {
+            Ok(out) => bytes(out),
+            Err(e) => panic!("engine error for request {req:?}: {e}"),
+        }
+    }
+
+    fn bytes(out: JobOutput) -> Vec<u8> {
+        match out {
+            JobOutput::Bytes(v) => v,
+            other => panic!("unexpected output kind {other:?}"),
+        }
+    }
+
+    /// Every response column of testdata/golden.txt, byte for byte. The Go
+    /// tests read the same file, so a wire change here fails both sides.
+    #[test]
+    fn golden_vectors_match_engine_bytes() {
+        let counter = AtomicI64::new(0);
+        let mut compared = 0;
+        for line in GOLDEN
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(cols.len(), 3, "malformed golden line {line:?}");
+            if cols[2] == "-" {
+                continue;
+            }
+            let got = run(&unhex(cols[1]), &counter);
+            assert_eq!(got, unhex(cols[2]), "vector {}", cols[0]);
+            compared += 1;
+        }
+        assert!(compared >= 10, "only {compared} vectors compared");
+    }
+
+    #[test]
+    fn empty_payload_and_unknown_opcode_are_errors() {
+        let counter = AtomicI64::new(0);
+        assert_eq!(
+            dispatch(&ctx(), &[], &counter).unwrap_err(),
+            "uniffi: empty payload"
+        );
+        assert_eq!(
+            dispatch(&ctx(), &[9], &counter).unwrap_err(),
+            "uniffi: unknown function opcode 9"
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_string_is_rejected() {
+        let counter = AtomicI64::new(0);
+        let req = [FN_TRANSFORM_TEXT, 0, 0, 0, 2, 0xff, 0xfe, 0, 0];
+        let err = dispatch(&ctx(), &req, &counter).unwrap_err();
+        assert!(err.starts_with("invalid UTF-8 in string"), "{err}");
+    }
+
+    #[test]
+    fn truncated_payloads_underflow() {
+        let counter = AtomicI64::new(0);
+        for req in [
+            vec![FN_CALCULATE],
+            vec![FN_CALCULATE, 0, 0, 0, 3, b'A', b'd', b'd'],
+            vec![FN_TRANSFORM_TEXT, 0, 0, 0, 9, b'a'],
+            vec![FN_EXECUTE_SLOW_JOB, 0, 0],
+        ] {
+            let err = dispatch(&ctx(), &req, &counter).unwrap_err();
+            assert!(err.starts_with("underflow"), "{req:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn negative_string_length_is_underflow_not_a_huge_read() {
+        let counter = AtomicI64::new(0);
+        let req = [FN_TRANSFORM_TEXT, 0xff, 0xff, 0xff, 0xff, 0, 0];
+        let err = dispatch(&ctx(), &req, &counter).unwrap_err();
+        assert!(err.starts_with("underflow"), "{err}");
+    }
+
+    #[test]
+    fn slow_job_completes_and_honours_cancel() {
+        let counter = AtomicI64::new(0);
+        let out = run(&[FN_EXECUTE_SLOW_JOB, 0, 0, 0, 0], &counter);
+        assert_eq!(out[0], STATUS_SUCCESS);
+        assert!(out.ends_with(&[0, 0, 0, 9, b'c', b'o', b'm', b'p', b'l', b'e', b't', b'e', b'd']));
+
+        let flag = Arc::new(AtomicBool::new(true));
+        let cancelled = JobContext::new(CallHeader::default(), flag);
+        let err = dispatch(
+            &cancelled,
+            &[FN_EXECUTE_SLOW_JOB, 0, 0, 0x27, 0x10],
+            &counter,
+        )
+        .unwrap_err();
+        assert_eq!(err, "cancelled: Explicit");
+    }
+
+    #[test]
+    #[should_panic(expected = "deliberate panic")]
+    fn panic_opcode_panics() {
+        let counter = AtomicI64::new(0);
+        let _ = dispatch(&ctx(), &[FN_TRIGGER_PANIC], &counter);
+    }
 }

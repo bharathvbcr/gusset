@@ -488,7 +488,7 @@ We welcome contributions! Please review our community guidelines before submitti
 
 Gusset's design builds upon insights, hard-won lessons, and patterns from prior Go–Rust integration work:
 - **[rust2go](https://github.com/ihciah/rust2go)**: Pioneered parameter ownership and buffer passing across the boundary; informed Gusset's rejection of manual-assembly Go callbacks and `cgocheck=0`.
-- **[uniffi-bindgen-go](https://github.com/NordSecurity/uniffi-bindgen-go)**: The binding generator Gusset is meant to sit under; a worked example combining the two is provided in [`examples/uniffi_bindgen_go`](examples/uniffi_bindgen_go/). Gusset borrows its `RustBuffer` shape (ptr, len, capacity) as a design reference (`AGENTS.md`, Borrow and avoid).
+- **[uniffi-bindgen-go](https://github.com/NordSecurity/uniffi-bindgen-go)**: The binding generator Gusset is meant to sit under; a worked example combining the two is provided in [`examples/uniffi_bindgen_go`](examples/uniffi_bindgen_go/) (a typed Go client and a Rust reference engine, each tested in CI against shared golden wire bytes; the two are not linked into one binary). Gusset borrows its `RustBuffer` shape (ptr, len, capacity) as a design reference (`AGENTS.md`, Borrow and avoid).
 - **[iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2)**: Inspired Gusset's Phase 4 zero-copy shared memory IPC architecture for GPU hardware crash containment.
 - **[Stoolap](https://stoolap.io/blog/2026/04/08/calling-a-rust-library-from-go-with-cgo-disabled/)**: Established benchmark discipline demonstrating that engine compute, rather than FFI trampolines, dominates real workloads.
 - **[Tokio](https://tokio.rs/)**: Influenced Gusset's cooperative flag-based cancellation model across FFI rather than dropped futures.

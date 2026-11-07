@@ -67,19 +67,11 @@ Default UniFFI Go bindings rely on dynamic loading (`dlopen` / `.so` / `.dylib`)
 ## 3. Implementation Walkthrough
 
 ### The Wire Protocol: `RustBuffer`
-UniFFI passes arguments and return values across FFI using a structured buffer:
-
-```go
-type RustBuffer struct {
-    Capacity int64
-    Len      int64
-    Data     []byte
-}
-```
+UniFFI passes arguments and return values across FFI using a structured buffer of `(capacity, len, data)`. The Rust crate declares that layout as `RustBuffer`; the Go side needs only the serialized bytes, so it has no such type.
 
 The Go package `examples/uniffi_bindgen_go` provides `RustBufferWriter` and `RustBufferReader` implementing UniFFI's big-endian binary encoding:
-- Primitive numeric types (`int8` through `int64`, `uint8` through `uint64`, `float64`) are encoded in big-endian order.
-- Strings and byte slices are encoded with a 4-byte big-endian length prefix followed by UTF-8 bytes.
+- Numeric types are encoded in big-endian order. The methods that exist are `int8`, `int16`, `int32`, `int64`, `uint8`, `uint32` and `float64`, plus `bool` (one byte). There is no `uint16` or `uint64` method.
+- Strings and byte slices are encoded with a 4-byte big-endian length prefix followed by the bytes. `WriteString` and `WriteBytes` return `ErrStringTooLong` (and write nothing) past `math.MaxInt32` bytes, and `ReadString` returns `ErrInvalidEncoding` for bytes that are not valid UTF-8, as the Rust engine does. `ExecuteSlowJob` returns `ErrDelayOutOfRange` for a delay that does not fit the engine's 32-bit millisecond field.
 - Results use a 1-byte status header (`0 = Success`, `1 = Error`) followed by either the return value or a serialized error structure (`code + message`).
 
 ### The Gusset Transport Adapter
@@ -129,13 +121,20 @@ pub fn uniffi_dispatch_handler(ctx: &JobContext, input: &[u8]) -> Result<JobOutp
 
 ## 4. Running the Tests
 
-To execute the test suite:
+What is tested, and what is not:
+
+- **Rust engine** (`rust/`, its own Cargo workspace, so `cargo test --workspace` at the repository root skips it): CI runs `cargo clippy` and `cargo test` on it in the `unit` job. `make test` runs the same `cargo test`.
+- **Go client and wire code**: `go test ./...`, run by the same job.
+- **Golden wire bytes**: `testdata/golden.txt` holds request and response bytes. The Rust tests assert the engine produces exactly those responses; the Go tests assert the typed client produces exactly those requests and that the Go reference engine produces exactly those responses. A change to the wire format on either side fails that side's tests.
+- **Not tested: the typed client against the compiled Rust engine.** The typed client (opcodes 1-4) runs against `referenceEngineTransport`, a Go copy of the engine, and the real-handle tests use `gusset.WithDiagnosticEngine()` with diagnostic bytes. Linking them needs `init_uniffi_engine` exported as `extern "C"` and an umbrella staticlib holding both `libgusset` and this crate, which this example does not build.
 
 ```bash
 go test -v ./examples/uniffi_bindgen_go/...
+cargo test --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml
 ```
 
-The test suite covers:
+The Go test suite covers:
+0. `TestGolden_ClientAndReferenceEngineMatchRustBytes`: Ties the Go client and reference engine to the Rust engine's bytes through `testdata/golden.txt`.
 1. `TestRustBuffer_BinarySerialization`: Validates big-endian wire encoding, decoding, and underflow protections.
 2. `TestGussetUniFFI_Calculate_Success`: Tests typed domain calculations (`Add`, `Multiply`, `Sqrt`).
 3. `TestGussetUniFFI_Calculate_TypedErrors`: Tests typed domain error handling (`MathErrDivisionByZero`, `MathErrNegativeRoot`).
