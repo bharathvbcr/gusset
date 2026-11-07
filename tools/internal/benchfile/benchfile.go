@@ -180,6 +180,13 @@ func parseRow(line string, lineNo int) (Row, error) {
 	}
 
 	s := Sample{}
+	// Metrics come in (value, unit) pairs, so the tail has an even length. A
+	// dangling token is a cut or spliced line whose last metric has lost its
+	// unit; reading the pairs before it would chart a row that is not whole.
+	if (len(fields)-2)%2 != 0 {
+		return Row{}, fmt.Errorf("odd trailing token %q after the (value, unit) pairs: %s",
+			fields[len(fields)-1], truncate(line))
+	}
 	for i := 2; i+1 < len(fields); i += 2 {
 		v, err := strconv.ParseFloat(fields[i], 64)
 		if err != nil {
@@ -438,6 +445,48 @@ func (f *File) RequireProvenance() error {
 			return fmt.Errorf("%s: CPU was %.1f%% idle %s, below the %.0f%% floor this "+
 				"recording claims to enforce; the numbers describe the load, not the code",
 				f.Path, c.value, c.when, floor)
+		}
+	}
+	return f.checkRecordedCount()
+}
+
+// checkRecordedCount compares the rows each sub-benchmark has with the
+// `# gusset-bench-count` the recorder certified.
+//
+// record.sh runs every sub-benchmark COUNT times (go test -count, or COUNT
+// rounds), once per variant, so each name must have exactly COUNT rows times the
+// number of `variant-*` header lines (one when there are none). The structural
+// checks only compare sub-benchmarks with each other: a recording cut short
+// uniformly, or one that lost whole sub-benchmarks in some rounds, agrees with
+// itself and used to reach the README table and the charts. Equal counts across
+// every name also mean the same set of names appeared in every round, because a
+// name missing from a round has one row fewer than its siblings.
+func (f *File) checkRecordedCount() error {
+	raw, ok := f.Env.Raw["count"]
+	count, err := strconv.Atoi(raw)
+	if !ok || err != nil || count < 1 {
+		return fmt.Errorf("%s: provenance header has no usable gusset-bench-count (%q), so "+
+			"the number of rows each sub-benchmark should have cannot be checked", f.Path, raw)
+	}
+	variants := 0
+	for key := range f.Env.Raw {
+		if strings.HasPrefix(key, "variant-") {
+			variants++
+		}
+	}
+	want := count * max(variants, 1)
+
+	names := make([]string, 0, len(f.ByName))
+	for name := range f.ByName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if got := len(f.ByName[name]); got != want {
+			return fmt.Errorf("%s: %q has %d row(s) but gusset-bench-count %d with %d variant(s) "+
+				"promises %d. The recording lost samples, or a sub-benchmark did not run in "+
+				"every round, so its median is not the one the header describes. Re-record it",
+				f.Path, name, got, count, max(variants, 1), want)
 		}
 	}
 	return nil
