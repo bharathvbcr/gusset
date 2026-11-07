@@ -522,6 +522,39 @@ func FuzzTicketReaderFakeRing(f *testing.F) {
 	})
 }
 
+// ringStallState describes a reader the watchdog gave up on: the ring's shared
+// words and every slot's sequence word, read atomically, then the reader's own
+// cursors and the tickets still owed. Nightly 41442688300 failed with only
+// "reader stalled with 1 completions outstanding" and its input does not
+// replay, so the next occurrence has to carry its own evidence: a published
+// slot at the reader's position with the reader parked is a lost wake-up, a
+// waiting flag still set with no slot published is a lost completion, and an
+// overflow count ahead of overflowSeen is a pipe record never read.
+//
+// The reader goroutine is still blocked inside next, so its fields are read
+// without synchronisation. This runs only on the failure path, where a race
+// report is more evidence, not a second defect.
+func ringStallState(tr *ticketReader, want map[uint64][]byte) string {
+	var b strings.Builder
+	waiting := atomic.LoadUint32((*uint32)(unsafe.Add(tr.ring.Shared, ffi.RingOffWaiting)))
+	overflow := atomic.LoadUint64((*uint64)(unsafe.Add(tr.ring.Shared, ffi.RingOffOverflow)))
+	fmt.Fprintf(&b, "ring: capacity %d, waiting %d, overflow %d\n", tr.ring.Capacity, waiting, overflow)
+	for i := uint64(0); i < tr.ring.Capacity; i++ {
+		seq := atomic.LoadUint64((*uint64)(unsafe.Add(tr.ring.Slots, uintptr(i)*ffi.RingSlotBytes)))
+		fmt.Fprintf(&b, "  slot %d: sequence %d\n", i, seq)
+	}
+	headSeq := atomic.LoadUint64((*uint64)(tr.ringSlot()))
+	fmt.Fprintf(&b, "reader: head %d (slot %d, sequence %d, published %t), overflowSeen %d, tokensOwed %d, buffered %d bytes\n",
+		tr.head, tr.head&tr.mask, headSeq, headSeq == tr.head+1, tr.overflowSeen, tr.tokensOwed, tr.end-tr.start)
+	owed := make([]uint64, 0, len(want))
+	for tk := range want {
+		owed = append(owed, tk)
+	}
+	slices.Sort(owed)
+	fmt.Fprintf(&b, "outstanding tickets: %v", owed)
+	return b.String()
+}
+
 // FuzzTicketReaderRustRing: the real Rust encoder (pool::inline_record) and
 // ring against this parser. Pool 1, ring capacity 2: completions beyond two
 // unread spill to the pipe, so both paths carry Rust-built records. Payloads
@@ -556,8 +589,11 @@ func FuzzTicketReaderRustRing(f *testing.F) {
 			select {
 			case got = <-ch:
 			case <-time.After(readerWatchdog):
+				state := ringStallState(tr, want)
 				_ = r.SetReadDeadline(time.Now())
-				t.Fatalf("reader stalled with %d completions outstanding", len(want))
+				buf := make([]byte, 1<<20)
+				t.Fatalf("reader stalled with %d completions outstanding\n%s\n%s",
+					len(want), state, buf[:runtime.Stack(buf, true)])
 			}
 			if got.err != nil {
 				t.Fatalf("next: %v", got.err)
