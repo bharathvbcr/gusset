@@ -711,3 +711,43 @@ func TestPanicFirewall_NonStringAndDoublePanicDestructor(t *testing.T) {
 		}
 	}
 }
+
+// TestUncollected_DeadlineTurnsTheBlockAtTheCeilingIntoErrTooManyUncollected pins the
+// contract Submit documents (A3-1): with the ceiling at 2, a pool of 1 and two
+// uncollected results, the third Submit blocks, and only its ctx deadline ends
+// the block, with an error that matches both ErrTooManyUncollected and
+// context.DeadlineExceeded. A pool of 1 makes the ceiling exact: the third Submit
+// cannot take its permit until the second job has stored its result, so it
+// always sees two uncollected results. A characterization test: it passes on the
+// code before the doc change, which is the fix for this item.
+func TestUncollected_DeadlineTurnsTheBlockAtTheCeilingIntoErrTooManyUncollected(t *testing.T) {
+	h, err := gusset.Open(
+		gusset.WithPoolSize(1),
+		gusset.WithDiagnosticEngine(),
+		gusset.WithMaxUncollected(2),
+	)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	in := []byte{0, 1, 2, 3} // mode 0 echo
+	for i := 0; i < 2; i++ {
+		if _, err := h.Submit(context.Background(), in); err != nil {
+			t.Fatalf("Submit %d under the ceiling failed: %v", i, err)
+		}
+	}
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(250*time.Millisecond))
+	defer cancel()
+	_, err = h.Submit(ctx, in)
+	if err == nil {
+		t.Fatal("third Submit at the ceiling returned a ticket; want it blocked until its deadline")
+	}
+	if !errors.Is(err, gusset.ErrTooManyUncollected) {
+		t.Fatalf("third Submit = %v, want errors.Is(err, ErrTooManyUncollected)", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("third Submit = %v, want errors.Is(err, context.DeadlineExceeded)", err)
+	}
+}
