@@ -74,7 +74,12 @@ func oracleParse(b []byte) ([]fuzzRecord, oracleEnd) {
 			return out, endEOF
 		}
 		w := binary.NativeEndian.Uint64(b)
+		// Ticket 0 is not a completion without a ring (tickets start at 1); the
+		// reader refuses it once the whole record is buffered.
 		if w&ffi.InlineRecordFlag == 0 {
+			if w == 0 {
+				return out, endCorrupt
+			}
 			out = append(out, fuzzRecord{ticket: w})
 			b = b[8:]
 			continue
@@ -89,6 +94,9 @@ func oracleParse(b []byte) ([]fuzzRecord, oracleEnd) {
 		size := 16 + (int(n)+7)/8*8
 		if len(b) < size {
 			return out, endEOF
+		}
+		if w&^ffi.InlineRecordFlag == 0 {
+			return out, endCorrupt
 		}
 		out = append(out, fuzzRecord{
 			ticket: w &^ ffi.InlineRecordFlag,
@@ -324,7 +332,8 @@ func recordsFromFuzz(b []byte) []fuzzRecord {
 		var tb [8]byte
 		copy(tb[:7], b[1:8])
 		b = b[8:]
-		rec := fuzzRecord{ticket: binary.LittleEndian.Uint64(tb[:]) &^ ffi.InlineRecordFlag}
+		// A ticket is never 0: tickets start at 1 and the reader refuses 0.
+		rec := fuzzRecord{ticket: max(1, binary.LittleEndian.Uint64(tb[:])&^ffi.InlineRecordFlag)}
 		if kind&1 == 1 {
 			rec.inline = true
 			n := 0
@@ -748,6 +757,13 @@ func FuzzRingSlotDecode(f *testing.F) {
 		if isInline && n > uint64(ffi.InlineResultMax) {
 			if err == nil {
 				t.Fatalf("length %d accepted", n)
+			}
+			return
+		}
+		if w0&^ffi.InlineRecordFlag == 0 {
+			// Tickets start at 1 and a ring slot never carries a wake token.
+			if err == nil {
+				t.Fatalf("ticket 0 accepted from word %#x", w0)
 			}
 			return
 		}
