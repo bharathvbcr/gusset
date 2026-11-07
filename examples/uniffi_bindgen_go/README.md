@@ -133,6 +133,12 @@ go test -v ./examples/uniffi_bindgen_go/...
 cargo test --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml
 ```
 
+`rust/Cargo.lock` is this crate's own lockfile and pins gusset's dependencies (`libc`, `static_assertions`) separately from the root `Cargo.lock`. CI builds it with `--locked`, so a change to the dependencies in `crates/gusset/Cargo.toml` fails the `unit` job until the same change runs:
+
+```bash
+cargo update --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml
+```
+
 The Go test suite covers:
 0. `TestGolden_ClientAndReferenceEngineMatchRustBytes`: Ties the Go client and reference engine to the Rust engine's bytes through `testdata/golden.txt`.
 1. `TestRustBuffer_BinarySerialization`: Validates big-endian wire encoding, decoding, and underflow protections.
