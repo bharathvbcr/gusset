@@ -145,17 +145,25 @@ step_govulncheck() {
 # file:line. Two enforcers for one rule means the cruder one eventually fires on
 # the stricter one's source.
 step_forbidden_patterns() {
-	sources=$(git ls-files '*.go' '*.rs') || {
-		echo "git ls-files failed; the audit did not run" >&2
-		return 1
-	}
 	fail=0
 	# check <pattern> <message> [code-only]: with code-only, a hit on a line that
 	# is a // comment is prose about the rule (gusset.go's package doc names the
 	# thing it is not), not a use of it. Never for a pattern that is itself a
 	# comment directive, such as //go:linkname.
+	#
+	# git grep exits 0 on a hit, 1 on none and 2 or more on an error. The
+	# audit used to pipe tracked paths through xargs, which folds grep's 1 (no
+	# match, the normal case) and 2 (could not read, the broken case) into one
+	# status 123, so the only safe reading was to ignore it and a failed grep
+	# looked like a clean tree. Anything above 1 is now a FAIL.
 	check() {
-		hits=$(printf '%s\n' "$sources" | xargs grep -nF -- "$1" /dev/null)
+		rc=0
+		hits=$(git grep -nF -e "$1" -- '*.go' '*.rs') || rc=$?
+		if [ "$rc" -gt 1 ]; then
+			echo "::error::the forbidden-pattern audit could not search for '$1' (git grep exit $rc); it did not run"
+			fail=1
+			return
+		fi
 		if [ -n "$hits" ] && [ "${3:-}" = code-only ]; then
 			hits=$(printf '%s\n' "$hits" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//')
 		fi
@@ -238,8 +246,12 @@ step_cargo_fmt() { cargo fmt --all -- --check; }
 # fuzz/ is its own workspace, so the root check never sees its dependencies.
 step_cargo_deny() {
 	need cargo-deny "cargo-deny $CARGO_DENY_VERSION" "cargo install cargo-deny --locked --version $CARGO_DENY_VERSION" --version || return 1
-	cargo deny check || return 1
-	cargo deny --manifest-path fuzz/Cargo.toml check
+	# Both workspaces always run: a failure in the root must not hide the fuzz
+	# workspace's verdict, which is the point of the second invocation.
+	deny_rc=0
+	cargo deny check || deny_rc=1
+	cargo deny --manifest-path fuzz/Cargo.toml check || deny_rc=1
+	return $deny_rc
 }
 
 install_tools() {

@@ -7,6 +7,10 @@ version = 2
 # unmaintained, the answer is an explicit, reasoned `ignore` entry, not a
 # narrower scope that stops looking.
 unmaintained = "all"
+# cargo-deny's default for a yanked crate is "warn", which exits 0: a locked
+# version its author pulled for a defect would pass the job. Deny it; the
+# answer to a yanked pin is to move the pin or add a reasoned `ignore` entry.
+yanked = "deny"
 
 [licenses]
 # v2 denies unlicensed crates by default (the old `unlicensed = "deny"`).

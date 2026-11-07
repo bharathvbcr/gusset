@@ -125,7 +125,13 @@ jobs:
             --target x86_64-unknown-linux-gnu \
             --test rust_runtime --test rust_shutdown \
             --test ffi_null_status --test engine_error_bounded \
-            --test drain_logs_boundaries --test counting_global_buffers
+            --test drain_logs_boundaries --test counting_global_buffers \
+            --test rust_deadline --test rust_worker_containment \
+            --test rust_status_overwrite --test rust_counting_flip \
+            --test resource_hygiene --test hygiene_baseline \
+            --test handle_fd_reuse --test engine_registry_recovery \
+            --test boundary_props --test log_ring_props \
+            --test log_ring_contention
 
       # BufferAlloc, Counting as an Allocator, and the adopted buffer's manual
       # dealloc(capacity, 64). Not under -Zbuild-std: the allocator probe cannot
@@ -140,7 +146,8 @@ jobs:
           GUSSET_EXPECT_ALLOCATOR_API: '1'
         run: |
           cargo test --locked -p gusset --target x86_64-unknown-linux-gnu \
-            --test rust_allocator_api --test rust_allocator_counting --test rust_sigpipe
+            --test rust_allocator_api --test rust_allocator_counting --test rust_sigpipe \
+            --test rust_unwind_reclaim
 
       # R4's deliberate cross-free, which this job named and did not have. Without
       # a violation ASan is supposed to catch, a green ASan run only shows the code
@@ -156,14 +163,34 @@ jobs:
       # go test -asan is linux-only; it is unsupported on darwin/arm64, so this
       # assertion cannot run on a developer Mac and the test reports SKIP there
       # rather than passing.
+      #
+      # The step needs the archive internal/ffi links (target/release/libgusset.a)
+      # and go generate's record of it; without them the build fails at
+      # `cannot find -lgusset` and, with no pipefail, tee's status hid that for
+      # months (runs 40179055849 to 42213999483). The archive is built the way
+      # the hammer job's ASan step builds it (below): instrumented, prebuilt std,
+      # no -Zbuild-std, because the Go -asan binary supplies the ASan runtime and
+      # links the archive as an ordinary staticlib. The pass condition is the
+      # literal PASS line, not the absence of SKIP: a build failure, a filtered-out
+      # test and a skip all lack it.
+      - name: Build the ASan release archive for the Go -asan link
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+        run: |
+          cargo build --locked --release -p gusset --target x86_64-unknown-linux-gnu
+          mkdir -p target/release
+          cp target/x86_64-unknown-linux-gnu/release/libgusset.a target/release/libgusset.a
+          go generate ./internal/ffi
+
       - name: R4 cross-free must be detected
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
+          set -o pipefail
           go test -asan -v -count=1 -timeout 10m \
             -run 'TestR4_CrossFreeIsDetectedUnderASan' ./tests/pitfalls/ | tee asan_go.txt
-          if grep -q 'SKIP' asan_go.txt; then
-            echo "::error::the cross-free test skipped under -asan; the asan build tag is not set"
+          if ! grep -qE '^--- PASS: TestR4_CrossFreeIsDetectedUnderASan( |$)' asan_go.txt; then
+            echo "::error::--- PASS: TestR4_CrossFreeIsDetectedUnderASan is not in the output; the R4 cross-free test did not run and pass under -asan"
             exit 1
           fi
 
