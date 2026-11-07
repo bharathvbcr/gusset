@@ -189,6 +189,7 @@ step_forbidden_patterns() {
 #   CHANGELOG.md      the newest `## [x.y.z]` heading ([Unreleased] ones skipped)
 #   SECURITY.md       the one supported row `vx.y.z` and the `< vx.y.z` row
 #   install.sh        GUSSET_DEFAULT_REF="vx.y.z", the tag a piped install clones
+#                     (and GUSSET_DEFAULT_COMMIT, its commit; see vp_baked_commit)
 #   docs/adoption.md  the gusset_core git dependency's tag = "vx.y.z"
 # Each must yield exactly one x.y.z: an input this cannot read is a FAIL, not a
 # match nobody checked.
@@ -233,7 +234,46 @@ step_version_parity() {
 		"$(sed -n 's/^GUSSET_DEFAULT_REF="v\([^"]*\)"$/\1/p' install.sh)" || fail=1
 	vp_check "docs/adoption.md gusset_core tag" \
 		"$(sed -n 's/^gusset_core = {.* git = .*tag = "v\([^"]*\)".*/\1/p' docs/adoption.md)" || fail=1
+	vp_baked_commit || fail=1
 	return $fail
+}
+
+# install.sh's GUSSET_DEFAULT_COMMIT is the commit a default install of
+# GUSSET_DEFAULT_REF must resolve to. It must be one 40-hex commit and equal the
+# tag's commit. The tag is read from this checkout, else from origin with a
+# read-only `git ls-remote` (a CI checkout has no tags). If origin cannot be
+# asked, the commit was not verified and that is a FAIL. If origin answers and
+# has no such tag, this is the release window (the release PR bumps the version
+# before the tag exists): a ::warning:: and a pass. Release order: bump the
+# version and GUSSET_DEFAULT_REF, tag, then bake the tag's commit (DECISIONS.md).
+vp_baked_commit() {
+	vp_ref=$(sed -n 's/^GUSSET_DEFAULT_REF="\([^"]*\)"$/\1/p' install.sh)
+	vp_sha=$(sed -n 's/^GUSSET_DEFAULT_COMMIT="\([^"]*\)"$/\1/p' install.sh)
+	if [ "$(printf '%s' "$vp_sha" | grep -c '')" -ne 1 ] || ! printf '%s\n' "$vp_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+		echo "::error::version-parity: install.sh GUSSET_DEFAULT_COMMIT: '$vp_sha' is not exactly one 40-hex commit"
+		return 1
+	fi
+	vp_where="this checkout"
+	vp_tagged=$(git rev-parse -q --verify "refs/tags/$vp_ref^{commit}" 2>/dev/null) || vp_tagged=""
+	if [ -z "$vp_tagged" ]; then
+		vp_where="origin"
+		if ! vp_remote=$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags origin "refs/tags/$vp_ref" "refs/tags/$vp_ref^{}" 2>&1); then
+			echo "::error::version-parity: install.sh GUSSET_DEFAULT_COMMIT $vp_sha was not verified: tag $vp_ref is not in this checkout and origin could not be asked: $vp_remote"
+			return 1
+		fi
+		# The peeled line is the commit of an annotated tag; a lightweight tag has only the first.
+		vp_tagged=$(printf '%s\n' "$vp_remote" | awk -v r="refs/tags/$vp_ref" '$2 == r "^{}" { p = $1 } $2 == r { t = $1 } END { print (p != "" ? p : t) }')
+		if [ -z "$vp_tagged" ]; then
+			echo "::warning::version-parity: install.sh GUSSET_DEFAULT_COMMIT $vp_sha NOT VERIFIED: tag $vp_ref exists neither here nor on origin (the release window; bake the tag's commit after tagging)"
+			echo "  install.sh GUSSET_DEFAULT_COMMIT: $vp_sha (NOT VERIFIED: no tag $vp_ref yet)"
+			return 0
+		fi
+	fi
+	if [ "$vp_tagged" != "$vp_sha" ]; then
+		echo "::error::version-parity: install.sh GUSSET_DEFAULT_COMMIT $vp_sha, but tag $vp_ref is $vp_tagged ($vp_where)"
+		return 1
+	fi
+	echo "  install.sh GUSSET_DEFAULT_COMMIT: $vp_sha (= $vp_ref, from $vp_where)"
 }
 
 # --all-targets: without it clippy skips test targets, and the R3
