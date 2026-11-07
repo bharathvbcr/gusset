@@ -242,6 +242,31 @@ mod tests {
         }
     }
 
+    /// A C host that leaves `GUSSET_FLAG_INLINE_COMPLETION` clear takes every
+    /// result through `gusset_take`, and a result of 4 KiB or less arrives in a
+    /// registry buffer without `GUSSET_TAKE_OWNED_FLAG`. The header is all it
+    /// reads, so the free rule, the empty-result encoding and the pointer's
+    /// lifetime must be in it.
+    #[test]
+    fn gusset_take_comment_states_the_ownership_contract() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../internal/ffi/gusset.h");
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => panic!("cannot read {}: {e}", path.display()),
+        };
+        for sentence in [
+            "Every nonzero out_buf_id, flagged or not, is released with gusset_buf_free(id & ~GUSSET_TAKE_OWNED_FLAG).",
+            "An out_buf_id of 0 with a NULL out_ptr means an empty result.",
+            "The out_ptr stays valid until that free.",
+        ] {
+            assert!(
+                src.contains(sentence),
+                "gusset.h lost the gusset_take sentence {sentence:?}"
+            );
+        }
+    }
+
     #[test]
     fn known_flags_are_exactly_the_documented_bits() {
         assert_eq!(GUSSET_FLAG_DIAGNOSTIC_ENGINE, 1);
