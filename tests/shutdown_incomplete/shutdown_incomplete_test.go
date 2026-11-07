@@ -7,9 +7,10 @@ package shutdown_incomplete_test
 // so a test that calls it cannot share a process with any test that submits
 // afterwards (the same reason tests/shutdown and tests/rust/rust_shutdown.rs are
 // binaries of their own). tests/shutdown cannot cover this: its work is
-// cooperative, so every drain there is clean, and its comment on
-// TestShutdown_ReportsWorkItCouldNotDrain says "nothing in flight" and accepts
-// a nil error. A Shutdown that returned nil with undrained work passed it.
+// cooperative, so every drain there is clean, and its zero-budget test
+// (TestShutdown_WithNothingInFlightReturnsCleanlyForAnyBudget, once named
+// ReportsWorkItCouldNotDrain) has nothing in flight and requires a nil error.
+// A Shutdown that returned nil with undrained work would pass it.
 //
 // Diagnostic mode 17 holds without calling JobContext::check, which is the
 // shape of a real adopter engine and the only kind of work Shutdown cannot
