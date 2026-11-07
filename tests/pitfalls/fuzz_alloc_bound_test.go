@@ -29,10 +29,13 @@ func TestFuzzDiagnosticTarget_BoundsModeSixteenAllocation(t *testing.T) {
 	under := []byte{16, 0xFF, 0xFF, 0x0F, 0, 7}
 	short := []byte{16, 1, 2}
 	other := []byte{0, 0xFF, 0xFF, 0xFF, 0xFF}
+	// One byte over the engine's cap: refused before any allocation, so the
+	// refusal path must still be reachable from the fuzzer.
+	overCap := []byte{16, 0x01, 0x00, 0x00, 0x40, 7}
 
 	rec := &lengthRecorder{}
 	d := &diagFuzzer{h: rec, open: func() (diagHandle, error) { return rec, nil }}
-	for _, in := range [][]byte{huge, exact, under, short, other} {
+	for _, in := range [][]byte{huge, exact, under, short, other, overCap} {
 		before := append([]byte(nil), in...)
 		if msgs := iterate(d, in); len(msgs) != 0 {
 			t.Fatalf("input % x reported %q", in, msgs)
@@ -41,8 +44,11 @@ func TestFuzzDiagnosticTarget_BoundsModeSixteenAllocation(t *testing.T) {
 			t.Errorf("input % x was edited in place to % x", before, in)
 		}
 	}
-	if len(rec.payloads) != 5 {
-		t.Fatalf("%d calls reached the handle, want 5", len(rec.payloads))
+	if len(rec.payloads) != 6 {
+		t.Fatalf("%d calls reached the handle, want 6", len(rec.payloads))
+	}
+	if string(rec.payloads[5]) != string(overCap) {
+		t.Errorf("a length over MaxBufferBytes was altered to % x; the engine's refusal path is no longer fuzzed", rec.payloads[5])
 	}
 	for i, p := range rec.payloads[:2] {
 		if n := binary.LittleEndian.Uint32(p[1:5]); n >= fuzzAllocatedMax {

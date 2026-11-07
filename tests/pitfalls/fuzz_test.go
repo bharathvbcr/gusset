@@ -180,13 +180,15 @@ const fuzzAllocatedMax = 1 << 20
 
 // boundAllocatedLength returns payload with a mode-16 output length reduced
 // modulo fuzzAllocatedMax, copying rather than editing the fuzzer's bytes.
-// Every other payload is returned as it came.
+// A length over gusset.MaxBufferBytes passes through unchanged: the engine
+// refuses it before allocating anything, and that refusal is a path this
+// target must keep reaching. Every other payload is returned as it came.
 func boundAllocatedLength(payload []byte) []byte {
 	if len(payload) < 5 || payload[0] != 16 {
 		return payload
 	}
 	n := binary.LittleEndian.Uint32(payload[1:5])
-	if n < fuzzAllocatedMax {
+	if n < fuzzAllocatedMax || uint64(n) > gusset.MaxBufferBytes {
 		return payload
 	}
 	bounded := bytes.Clone(payload)
