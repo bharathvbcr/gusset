@@ -143,6 +143,11 @@ type Proc struct {
 	retireSent  bool
 	retireCause string
 
+	// pgid is the process group start created for the worker (its own pid),
+	// or 0 when the group is not one this package owns. killTree signals it
+	// only when it is set.
+	pgid int
+
 	// stall is the supervisor's liveness bound, 0 when there is none.
 	// stallArmed is true while a judgement timer is pending, so a ticket
 	// that is dropped and re-abandoned cannot stack a second one.
@@ -200,6 +205,7 @@ func start(ctx context.Context, cmd *exec.Cmd, retire chan struct{}, stall time.
 	if cmd.WaitDelay == 0 {
 		cmd.WaitDelay = waitDelay
 	}
+	ownProcessGroup(cmd)
 	err = cmd.Start()
 	_ = wr.Close() // the child holds the only write end that matters
 	if err != nil {
@@ -223,8 +229,9 @@ func start(ctx context.Context, cmd *exec.Cmd, retire chan struct{}, stall time.
 	if err == nil && (h.PoolSize < 1 || h.PoolSize > gusset.MaxPoolSize) {
 		err = fmt.Errorf("isolate: worker announced pool size %d outside [1, %d]", h.PoolSize, gusset.MaxPoolSize)
 	}
+	pgid := ownedGroup(cmd)
 	if err != nil {
-		_ = cmd.Process.Kill()
+		killTree(cmd, pgid)
 		_ = rd.Close()
 		_ = stdin.Close()
 		_ = cmd.Wait()
@@ -243,6 +250,7 @@ func start(ctx context.Context, cmd *exec.Cmd, retire chan struct{}, stall time.
 		closeDone:  make(chan struct{}),
 		retire:     retire,
 		stall:      stall,
+		pgid:       pgid,
 	}
 	// Exactly one goroutine calls cmd.Wait. It runs beside the reader: Wait
 	// is what starts WaitDelay, and a grandchild holding the protocol write
@@ -376,9 +384,65 @@ func (p *Proc) exited() bool {
 // failed. A worker that has already exited is reaped by waitProc; Kill here
 // would only race that Wait.
 func (p *Proc) killIfAlive() {
-	if !p.exited() && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
+	if !p.exited() {
+		p.killTree()
 	}
+}
+
+// ownProcessGroup puts the worker in a process group of its own, so a kill can
+// reach the helpers it spawned and not only the worker. A command that already
+// asked for a session (Setsid) is its own group leader and is left alone; one
+// that asked to join another group (Pgid != 0) keeps that choice, and
+// ownedGroup then reports no group this package may signal.
+//
+// Setpgid takes the worker out of the host's foreground process group. A
+// terminal's Ctrl-C (SIGINT) and job-control signals go to the foreground
+// group, so they no longer reach the worker directly: it learns the host is
+// going away from EOF on stdin, and the host's Close or a retirement ends it.
+func ownProcessGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	if cmd.SysProcAttr.Setsid || cmd.SysProcAttr.Pgid != 0 {
+		return
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+
+// ownedGroup is the process group id killTree may signal: the started worker's
+// own pid, when this package or the caller made it a group leader. It is 0
+// when the pid is unknown, is 1 or less, or is the host's own group. A group
+// signal to any of those is never sent.
+func ownedGroup(cmd *exec.Cmd) int {
+	if cmd.Process == nil || cmd.SysProcAttr == nil {
+		return 0
+	}
+	if !cmd.SysProcAttr.Setsid && !(cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0) {
+		return 0
+	}
+	pid := cmd.Process.Pid
+	if pid <= 1 || pid == syscall.Getpgrp() {
+		return 0
+	}
+	return pid
+}
+
+// killTree ends the worker and everything left in its group. The leader is
+// always killed; the group only when pgid is one ownedGroup vouched for.
+func killTree(cmd *exec.Cmd, pgid int) {
+	if pgid > 1 && pgid != syscall.Getpgrp() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+	if cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
+// killTree is the supervisor's and Close's kill. It is safe after the leader
+// has exited: the group may still hold descendants, and a group with members
+// keeps its id from being reused.
+func (p *Proc) killTree() {
+	killTree(p.cmd, p.pgid)
 }
 
 // streamSrc is the protocol pipe plus bytes peeled out of a bufio.Reader
@@ -502,23 +566,34 @@ func (p *Proc) Submit(ctx context.Context, in any) (uint64, error) {
 }
 
 func (p *Proc) submit(ctx context.Context, in []byte) (uint64, error) {
+	id, _, err := p.submitCounted(ctx, in)
+	return id, err
+}
+
+// submitCounted is submit that also says whether the request was certainly not
+// written to the worker. unsent is true for every refusal before the frame is
+// sent (closed, dead, poisoned, a context that ended while queued for a permit,
+// an oversized input). It is false once a write began, because a write that
+// failed may still have delivered bytes. A supervisor retries on a replacement
+// only when unsent is true.
+func (p *Proc) submitCounted(ctx context.Context, in []byte) (id uint64, unsent bool, err error) {
 	if err := p.refusal(); err != nil {
-		return 0, err
+		return 0, true, err
 	}
 	if len(in) > maxInlineInput {
-		return 0, gusset.ErrInputTooLarge
+		return 0, true, gusset.ErrInputTooLarge
 	}
 	req := request{Op: opSubmit, In: in}
 	if err := readContext(ctx, &req); err != nil {
-		return 0, err
+		return 0, true, err
 	}
 
 	select {
 	case p.sem <- struct{}{}:
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return 0, true, ctx.Err()
 	case <-p.readerDone:
-		return 0, p.refusal()
+		return 0, true, p.refusal()
 	}
 	// Stamped after the permit wait, so time queued here is not handed to
 	// the worker as time the job may still run (R9, I3).
@@ -528,7 +603,7 @@ func (p *Proc) submit(ctx context.Context, in []byte) (uint64, error) {
 	if err := p.refusalLocked(); err != nil {
 		p.mu.Unlock()
 		<-p.sem
-		return 0, err
+		return 0, true, err
 	}
 	p.next++
 	req.ID = p.next
@@ -551,19 +626,19 @@ func (p *Proc) submit(ctx context.Context, in []byte) (uint64, error) {
 		// A write that did not fail that way still waits for the reader: the
 		// refusal carries the worker's exit, which is the caller's error.
 		if ctx.Err() != nil {
-			return 0, ctx.Err()
+			return 0, false, ctx.Err()
 		}
 		select {
 		case <-p.readerDone:
 		case <-ctx.Done():
-			return 0, ctx.Err()
+			return 0, false, ctx.Err()
 		}
 		if refusal := p.refusal(); refusal != nil {
-			return 0, refusal
+			return 0, false, refusal
 		}
-		return 0, err
+		return 0, false, err
 	}
-	return req.ID, nil
+	return req.ID, false, nil
 }
 
 // send writes one frame. A context that ends while this call is waiting for
