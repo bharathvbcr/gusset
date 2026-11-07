@@ -8,7 +8,8 @@ mod engine;
 mod respawn;
 mod submit;
 pub(super) use respawn::{
-    injected_delay, DELAY_BEFORE_CLEAR, DELAY_BEFORE_REMOVE, FAILING_WORKER_MS,
+    injected_delay, injected_delay_ms, DELAY_AFTER_EXIT, DELAY_BEFORE_CLEAR, DELAY_BEFORE_REMOVE,
+    FAILING_WORKER_MS,
 };
 
 use super::*;

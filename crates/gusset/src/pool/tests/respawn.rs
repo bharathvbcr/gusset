@@ -14,12 +14,24 @@ pub(in crate::pool) static DELAY_BEFORE_CLEAR: Knob = Mutex::new(None);
 /// Delay inside a worker armed to fail its sigaltstack, before it reports.
 pub(in crate::pool) static FAILING_WORKER_MS: AtomicU64 = AtomicU64::new(0);
 
-pub(in crate::pool) fn injected_delay(knob: &Knob) {
-    let ms = match *lock_recover(knob) {
+/// Delay a worker sleeps after counting its own exit (`ExitMark::drop`) and
+/// before its thread ends, so `exited` is raised while `is_finished` is not.
+/// Armed on the spawning thread; a worker reads it once, at spawn.
+pub(in crate::pool) static DELAY_AFTER_EXIT: Knob = Mutex::new(None);
+
+/// The knob's delay if the calling thread armed it, else 0.
+pub(in crate::pool) fn injected_delay_ms(knob: &Knob) -> u64 {
+    match *lock_recover(knob) {
         Some((id, ms)) if id == thread::current().id() => ms,
-        _ => return,
-    };
-    thread::sleep(std::time::Duration::from_millis(ms));
+        _ => 0,
+    }
+}
+
+pub(in crate::pool) fn injected_delay(knob: &Knob) {
+    let ms = injected_delay_ms(knob);
+    if ms > 0 {
+        thread::sleep(std::time::Duration::from_millis(ms));
+    }
 }
 
 fn set(knob: &Knob, ms: u64) {
@@ -162,4 +174,73 @@ fn a_failed_worker_closed_away_is_not_uncounted() {
     unsafe {
         libc::close(r);
     }
+}
+
+/// A worker that has counted its exit but not yet ended must still be
+/// replaced by the submit that notices it. `ensure_workers` reaped by
+/// `is_finished`, which flips after `ExitMark` ran: that submit reaped
+/// nothing, spawned nothing, and queued its unit with no thread to run it
+/// until some later submit retried.
+#[test]
+#[cfg_attr(miri, ignore)] // pipe(2), worker threads and fcntl: not Miri-runnable
+fn a_submit_replaces_a_worker_that_is_still_dying() {
+    let _serialise = lock_recover(&INJECT_LOCK);
+    let (r, w) = make_pipe();
+    set(&DELAY_AFTER_EXIT, 1_500);
+    let opened = Handle::open(1, w);
+    *lock_recover(&DELAY_AFTER_EXIT) = None;
+    let handle = opened.must("open");
+
+    let kill = CallHeader {
+        trace_id: KILL_TRACE,
+        flags: GUSSET_FLAG_DIAGNOSTIC_ENGINE,
+        ..Default::default()
+    };
+    handle.submit(kill, &[9, 2], 0).must("kill submit");
+    assert!(
+        completion_ready_within(r, 5_000),
+        "kill job never completed"
+    );
+    read_ticket(r);
+    // Counted, and held in its drop by the injected delay: not finished.
+    let start = std::time::Instant::now();
+    while handle.exited.load(Ordering::Acquire) == 0 {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "worker never exited"
+        );
+        thread::yield_now();
+    }
+    assert!(
+        lock_recover(&handle.workers)
+            .iter()
+            .all(|h| !h.is_finished()),
+        "the window is not open: the worker already ended"
+    );
+
+    // One submit, no retry: the unit must run well inside the delay.
+    let t = handle.submit(header(), &[0, 1], 0).must("submit");
+    let ran = completion_ready_within(r, 1_000);
+    let seen = if ran { Some(read_ticket(r)) } else { None };
+    // Once the dying worker has ended, the next submit reaps it and the pool
+    // settles at its size.
+    thread::sleep(std::time::Duration::from_millis(1_700));
+    handle.submit(header(), &[0, 1], 0).must("settling submit");
+    assert!(completion_ready_within(r, 3_000), "settling unit never ran");
+    read_ticket(r);
+    let (len, exited) = (
+        lock_recover(&handle.workers).len(),
+        handle.exited.load(Ordering::Acquire),
+    );
+    let _ = handle.close();
+    // SAFETY: the read end is still this test's.
+    unsafe {
+        libc::close(r);
+    }
+    assert_eq!(
+        seen,
+        Some(t),
+        "a single submit left the queued unit without a running worker"
+    );
+    assert_eq!((len, exited), (1, 0), "the pool did not settle at its size");
 }
