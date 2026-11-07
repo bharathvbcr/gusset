@@ -674,12 +674,12 @@ func independentStepMismatches(want map[string][]string, lines []string) []strin
 }
 
 // The race detector and the GOGC=1 pass both have to see internal/, including
-// internal/isolate. The -v log is what lists it; this pins the command lines.
+// internal/isolate, and tests/e2e (concurrent Close, budget and GC-stress tests). The -v log is what lists it; this pins the command lines.
 func TestRaceAndGOGCCoverInternal(t *testing.T) {
 	matrix := strings.Join(workflows(t)["matrix.yml"], "\n")
 	for _, want := range []string{
-		"go test -race -v -timeout 20m . ./tests/pitfalls/... ./tests/panic_zoo/... ./internal/...",
-		"GOGC=1 go test -v -count=5 -timeout 20m . ./tests/panic_zoo/... ./tests/pitfalls/... ./internal/...",
+		"go test -race -v -timeout 20m . ./tests/e2e/... ./tests/pitfalls/... ./tests/panic_zoo/... ./internal/...",
+		"GOGC=1 go test -v -count=5 -timeout 20m . ./tests/e2e/... ./tests/panic_zoo/... ./tests/pitfalls/... ./internal/...",
 	} {
 		if !strings.Contains(matrix, want) {
 			t.Errorf("race job lost %q", want)
