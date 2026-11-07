@@ -801,7 +801,13 @@ jobs:
   bench:
     name: Benchmarks (R15)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The slowest green run took 17 min with ./bench alone. Gating the root and
+    # isolate packages adds about 10 min: 20 more runs of the 15-row
+    # CompletionTransport table and the two Call benchmarks at 1 s per row,
+    # twenty of the two isolate round trips, and four more test-binary builds.
+    # That would be past half of 45, so the limit is 60 and the expected
+    # runtime (about 27 min) stays under half of it.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -871,18 +877,54 @@ jobs:
           echo "BENCH_BASE=$BASE_SHA" >> "$GITHUB_ENV"
           cargo build --locked --release
           go test -c -o "$RUNNER_TEMP/new.test" ./bench
+          go test -c -o "$RUNNER_TEMP/new-root.test" .
+          go test -c -o "$RUNNER_TEMP/new-isolate.test" ./internal/isolate
           git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
-          (cd "$RUNNER_TEMP/base" && cargo build --locked --release && go test -c -o "$RUNNER_TEMP/old.test" ./bench)
+          (cd "$RUNNER_TEMP/base" && cargo build --locked --release \
+            && go test -c -o "$RUNNER_TEMP/old.test" ./bench \
+            && go test -c -o "$RUNNER_TEMP/old-root.test" . \
+            && go test -c -o "$RUNNER_TEMP/old-isolate.test" ./internal/isolate)
 
+      # Three packages are gated, not one. Every benchmark in ./bench runs
+      # (`-test.bench .`); the root package contributes the completion
+      # transport and the bare and traced Call, which had no gate, so a 30%
+      # slowdown of the ring or the registry lookup left CI green; and the
+      # isolate package contributes its two round-trip benchmarks. The names
+      # below and tests/ci/benchmark_lists_test.go (gatedBenchmarks) are
+      # checked against each other: a benchmark added to either place without
+      # the other fails `go test ./tests/ci`.
+      #
+      # BenchmarkSupervisorRestart and the two Rust benches are manual-only.
+      # A restart is dominated by the kernel starting a process, which swings
+      # far past 10% between runs on a shared runner, so gating it would fail
+      # on noise. The Rust pair (cargo bench -p gusset --bench dispatch and
+      # alloc_counters) compares its own arms inside one process and has no
+      # base-versus-head mode; `make bench-dispatch` and `make
+      # bench-alloc-counters` record it through bench/record.sh. The reasons
+      # are kept beside the lists in the test.
       - name: Benchmark both, interleaved
         if: env.BENCH_BASE != ''
+        env:
+          ROOT_BENCH: '^(BenchmarkCompletionTransport|BenchmarkCallNoopBare|BenchmarkCallNoopTraced)$'
+          ISOLATE_BENCH: '^(BenchmarkProcCallEcho|BenchmarkSupervisorCallEcho)$'
         run: |
           set -euo pipefail
+          # bench_side TAG DIR OUT: one run of each gated binary, appended to
+          # OUT. Each binary runs from its own package directory.
+          bench_side() {
+            local tag=$1 dir=$2 out=$3
+            local common=(-test.run '^$' -test.benchtime=1s -test.count=1 -test.benchmem)
+            {
+              (cd "$dir/bench" && "$RUNNER_TEMP/$tag.test" "${common[@]}" -test.bench .)
+              (cd "$dir" && "$RUNNER_TEMP/$tag-root.test" "${common[@]}" -test.bench "$ROOT_BENCH")
+              (cd "$dir/internal/isolate" && "$RUNNER_TEMP/$tag-isolate.test" "${common[@]}" -test.bench "$ISOLATE_BENCH")
+            } >> "$out"
+          }
           : > old.txt
           : > new.txt
           for _ in $(seq 10); do
-            (cd "$RUNNER_TEMP/base/bench" && "$RUNNER_TEMP/old.test" -test.run '^$' -test.bench . -test.benchtime=1s -test.count=1 -test.benchmem) >> old.txt
-            (cd bench && "$RUNNER_TEMP/new.test" -test.run '^$' -test.bench . -test.benchtime=1s -test.count=1 -test.benchmem) >> new.txt
+            bench_side old "$RUNNER_TEMP/base" old.txt
+            bench_side new "$PWD" new.txt
           done
 
       # benchstat exits non-zero only on error, so the threshold is applied by
@@ -896,7 +938,7 @@ jobs:
           set -euo pipefail
           benchstat old.txt new.txt | tee delta.txt
           benchstat -format csv old.txt new.txt > delta.csv
-          go run ./tools/ci/benchgate regress -threshold 10 delta.csv
+          go run ./tools/ci/benchgate regress -threshold 10 -min-samples 10 delta.csv
 
       - name: Benchmark this revision
         if: env.BENCH_BASE == ''
@@ -904,6 +946,7 @@ jobs:
           set -euo pipefail
           cargo build --locked --release
           go test -run '^$' -bench . -benchtime=1s -benchmem -count=10 ./bench/... > new.txt
+          go test -run '^$' -bench '^(BenchmarkCallNoopBare|BenchmarkCallNoopTraced)$' -benchtime=1s -benchmem -count=10 . >> new.txt
 
       # R5's noescape claim is only worth something if the allocation count it
       # enables is actually held. This used to run `benchstat | grep

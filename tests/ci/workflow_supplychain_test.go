@@ -399,13 +399,17 @@ func TestGateWiring(t *testing.T) {
 	if bounds == nil {
 		t.Fatal("Makefile has no ALLOC_BOUNDS")
 	}
-	benchSrc, err := os.ReadFile("../../bench/bench_test.go")
-	if err != nil {
-		t.Fatal(err)
+	var benchSrc strings.Builder
+	for _, f := range []string{"../../bench/bench_test.go", "../../handle_internal_test.go"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		benchSrc.Write(b)
 	}
 	for _, m := range regexp.MustCompile(`-max (\w+)=`).FindAllStringSubmatch(bounds[1], -1) {
-		if !strings.Contains(string(benchSrc), "func Benchmark"+m[1]+"(") {
-			t.Errorf("ALLOC_BOUNDS names %s, which bench/bench_test.go does not define: the gate would fail forever or, worse, be edited away", m[1])
+		if !strings.Contains(benchSrc.String(), "func Benchmark"+m[1]+"(") {
+			t.Errorf("ALLOC_BOUNDS names %s, which neither bench/bench_test.go nor handle_internal_test.go defines: the gate would fail forever or, worse, be edited away", m[1])
 		}
 	}
 	if !strings.Contains(matrix, "make alloc-gate ALLOC_FILE=new.txt") {

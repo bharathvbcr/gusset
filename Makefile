@@ -292,15 +292,22 @@ lint:
 # The zero-allocation gate (R5), shared with the CI bench job. Reads raw
 # `go test -bench -benchmem` output. ChannelHop is the pure-Go control and must
 # stay at 0; the cgo call path measures 1 alloc/op (1 B/op) today, so
-# CallNoop and SubmitWait are bounded at 1. A benchmark missing from the file
-# fails the gate rather than passing it.
+# CallNoop and SubmitWait are bounded at 1. The root package's CallNoopBare and
+# CallNoopTraced are the same call path without the bench package's pool, and
+# measure 1 as well (1-2 B/op); a registry or tracing change that allocates per
+# call shows there. Their bound is tested in the root package, not ./bench, so
+# both producers of ALLOC_FILE (the CI bench job and ci-local) run it too.
+# CompletionTransport is not bounded: its parallel rows allocate 40-60 per op
+# from RunParallel's goroutines and the count varies with scheduling. A
+# benchmark missing from the file fails the gate rather than passing it.
 ALLOC_FILE ?= bench/results/allocs.tmp
-ALLOC_BOUNDS ?= -max ChannelHop=0 -max GussetCallNoop=1 -max GussetSubmitWait=1
+ALLOC_BOUNDS ?= -max ChannelHop=0 -max GussetCallNoop=1 -max GussetSubmitWait=1 -max CallNoopBare=1 -max CallNoopTraced=1
 alloc-gate:
 	go run ./tools/ci/benchgate allocs $(ALLOC_BOUNDS) $(ALLOC_FILE)
 
 ci-local: build test lint docs-check
 	go test -run '^$$' -bench . -benchtime=100ms -benchmem ./bench/... > $(ALLOC_FILE) || { cat $(ALLOC_FILE); exit 1; }
+	go test -run '^$$' -bench '^(BenchmarkCallNoopBare|BenchmarkCallNoopTraced)$$' -benchtime=100ms -benchmem . >> $(ALLOC_FILE) || { cat $(ALLOC_FILE); exit 1; }
 	@cat $(ALLOC_FILE)
 	$(MAKE) alloc-gate
 
