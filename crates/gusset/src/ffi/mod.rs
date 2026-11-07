@@ -1690,4 +1690,32 @@ mod lifecycle_panic_tests {
         let rc = unsafe { gusset_init() };
         assert_eq!(rc, FFI_PANIC);
     }
+
+    /// `gusset_init(void)` has no status out-parameter, so the panic text is
+    /// reported only through the log ring; `ffi.Init` drains it from there.
+    #[test]
+    fn an_init_panic_text_lands_in_the_log_ring() {
+        fault::arm();
+        // SAFETY: no pointer arguments.
+        assert_eq!(unsafe { gusset_init() }, FFI_PANIC);
+
+        // Other tests in this binary log too, so read the whole ring and look
+        // for the line rather than expecting it to be the only one.
+        let mut drained = Vec::new();
+        loop {
+            let mut buf = vec![0u8; LOG_RING_CAPACITY];
+            let mut written = 0usize;
+            // SAFETY: `buf` is writable for `buf.len()` bytes and `written` is a valid out pointer.
+            unsafe { gusset_drain_logs(buf.as_mut_ptr(), buf.len(), &mut written) };
+            if written == 0 {
+                break;
+            }
+            drained.extend_from_slice(&buf[..written]);
+        }
+        let text = String::from_utf8_lossy(&drained);
+        assert!(
+            text.lines().any(|l| l.contains("gusset: init panicked: ")),
+            "the init panic text never reached the log ring: {text:?}"
+        );
+    }
 }
