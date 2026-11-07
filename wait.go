@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"sync/atomic"
 	"time"
 
 	"github.com/bharathvbcr/gusset/internal/ffi"
@@ -64,8 +65,8 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 		if !s.enterCgo() {
 			return nil, ErrClosed
 		}
-		if testHookBeforeTakeView != nil {
-			testHookBeforeTakeView(s)
+		if hook := testHookBeforeTakeView.Load(); hook != nil {
+			(*hook)(s)
 		}
 		out := make([]byte, len(res.data))
 		copy(out, res.data)
@@ -79,7 +80,12 @@ func (s *handleState) wait(ctx context.Context, ticket uint64) ([]byte, error) {
 // testHookBeforeResultFill runs, when set by a test, just before WaitBuffer
 // builds the Go-heap Buffer for an inline result: it copies the result, or
 // adopts it when it is already 64-byte aligned (adoptHeapBuffer).
-var testHookBeforeResultFill func(*handleState)
+//
+// It is an atomic.Pointer because it is process-global and a Wait on any other
+// handle, including a goroutine a previous test left running, reads it while a
+// test stores it. Tests install it with Store(&fn) and clear it with Store(nil);
+// a hook must ignore any handleState that is not the one under test.
+var testHookBeforeResultFill atomic.Pointer[func(*handleState)]
 
 // testHookBeforeTakeView runs, when set by a test, with cgoMu held for reading,
 // just before Wait copies a take buffer out of Rust memory or WaitBuffer wraps
@@ -87,7 +93,9 @@ var testHookBeforeResultFill func(*handleState)
 // reached the waiter (a result over 4 KiB, which the worker promoted onto a
 // buffer, or an engine's own buffer of any size). Close frees that buffer under cgoMu held exclusively (I1), so a
 // Close started here must not be able to finish until the hook returns.
-var testHookBeforeTakeView func(*handleState)
+//
+// An atomic.Pointer for the same reason as testHookBeforeResultFill.
+var testHookBeforeTakeView atomic.Pointer[func(*handleState)]
 
 func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, error) {
 	res, takeID, err := s.waitInternal(ctx, ticket)
@@ -102,8 +110,8 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 			s.discardTake(takeID)
 			return nil, ErrClosed
 		}
-		if testHookBeforeTakeView != nil {
-			testHookBeforeTakeView(s)
+		if hook := testHookBeforeTakeView.Load(); hook != nil {
+			(*hook)(s)
 		}
 		buf := newBufferFromRaw(s, takeID, res.data)
 		s.cgoMu.RUnlock()
@@ -127,8 +135,8 @@ func (s *handleState) waitBuffer(ctx context.Context, ticket uint64) (*Buffer, e
 		// A job returning an empty output (0 bytes) produces a valid empty Buffer
 		return newBufferFromRaw(s, 0, nil), nil
 	}
-	if testHookBeforeResultFill != nil {
-		testHookBeforeResultFill(s)
+	if hook := testHookBeforeResultFill.Load(); hook != nil {
+		(*hook)(s)
 	}
 	// Adopt the result's own backing array when it is 64-byte aligned, rather
 	// than copy it a second time. That is safe only because nothing else holds

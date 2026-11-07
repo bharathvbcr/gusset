@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // TestTier1_HandleLifecycle_OpenClose validates clean opening, thread querying, and closing of Gusset handles.
@@ -203,25 +204,25 @@ func TestTier1_MemoryStats_And_AdviseMemoryLimit(t *testing.T) {
 	requireNoError(t, err, "gusset.Open")
 	defer h.Close()
 
-	initialStats := gusset.Stats()
+	initialLive := livebytes.Quiesce(t)
 
 	const allocBytes = 1024 * 1024 // 1 MiB
 	buf, err := h.NewBuffer(allocBytes)
 	requireNoError(t, err, "h.NewBuffer 1 MiB")
 
 	statsWithAlloc := gusset.Stats()
-	if statsWithAlloc.LiveBytes < initialStats.LiveBytes+allocBytes {
+	if statsWithAlloc.LiveBytes < initialLive+allocBytes {
 		t.Errorf("Stats().LiveBytes did not increase by at least %d: initial=%d, current=%d",
-			allocBytes, initialStats.LiveBytes, statsWithAlloc.LiveBytes)
+			allocBytes, initialLive, statsWithAlloc.LiveBytes)
 	}
 
 	err = buf.Free()
 	requireNoError(t, err, "buf.Free()")
 
-	statsAfterFree := gusset.Stats()
-	if statsAfterFree.LiveBytes != initialStats.LiveBytes {
+	liveAfterFree, leakFree := livebytes.Settle(initialLive)
+	if !leakFree {
 		t.Errorf("Stats().LiveBytes did not return to baseline after Free: initial=%d, current=%d",
-			initialStats.LiveBytes, statsAfterFree.LiveBytes)
+			initialLive, liveAfterFree)
 	}
 
 	// Verify AdviseMemoryLimit returns adjusted budget

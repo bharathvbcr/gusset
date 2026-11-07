@@ -137,23 +137,44 @@ func TestTier2_Context_TimeoutAndCancellation(t *testing.T) {
 		t.Errorf("expected context.DeadlineExceeded on expired call, got: %v", errExpired)
 	}
 
-	// 3. Dynamic cancellation during long execution
-	// Mode 5 with input[1]=50 runs 50 iterations * 10ms = 500ms, checking ctx.check()
+	// 3. Dynamic cancellation during long execution.
+	//
+	// Mode 5 with input[1]=255 is 255 units of 10 ms (2.55 s) with a ctx.check()
+	// between units. The pool has one worker, so the pool permit is the
+	// observable: Go returns at the caller's cancel whatever the engine does,
+	// but the permit belongs to the work and comes back only when the worker
+	// stops. A worker that honours ctx.check() stops within a unit of the
+	// cancel; one that ignores it holds the permit for the whole 2.55 s.
+	//
+	// This is a count of what ran, not a clock reading: the probe below does not
+	// assert how long the cancel took. It asserts the follow-up job was admitted
+	// before the full run could have ended, with a deadline half the run long, so
+	// a host stall of a second still passes and an engine that never checks
+	// cannot. (A per-unit counter, as tests/rust/rust_deadline.rs uses, needs an
+	// engine of the test's own; the Go suites can only drive the built-in
+	// diagnostic engine, which exposes no unit count.)
+	const units = 255
+	const fullRun = units * 10 * time.Millisecond
+	hOne, err := gusset.Open(gusset.WithPoolSize(1), gusset.WithDiagnosticEngine())
+	requireNoError(t, err, "gusset.Open pool of one")
+	defer hOne.Close()
+
 	ctxCancel, cancelDynamic := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(20 * time.Millisecond)
 		cancelDynamic()
 	}()
 
-	start := time.Now()
-	_, errDyn := h.Call(ctxCancel, []byte{5, 50})
-	elapsed := time.Since(start)
-
+	_, errDyn := hOne.Call(ctxCancel, []byte{5, units})
 	if !errors.Is(errDyn, context.Canceled) {
 		t.Errorf("expected context.Canceled on dynamic cancel, got: %v", errDyn)
 	}
-	if elapsed > 300*time.Millisecond {
-		t.Errorf("cancellation took too long to abort worker: %v", elapsed)
+
+	ctxFollow, cancelFollow := context.WithTimeout(context.Background(), fullRun/2)
+	defer cancelFollow()
+	if _, err := hOne.Call(ctxFollow, []byte{0}); err != nil {
+		t.Errorf("the pool permit was not returned within %v of a cancel against a %v job: "+
+			"the worker did not stop at ctx.check(): %v", fullRun/2, fullRun, err)
 	}
 }
 

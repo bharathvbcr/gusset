@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -371,6 +372,145 @@ func TestWaitBuffer_AlignedResultCostsOnlyTheBufferHeader(t *testing.T) {
 	}
 }
 
+// setResultFillHook and setTakeViewHook install, or with nil clear, the
+// process-global test hooks. They are atomic stores because a Wait on another
+// handle (or on a goroutine an earlier test left behind) reads the hook with no
+// synchronisation of its own. A hook installed here sees every handle's waits,
+// so it must return at once for a handleState that is not the one under test.
+func setResultFillHook(fn func(*handleState)) {
+	if fn == nil {
+		testHookBeforeResultFill.Store(nil)
+		return
+	}
+	testHookBeforeResultFill.Store(&fn)
+}
+
+func setTakeViewHook(fn func(*handleState)) {
+	if fn == nil {
+		testHookBeforeTakeView.Store(nil)
+		return
+	}
+	testHookBeforeTakeView.Store(&fn)
+}
+
+// TestWaitBuffer_CloseHooksAreRaceFreeAgainstWaitsOnAnotherHandle keeps a Wait and
+// WaitBuffer loop running on handle B, over every path that reads a hook (an
+// inline result, and a result over 4 KiB that arrives on a Rust take buffer),
+// while the test installs and clears both hooks for handle A. The hooks are
+// process-global, so B's reads and A's stores are unsynchronised unless the
+// hooks are atomic: under -race this is a DATA RACE with plain variables.
+// B's results must come through intact, and the hooks must have run for B.
+func TestWaitBuffer_CloseHooksAreRaceFreeAgainstWaitsOnAnotherHandle(t *testing.T) {
+	hA, err := Open(WithPoolSize(1), WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hA.Close()
+	hB, err := Open(WithPoolSize(2), WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hB.Close()
+
+	var (
+		stop      atomic.Bool
+		bLoops    atomic.Int64
+		hookedByB atomic.Int64
+		loopErr   atomic.Value
+		bDone     = make(chan struct{})
+		ctx       = context.Background()
+		stateA    = hA.state
+		sizes     = []int{48, inlineResultBytes + 1, 16 << 10}
+		fillHook  = func(s *handleState) {
+			if s != stateA {
+				hookedByB.Add(1)
+			}
+		}
+		viewedHook = fillHook
+	)
+	roundTrip := func(size int, viaBuffer bool) string {
+		want := echoInput(size)
+		var in any = want
+		if size > inlineResultBytes {
+			nb, err := hB.NewBuffer(size)
+			if err != nil {
+				return fmt.Sprintf("NewBuffer size %d: %v", size, err)
+			}
+			copy(nb.Bytes(), want)
+			in = nb
+		}
+		tk, err := hB.Submit(ctx, in)
+		if err != nil {
+			return fmt.Sprintf("Submit size %d: %v", size, err)
+		}
+		if viaBuffer {
+			buf, err := hB.WaitBuffer(ctx, tk)
+			if err != nil {
+				return fmt.Sprintf("WaitBuffer size %d: %v", size, err)
+			}
+			intact := bytes.Equal(buf.data, want)
+			_ = buf.Free()
+			if !intact {
+				return fmt.Sprintf("WaitBuffer size %d: result corrupted", size)
+			}
+			return ""
+		}
+		out, err := hB.Wait(ctx, tk)
+		if err != nil {
+			return fmt.Sprintf("Wait size %d: %v", size, err)
+		}
+		if !bytes.Equal(out, want) {
+			return fmt.Sprintf("Wait size %d: result corrupted", size)
+		}
+		return ""
+	}
+	go func() {
+		defer close(bDone)
+		for !stop.Load() {
+			for _, size := range sizes {
+				for _, viaBuffer := range []bool{false, true} {
+					if msg := roundTrip(size, viaBuffer); msg != "" {
+						loopErr.Store(msg)
+						return
+					}
+					bLoops.Add(1)
+				}
+			}
+		}
+	}()
+
+	for i := 0; i < 500; i++ {
+		setResultFillHook(fillHook)
+		setTakeViewHook(viewedHook)
+		runtime.Gosched()
+		setResultFillHook(nil)
+		setTakeViewHook(nil)
+		if i%50 == 0 {
+			// Let B complete whole round trips while a hook is installed.
+			setResultFillHook(fillHook)
+			setTakeViewHook(viewedHook)
+			before := bLoops.Load()
+			deadline := time.Now().Add(5 * time.Second)
+			for bLoops.Load() < before+3 && loopErr.Load() == nil && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			setResultFillHook(nil)
+			setTakeViewHook(nil)
+		}
+	}
+	stop.Store(true)
+	<-bDone
+	if msg := loopErr.Load(); msg != nil {
+		t.Fatalf("background handle B: %v", msg)
+	}
+	if bLoops.Load() == 0 {
+		t.Fatal("handle B completed no round trips: the loop never raced the hooks")
+	}
+	if hookedByB.Load() == 0 {
+		t.Fatal("no hook ever ran for handle B: the loop did not read the hooks while they were installed")
+	}
+}
+
 // TestWaitBuffer_CloseCannotFreeTheResultBeingFilled pins the window between
 // WaitBuffer deciding how to carry an inline result and copying the result
 // into its Buffer.
@@ -412,7 +552,11 @@ func TestWaitBuffer_CloseCannotFreeTheResultBeingFilled(t *testing.T) {
 
 	hooked := false
 	closeFinishedBeforeFill := false
-	testHookBeforeResultFill = func(s *handleState) {
+	target := h.state
+	setResultFillHook(func(s *handleState) {
+		if s != target {
+			return
+		}
 		hooked = true
 		go func() { _ = h.Close() }()
 		select {
@@ -420,11 +564,11 @@ func TestWaitBuffer_CloseCannotFreeTheResultBeingFilled(t *testing.T) {
 			closeFinishedBeforeFill = true
 		case <-time.After(5 * time.Second):
 		}
-	}
-	defer func() { testHookBeforeResultFill = nil }()
+	})
+	defer setResultFillHook(nil)
 
 	buf, werr := h.WaitBuffer(ctx, tk)
-	testHookBeforeResultFill = nil
+	setResultFillHook(nil)
 	if !hooked {
 		t.Fatalf("the fill hook never ran (WaitBuffer: %v); the result did not take the inline path", werr)
 	}
@@ -713,16 +857,19 @@ func TestTakeResult_CloseCannotFreeTheViewBeingUsed(t *testing.T) {
 
 				hooked := false
 				closeFinishedFirst := false
-				testHookBeforeTakeView = func(s *handleState) {
+				setTakeViewHook(func(got *handleState) {
+					if got != s {
+						return
+					}
 					hooked = true
 					go func() { _ = h.Close() }()
 					select {
-					case <-s.closeDone:
+					case <-got.closeDone:
 						closeFinishedFirst = true
 					case <-time.After(500 * time.Millisecond):
 					}
-				}
-				defer func() { testHookBeforeTakeView = nil }()
+				})
+				defer setTakeViewHook(nil)
 
 				var (
 					out  []byte
@@ -734,7 +881,7 @@ func TestTakeResult_CloseCannotFreeTheViewBeingUsed(t *testing.T) {
 				} else {
 					out, werr = h.Wait(ctx, tk)
 				}
-				testHookBeforeTakeView = nil
+				setTakeViewHook(nil)
 				if !hooked {
 					t.Fatalf("the view hook never ran (%s: %v); the result did not take the Rust buffer path", name, werr)
 				}
