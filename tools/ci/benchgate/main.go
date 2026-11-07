@@ -23,7 +23,11 @@
 // benchmark the change adds, which the base cannot have: it is reported as a
 // ::notice and not compared. Failing it turned every push that added a
 // benchmark red, with no allow path a push could use (Matrix 39270656716). A
-// rename is a base-only row plus a new-only one, so it still fails. Allow-list
+// rename is a base-only row plus a new-only one, so it still fails. A package
+// only one file has rows for gets a table of its own that names just that
+// file, and its rows have 3 fields on either side; the table's header says the
+// side, placed against the first header that names both files. A table that
+// cannot be placed fails as base-only. Allow-list
 // names match with or without the runner's -N GOMAXPROCS suffix. A one-sided
 // row does not end the sec/op table: a later comparison is still gated. A
 // renamed benchmark used to clear the table and a later regression passed.
@@ -211,7 +215,12 @@ func checkRegress(r io.Reader, threshold float64, minSamples int, allowOneSided 
 	if err != nil {
 		return fmt.Errorf("benchstat csv: %w", err)
 	}
+	base, head, placed := fileSides(records)
 	inTable := false
+	// tableSide is set by a table header that names one file: benchstat prints
+	// a package that only one file has rows for as a table of its own, whose
+	// rows have 3 fields on either side. It says which side that table is on.
+	tableSide := sideUnknown
 	rows := 0
 	var failures []string
 	for _, rec := range records {
@@ -222,7 +231,26 @@ func checkRegress(r io.Reader, threshold float64, minSamples int, allowOneSided 
 			// A header row: the first column is blank. Only the sec/op table
 			// is gated; B/op and allocs/op follow it in the same file. A short
 			// header is still a header, not a one-sided benchmark.
+			if names, ok := fileHeader(rec); ok {
+				tableSide = sideUnknown
+				if len(names) == 1 && placed {
+					switch names[0] {
+					case head:
+						tableSide = sideHead
+					case base:
+						tableSide = sideBase
+					}
+				}
+			}
 			inTable = len(rec) > 1 && rec[1] == "sec/op"
+			continue
+		}
+		if len(rec) == 1 && strings.Contains(rec[0], ": ") {
+			// A configuration line between tables (pkg:, goos:, cpu:). It is
+			// not a benchmark row: one of those has at least 3 fields. Without
+			// -benchmem the next package's pkg: line follows a sec/op table
+			// directly and was read as a base-only benchmark.
+			inTable = false
 			continue
 		}
 		if !inTable || rec[0] == "geomean" {
@@ -234,7 +262,7 @@ func checkRegress(r io.Reader, threshold float64, minSamples int, allowOneSided 
 		if len(rec) < 7 {
 			switch {
 			case allowed(allowOneSided, rec[0]):
-			case newOnly(rec):
+			case tableSide == sideHead || (tableSide != sideBase && newOnly(rec)):
 				fmt.Fprintf(stdout, "::notice title=New benchmark::%s has no base sample, so it was not compared\n", rec[0])
 			default:
 				failures = append(failures, fmt.Sprintf("%s: base-only sec/op row (%d fields); a renamed or dropped benchmark is not a pass (allow it with -allow-one-sided)", rec[0], len(rec)))
@@ -316,6 +344,47 @@ func minSampleCount(p string) (int, bool) {
 
 // newOnly reports a one-sided row whose base columns are empty: benchstat's
 // shape for a benchmark the new side has and the base does not.
+// Which file a single-file benchstat table belongs to.
+const (
+	sideUnknown = iota
+	sideBase
+	sideHead
+)
+
+// fileHeader reports whether rec is the row of a benchstat table that names its
+// files, and returns those names. It is the header row above the unit row: a
+// blank first column and file names, where the unit row carries "CI" cells.
+func fileHeader(rec []string) ([]string, bool) {
+	if len(rec) < 2 || rec[0] != "" {
+		return nil, false
+	}
+	var names []string
+	for _, c := range rec[1:] {
+		c = strings.TrimSpace(c)
+		if c == "CI" {
+			return nil, false
+		}
+		if c != "" {
+			names = append(names, c)
+		}
+	}
+	return names, len(names) > 0
+}
+
+// fileSides takes the base and head file names from the first table header
+// that names two files, wherever it is: benchstat's table order is not the
+// order the files were written in, so a single-file table can come first.
+// With no such header nothing places a single-file table, and its rows are
+// judged by their shape alone, which fails closed.
+func fileSides(records [][]string) (base, head string, ok bool) {
+	for _, rec := range records {
+		if names, isHeader := fileHeader(rec); isHeader && len(names) == 2 {
+			return names[0], names[1], true
+		}
+	}
+	return "", "", false
+}
+
 func newOnly(rec []string) bool {
 	return len(rec) >= 4 && strings.TrimSpace(rec[1]) == "" && strings.TrimSpace(rec[2]) == "" &&
 		strings.TrimSpace(rec[3]) != ""
