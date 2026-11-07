@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,9 +83,16 @@ type Factory func() (*exec.Cmd, error)
 // is still returned. Supervisor.Close is what closes the live generation and
 // drops the retired ones.
 //
+// Every worker runs in a process group of its own (Setpgid), and a retirement
+// kills that group, so helpers the worker spawned do not outlive it.
+//
 // Pdeathsig is not set. It fires when the thread that started the process
 // dies, which can happen while this process is still alive, and macOS has no
 // such attribute. A host SIGKILL can still leave the child running.
+//
+// A retired generation is not replaced until a caller needs one. Retirement
+// charges one restart, which pays for that replacement; a replacement that then
+// fails its hello is the restart already paid for and is not charged again.
 type Supervisor struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -96,6 +104,7 @@ type Supervisor struct {
 	draining      *generation
 	attempt       *startAttempt
 	everAttempted bool
+	prepaid       bool // a retirement charged the restart its replacement will use
 	restarts      []time.Time
 	stop          bool
 	closed        bool
@@ -127,9 +136,10 @@ type supTicket struct {
 // The goroutine that runs it uses the supervisor lifetime context. A request
 // that stops waiting does not cancel it.
 type startAttempt struct {
-	done chan struct{}
-	g    *generation
-	err  error
+	done    chan struct{}
+	g       *generation
+	err     error
+	prepaid bool // the restart this attempt uses was charged when its predecessor died
 }
 
 // Supervise returns a supervisor that starts nothing until the first Call or
@@ -174,11 +184,40 @@ func Supervise(ctx context.Context, factory Factory, policy Policy) (*Supervisor
 	}, nil
 }
 
+// ErrBudgetExhausted is what a supervisor with no restarts left returns. It
+// also matches gusset.ErrPoisoned, as it always has, so a caller that only
+// tests for poison still sees it. The reverse does not hold: a poisoned worker
+// is not a spent budget, so a caller that must tell them apart tests
+// ErrBudgetExhausted first.
+var ErrBudgetExhausted = errors.New("isolate: restart budget exhausted")
+
+// budgetError is the budget refusal: a *gusset.Error carrying ErrPoisoned's
+// code and the long-standing message, plus ErrBudgetExhausted.
+type budgetError struct{ poisoned *gusset.Error }
+
+func (e *budgetError) Error() string   { return e.poisoned.Error() }
+func (e *budgetError) Unwrap() []error { return []error{ErrBudgetExhausted, e.poisoned} }
+
 func budgetExhausted(p Policy) error {
-	return &gusset.Error{
+	return &budgetError{poisoned: &gusset.Error{
 		Code: gusset.ErrPoisoned.Code,
 		Msg:  fmt.Sprintf("isolate: restart budget exhausted (%d restarts in %s)", p.MaxRestarts, p.Window),
+	}}
+}
+
+// supervisedRefusal removes a worker refusal's advice to "Close it". That is
+// advice for a caller holding a Proc; the supervisor owns Close and replaces a
+// retired generation itself, so the caller is told only what happened. The
+// error still matches whatever it matched.
+func supervisedRefusal(err error) error {
+	if err == nil || !errors.Is(err, gusset.ErrPoisoned) {
+		return err
 	}
+	msg, advice, found := strings.Cut(err.Error(), "; Close it and")
+	if !found || advice == "" {
+		return err
+	}
+	return &remoteError{msg: msg + "; the supervisor replaces a retired worker on the next call", base: err}
 }
 
 // Call submits in and waits. The generation it submits to is the one ensure
@@ -195,9 +234,13 @@ func (s *Supervisor) Call(ctx context.Context, in []byte) ([]byte, error) {
 	return s.Wait(ctx, id)
 }
 
-// Submit sends one job. It performs at most one Start. A factory error or a
-// failed hello spends one restart and is returned; this call does not try
-// again. Ticket ids are the supervisor's. The child id stays inside this
+// Submit sends one job. It starts a worker only to obtain a generation: a
+// factory error or a failed hello spends one restart and is returned, and that
+// is not retried. When the generation it bound turns out to be dying and refuses the
+// job before anything was written, Submit asks for a generation once more and
+// sends to that; it never retries a job a worker may have received, and the
+// retry honours ctx. A refusal it still returns does not tell the caller to
+// Close. Ticket ids are the supervisor's. The child id stays inside this
 // process and is what Proc.Wait, Proc.Discard, and the cancel frame use.
 func (s *Supervisor) Submit(ctx context.Context, in any) (uint64, error) {
 	if s == nil {
@@ -213,9 +256,24 @@ func (s *Supervisor) Submit(ctx context.Context, in any) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	child, err := g.proc.Submit(ctx, in)
+	return s.submitVia(ctx, in, g)
+}
+
+// submitVia sends in to g and registers the ticket. A generation that refuses
+// the job unsent because it is dying is replaced by one more ensure and one
+// more attempt; there is no second retry.
+func (s *Supervisor) submitVia(ctx context.Context, in any, g *generation) (uint64, error) {
+	payload, _ := in.([]byte)
+	child, unsent, err := g.proc.submitCounted(ctx, payload)
+	if err != nil && unsent && errors.Is(err, gusset.ErrPoisoned) && ctx.Err() == nil {
+		var gerr error
+		if g, gerr = s.ensure(ctx); gerr != nil {
+			return 0, supervisedRefusal(gerr)
+		}
+		child, _, err = g.proc.submitCounted(ctx, payload)
+	}
 	if err != nil {
-		return 0, err
+		return 0, supervisedRefusal(err)
 	}
 	s.mu.Lock()
 	if s.closed {
@@ -422,8 +480,21 @@ func (s *Supervisor) ensure(ctx context.Context) (*generation, error) {
 				return nil, ctx.Err()
 			}
 		}
+		// A retired generation's process may still be running down (its group
+		// is being killed and its reader drained). The replacement starts only
+		// after that, so two workers never run side by side.
+		if d := s.draining; d != nil {
+			settled := d.settled
+			s.mu.Unlock()
+			select {
+			case <-settled:
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 		now := time.Now()
-		if s.everAttempted && s.inWindowLocked(now) >= s.policy.MaxRestarts {
+		if s.everAttempted && !s.prepaid && s.inWindowLocked(now) >= s.policy.MaxRestarts {
 			err := budgetExhausted(s.policy)
 			s.mu.Unlock()
 			return nil, err
@@ -451,7 +522,8 @@ func (s *Supervisor) waitAttempt(ctx context.Context, att *startAttempt) (*gener
 }
 
 func (s *Supervisor) beginAttemptLocked() *startAttempt {
-	att := &startAttempt{done: make(chan struct{})}
+	att := &startAttempt{done: make(chan struct{}), prepaid: s.prepaid}
+	s.prepaid = false
 	s.attempt = att
 	s.everAttempted = true
 	return att
@@ -519,7 +591,7 @@ func (s *Supervisor) finishStart(att *startAttempt, g *generation, err error, sp
 	if s.attempt == att {
 		s.attempt = nil
 	}
-	if spend && err != nil && !s.stop && s.ctx.Err() == nil {
+	if spend && !att.prepaid && err != nil && !s.stop && s.ctx.Err() == nil {
 		s.noteRestartLocked(time.Now())
 	}
 	if g != nil {
@@ -584,11 +656,14 @@ func exitCause(p *Proc) string {
 	return "child exited: " + err.Error()
 }
 
-// retire marks the generation, counts one restart, kills if the child is
-// still running, and only then Starts a replacement. The kill runs here, on
-// the watch goroutine, not inside writeLocked. Proc.Close is not called: the
-// read path keeps stored results while closed is false. After the reader
-// finishes, stdin is closed if poisonStream has not already closed it.
+// retire marks the generation, counts one restart, and kills its process group
+// if anything is left running. It does not start a replacement: the next
+// caller that needs one does (ensure), so a worker that dies right after hello
+// cannot be respawned back to back with nobody asking. The restart counted here
+// pays for that replacement (prepaid) when the budget allows one. The kill runs
+// here, on the watch goroutine, not inside writeLocked. Proc.Close is not
+// called: the read path keeps stored results while closed is false. After the
+// reader finishes, stdin is closed if poisonStream has not already closed it.
 func (s *Supervisor) retire(g *generation, cause string) {
 	s.mu.Lock()
 	if g.retired {
@@ -621,10 +696,7 @@ func (s *Supervisor) retire(g *generation, cause string) {
 	if g.proc.cmd != nil && g.proc.cmd.Process != nil {
 		pid = g.proc.cmd.Process.Pid
 	}
-	var att *startAttempt
-	if !s.stop && s.ctx.Err() == nil && projected <= s.policy.MaxRestarts && s.attempt == nil {
-		att = s.beginAttemptLocked()
-	}
+	s.prepaid = projected <= s.policy.MaxRestarts
 	s.draining = g
 	s.mu.Unlock()
 
@@ -635,9 +707,9 @@ func (s *Supervisor) retire(g *generation, cause string) {
 	)
 	defer close(g.settled)
 
-	if !g.proc.exited() && g.proc.cmd.Process != nil {
-		_ = g.proc.cmd.Process.Kill()
-	}
+	// The group, not only the leader: the leader may already be gone while a
+	// helper it spawned still runs.
+	g.proc.killTree()
 	<-g.proc.readerDone
 	g.proc.closeStdin()
 
@@ -647,16 +719,7 @@ func (s *Supervisor) retire(g *generation, cause string) {
 		s.draining = nil
 	}
 	s.maybeDropLocked(g)
-	stop := s.stop || s.ctx.Err() != nil
 	s.mu.Unlock()
-
-	if att == nil || stop {
-		if att != nil {
-			s.finishStart(att, nil, s.currentStopErr(), false)
-		}
-		return
-	}
-	s.finishAttempt(att)
 }
 
 // inWindowLocked counts restart events whose time.Now values are still inside

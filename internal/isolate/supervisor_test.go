@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,7 +25,10 @@ type supHarness struct {
 	s      *Supervisor
 	starts atomic.Int32
 	count  string
-	modeOf func(n int) string
+	// forkSleep, when set, is the file each worker writes its `sleep 60`
+	// helper's pid to (forkSleepEnv).
+	forkSleep string
+	modeOf    func(n int) string
 
 	mu     sync.Mutex
 	cmds   []*exec.Cmd
@@ -67,6 +71,9 @@ func (h *supHarness) factory() (*exec.Cmd, error) {
 	env := append(os.Environ(), workerEnv+"=1", modeEnv+"="+mode)
 	if h.count != "" {
 		env = append(env, countFileEnv+"="+h.count)
+	}
+	if h.forkSleep != "" {
+		env = append(env, forkSleepEnv+"="+h.forkSleep)
 	}
 	cmd.Env = env
 	buf := &lockedBuffer{}
@@ -579,15 +586,18 @@ func TestSupervisor_StoredResultDoesNotAliasChildID(t *testing.T) {
 	// The next submission has to be the first ticket of the replacement.
 	// A submit that lands before the death is visible is another job on the
 	// process that is going away, and that process's counter has already
-	// issued child id 1.
+	// issued child id 1. (A submit that races the death is retried once on the
+	// replacement, which is also a first ticket.)
 	waitPID := time.Now().Add(5 * time.Second)
 	for {
-		pid := pidOf(h.s)
-		if pid != 0 && pid != old {
+		// The old generation is retired once it is no longer live. The
+		// replacement starts when the next caller needs one, so this waits for
+		// the retirement and not for a new pid.
+		if pidOf(h.s) != old {
 			break
 		}
 		if time.Now().After(waitPID) {
-			t.Fatal("replacement did not become live")
+			t.Fatal("the killed generation was never retired")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -890,8 +900,11 @@ func stallRetiredAsUnresponsive(t *testing.T, mode string) {
 	}
 	select {
 	case err := <-parked:
-		if err == nil || errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("parked Call = %v; want the retired generation's refusal, not its own deadline", err)
+		// The retirement releases it with nothing written, so it is retried
+		// once on the replacement (A4-5) and succeeds. What it must not do
+		// is run to its own deadline or be told to Close.
+		if errors.Is(err, context.DeadlineExceeded) || (err != nil && strings.Contains(err.Error(), "Close it")) {
+			t.Fatalf("parked Call = %v; want the replacement's answer or a refusal that does not advise Close, not its own deadline", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a caller parked on a stranded permit was not released by the retirement")
@@ -1025,5 +1038,425 @@ func TestSupervise_LivenessBounds(t *testing.T) {
 	defer s.Close()
 	if s.policy.StartTimeout != defaultStartTimeout || s.policy.StallTimeout != defaultStallTimeout {
 		t.Fatalf("zero timeouts resolved to %v, %v; want the documented defaults", s.policy.StartTimeout, s.policy.StallTimeout)
+	}
+}
+
+// helperPID reads the pid a worker's forkSleepHelper published, and registers a
+// cleanup that kills that pid, by number, if it is still alive when the test
+// ends. A failing test therefore leaves no `sleep 60` behind.
+func helperPID(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			pid, perr := strconv.Atoi(strings.TrimSpace(string(b)))
+			if perr != nil || pid <= 1 {
+				t.Fatalf("helper pid file holds %q", b)
+			}
+			t.Cleanup(func() {
+				if pidAlive(pid) {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+			})
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("worker never published its helper pid: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// waitGone polls kill(pid, 0) for ESRCH. A grandchild whose parent died is
+// reparented and reaped by init, so it is not gone the instant the signal is
+// sent; the deadline bounds the wait.
+func waitGone(t *testing.T, pid int, what string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: helper pid %d still exists 10s later; the group was not killed", what, pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestSupervisor_RetireKillsWorkerGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode string
+		kill bool // the test kills the leader alone, so only the helper is left to the retirement
+	}{
+		{"leader exited", "", true},
+		{"leader alive", "corrupt", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, Policy{MaxRestarts: 1, Window: time.Minute}, func(int) string { return tc.mode })
+			h.forkSleep = filepath.Join(t.TempDir(), "helper.pid")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			g, err := h.s.ensure(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			helper := helperPID(t, h.forkSleep)
+			if tc.kill {
+				if err := syscall.Kill(g.proc.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case <-g.settled:
+			case <-time.After(10 * time.Second):
+				t.Fatal("generation was never retired")
+			}
+			waitGone(t, helper, "after retire")
+		})
+	}
+}
+
+func TestProc_CloseTimeoutKillsWorkerGroup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "helper.pid")
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), workerEnv+"=1", modeEnv+"=hang", forkSleepEnv+"="+path)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	p, err := Start(ctx, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := helperPID(t, path)
+	err = p.close(300 * time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "killed") {
+		t.Fatalf("close = %v; a worker that ignores stdin EOF must be killed at the budget", err)
+	}
+	waitGone(t, helper, "after the Close timeout")
+}
+
+func TestStart_HandshakeFailureKillsWorkerGroup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "helper.pid")
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), workerEnv+"=1", modeEnv+"=no-hello", forkSleepEnv+"="+path)
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	if _, err := Start(ctx, cmd); err == nil {
+		t.Fatal("Start = nil; the worker never announces")
+	}
+	waitGone(t, helperPID(t, path), "after a failed handshake")
+}
+
+func TestOwnedGroup_NeverNamesAGroupItDoesNotOwn(t *testing.T) {
+	own := func(pid int, attr *syscall.SysProcAttr) *exec.Cmd {
+		return &exec.Cmd{Process: &os.Process{Pid: pid}, SysProcAttr: attr}
+	}
+	leader := &syscall.SysProcAttr{Setpgid: true}
+	for _, tc := range []struct {
+		name string
+		cmd  *exec.Cmd
+		want int
+	}{
+		{"own group", own(4242, leader), 4242},
+		{"setsid leader", own(4242, &syscall.SysProcAttr{Setsid: true}), 4242},
+		{"never started", &exec.Cmd{SysProcAttr: leader}, 0},
+		{"no attributes", own(4242, nil), 0},
+		{"not a leader", own(4242, &syscall.SysProcAttr{}), 0},
+		{"joined another group", own(4242, &syscall.SysProcAttr{Setpgid: true, Pgid: 77}), 0},
+		{"pid 1", own(1, leader), 0},
+		{"pid 0", own(0, leader), 0},
+		{"the host's own group", own(syscall.Getpgrp(), leader), 0},
+	} {
+		if got := ownedGroup(tc.cmd); got != tc.want {
+			t.Errorf("%s: ownedGroup = %d; want %d", tc.name, got, tc.want)
+		}
+	}
+	c := exec.Command("true")
+	ownProcessGroup(c)
+	if !c.SysProcAttr.Setpgid {
+		t.Error("ownProcessGroup did not request a process group")
+	}
+	joined := exec.Command("true")
+	joined.SysProcAttr = &syscall.SysProcAttr{Pgid: 77}
+	ownProcessGroup(joined)
+	if joined.SysProcAttr.Setpgid {
+		t.Error("ownProcessGroup overrode a command that chose to join another group")
+	}
+}
+
+func TestSupervisor_CrashPlusFailingReplacementSpendsOneRestart(t *testing.T) {
+	// Generation 2 is the replacement and fails its hello. The crash that
+	// caused it and that failure are one restart: with MaxRestarts 2 a third
+	// start must still be allowed.
+	var n atomic.Int32
+	factory := func() (*exec.Cmd, error) {
+		if n.Add(1) == 2 {
+			return exec.Command("true"), nil
+		}
+		cmd := exec.Command(os.Args[0])
+		cmd.Env = append(os.Environ(), workerEnv+"=1", modeEnv+"=")
+		cmd.Stderr = &lockedBuffer{}
+		return cmd, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, err := Supervise(ctx, factory, Policy{MaxRestarts: 2, Window: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	cctx, ccancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer ccancel()
+	if _, err := s.Call(cctx, []byte{0, 0x42}); err != nil {
+		t.Fatal(err)
+	}
+	g := func() *generation {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.live
+	}()
+	if err := syscall.Kill(g.proc.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	<-g.settled
+	if got := s.restartsInWindow(); got != 1 {
+		t.Fatalf("restarts charged after the crash = %d; want 1", got)
+	}
+	// The replacement fails its hello: that is the restart the crash paid for.
+	if _, err := s.Call(cctx, []byte{0, 0x42}); err == nil {
+		t.Fatal("Call on the failing replacement = nil")
+	}
+	if got := s.restartsInWindow(); got != 1 {
+		t.Fatalf("restarts charged after crash + failing replacement = %d; want 1, not 2", got)
+	}
+	out, err := s.Call(cctx, []byte{0, 0x42})
+	if err != nil || !bytes.Equal(out, []byte{0, 0x42}) {
+		t.Fatalf("Call after crash + failing replacement = %v, %v; one restart is left and must be usable", out, err)
+	}
+	if got := n.Load(); got != 3 {
+		t.Fatalf("starts = %d; want the first worker, the failed replacement and one more", got)
+	}
+	// The failing replacement did not widen the budget either: the failure of
+	// an attempt nobody prepaid for charges, so the third failure is the end.
+	if got := s.restartsInWindow(); got != 1 {
+		t.Fatalf("restarts charged after a clean start = %d; want 1", got)
+	}
+}
+
+func (s *Supervisor) restartsInWindow() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inWindowLocked(time.Now())
+}
+
+func TestSupervisor_DieAfterHelloIsNotRespawnedUntilCalled(t *testing.T) {
+	const max = 3
+	h := newHarness(t, Policy{MaxRestarts: max, Window: time.Hour}, func(int) string { return "die-on-first-job" })
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	submit := func() *generation {
+		id, err := h.s.Submit(ctx, []byte{0, 1})
+		if err != nil {
+			t.Fatalf("Submit = %v", err)
+		}
+		h.s.mu.Lock()
+		g := h.s.tickets[id].gen
+		h.s.mu.Unlock()
+		if _, err := h.s.Wait(ctx, id); err == nil {
+			t.Fatal("Wait = nil; the worker exits without answering")
+		}
+		select {
+		case <-g.settled:
+		case <-time.After(10 * time.Second):
+			t.Fatal("generation never settled")
+		}
+		return g
+	}
+
+	submit()
+	// The generation has died and been retired. Nothing has asked for another
+	// worker, so none is running: no eager respawn, and exactly one charge.
+	if got := h.starts.Load(); got != 1 {
+		t.Fatalf("starts = %d after the only generation died with no caller waiting; want 1", got)
+	}
+	if got := h.s.restartsInWindow(); got != 1 {
+		t.Fatalf("restarts charged = %d; want 1", got)
+	}
+	// Each call starts one replacement, and the budget ends the sequence:
+	// the first process plus MaxRestarts replacements, no more.
+	for want := 2; want <= max+1; want++ {
+		submit()
+		if got := int(h.starts.Load()); got != want {
+			t.Fatalf("starts = %d; want %d", got, want)
+		}
+	}
+	_, err := h.s.Submit(ctx, []byte{0, 1})
+	if !errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("Submit past the budget = %v; want ErrBudgetExhausted", err)
+	}
+	if got := h.starts.Load(); got != max+1 {
+		t.Fatalf("starts = %d after the budget was spent; want %d", got, max+1)
+	}
+}
+
+func TestErrBudgetExhausted_DistinguishesFromPoison(t *testing.T) {
+	budget := budgetExhausted(Policy{MaxRestarts: 3, Window: time.Minute})
+	if !errors.Is(budget, ErrBudgetExhausted) {
+		t.Fatal("the budget error does not match ErrBudgetExhausted")
+	}
+	if !errors.Is(budget, gusset.ErrPoisoned) {
+		t.Fatal("the budget error stopped matching ErrPoisoned; callers that only test for poison would miss it")
+	}
+	if !strings.Contains(budget.Error(), "isolate: restart budget exhausted (3 restarts in 1m0s)") {
+		t.Fatalf("budget error text = %q", budget)
+	}
+	poisoned := workerExitError(nil, nil)
+	if !errors.Is(poisoned, gusset.ErrPoisoned) {
+		t.Fatal("a dead worker's error lost ErrPoisoned")
+	}
+	if errors.Is(poisoned, ErrBudgetExhausted) {
+		t.Fatal("a plain poisoned worker matches ErrBudgetExhausted")
+	}
+}
+
+func TestSupervisor_SubmitOnDyingGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		policy  Policy
+		healthy bool // the replacement hello succeeds
+		budget  bool // no restart is left for it
+	}{
+		{"replacement succeeds", Policy{MaxRestarts: 2, Window: time.Minute}, true, false},
+		{"replacement fails", Policy{MaxRestarts: 2, Window: time.Minute}, false, false},
+		{"budget spent", Policy{MaxRestarts: 0, Window: time.Minute}, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var n atomic.Int32
+			factory := func() (*exec.Cmd, error) {
+				if n.Add(1) > 1 && !tc.healthy {
+					return exec.Command("true"), nil
+				}
+				cmd := exec.Command(os.Args[0])
+				cmd.Env = append(os.Environ(), workerEnv+"=1", modeEnv+"=")
+				cmd.Stderr = &lockedBuffer{}
+				return cmd, nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			s, err := Supervise(ctx, factory, tc.policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			g, err := s.ensure(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Kill(g.proc.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+				t.Fatal(err)
+			}
+			<-g.proc.procExited // the generation has died; the caller still holds it
+
+			id, err := s.submitVia(ctx, []byte{0, 0x42}, g)
+			switch {
+			case tc.healthy && !tc.budget:
+				if err != nil {
+					t.Fatalf("Submit on a dying generation = %v; want it to succeed on the replacement", err)
+				}
+				out, werr := s.Wait(ctx, id)
+				if werr != nil || !bytes.Equal(out, []byte{0, 0x42}) {
+					t.Fatalf("Wait = %v, %v", out, werr)
+				}
+				if got := n.Load(); got != 2 {
+					t.Fatalf("starts = %d; the retry must start exactly one replacement", got)
+				}
+			default:
+				if err == nil {
+					t.Fatal("Submit = nil; there is no usable replacement")
+				}
+				if strings.Contains(err.Error(), "Close it") {
+					t.Fatalf("Submit = %q; the supervisor owns Close and must not advise the caller to", err)
+				}
+				if tc.budget && !errors.Is(err, ErrBudgetExhausted) {
+					t.Fatalf("Submit = %v; want ErrBudgetExhausted", err)
+				}
+			}
+			if got := n.Load(); got > 2 {
+				t.Fatalf("starts = %d; the retry is bounded to one", got)
+			}
+		})
+	}
+}
+
+func TestSupervisedRefusal_DropsTheCloseAdvice(t *testing.T) {
+	for _, in := range []error{
+		workerExitError(nil, nil),
+		(&Proc{poisoned: true}).refusalLocked(),
+	} {
+		if !strings.Contains(in.Error(), "Close it") {
+			t.Fatalf("fixture error %q has no Close advice to remove", in)
+		}
+		out := supervisedRefusal(in)
+		if strings.Contains(out.Error(), "Close it") {
+			t.Errorf("supervisedRefusal(%q) = %q", in, out)
+		}
+		if !errors.Is(out, gusset.ErrPoisoned) {
+			t.Errorf("supervisedRefusal(%q) stopped matching ErrPoisoned", in)
+		}
+	}
+	if !errors.Is(supervisedRefusal(gusset.ErrClosed), gusset.ErrClosed) {
+		t.Error("ErrClosed was rewritten")
+	}
+	if supervisedRefusal(nil) != nil {
+		t.Error("nil became an error")
+	}
+}
+
+// A job submitted while the live worker is being SIGKILLed either runs on the
+// replacement or fails with an error that does not tell the caller to Close.
+// Run with -race.
+func TestSupervisor_SubmitRacingSigkill(t *testing.T) {
+	h := newHarness(t, Policy{MaxRestarts: 1000, Window: time.Hour}, nil)
+	h.echo()
+	const rounds = 12
+	var advised atomic.Int32
+	var succeeded atomic.Int32
+	for round := 0; round < rounds; round++ {
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < 4; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				id, err := h.s.Submit(ctx, []byte{0, 0x42})
+				if err != nil {
+					if strings.Contains(err.Error(), "Close it") || errors.Is(err, gusset.ErrClosed) {
+						advised.Add(1)
+						t.Errorf("Submit raced a SIGKILL and returned %q", err)
+					}
+					return
+				}
+				succeeded.Add(1)
+				_, _ = h.s.Wait(ctx, id)
+			}()
+		}
+		close(start)
+		if pid := pidOf(h.s); pid != 0 {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		wg.Wait()
+	}
+	if succeeded.Load() == 0 {
+		t.Fatal("no Submit succeeded across the rounds; the race never reached a replacement")
+	}
+	if advised.Load() != 0 {
+		t.Fatalf("%d Submits were told to Close", advised.Load())
 	}
 }
