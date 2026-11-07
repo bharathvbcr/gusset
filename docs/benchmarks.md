@@ -96,10 +96,10 @@ comparison.
 | `CallNoopBare`, `CallNoopTraced` | `handle_internal_test.go` | none: no committed results file |
 | `Plain`, `NoEscape` | `bench/seed/esc/esc_test.go` | none: no committed results file |
 | the r14 two-engine host | `bench/r14/` | none: no committed results file |
-| `BenchmarkDeadlineExpiry`, `BenchmarkDeadlineInFlight`, `BenchmarkDiscard`, `BenchmarkStats` | `bench/dispatch_test.go` | none: baseline recorded under `bench/results/dispatch/` |
-| `BenchmarkGussetCallResult`, `BenchmarkGussetSubmitWaitResult`, `BenchmarkGussetWaitBufferResultSize` | `bench/result_size_test.go` | none: the g7 and r8 A/B records under `bench/results/gp-feat-001/` cover these sizes |
-| `BenchmarkGussetWaitBuffer` | `bench/waitbuffer_test.go` | none: the g7 A/B record under `bench/results/gp-feat-001/` |
-| `BenchmarkBufferAllocParallel` | `bench/alloc_counters_test.go` | none: recorded under `bench/results/gp-feat-001/r10-*` |
+| `DeadlineExpiry`, `DeadlineInFlight`, `Discard`, `Stats` | `bench/dispatch_test.go` | none: baseline recorded under `bench/results/dispatch/` |
+| `GussetCallResult`, `GussetSubmitWaitResult`, `GussetWaitBufferResultSize` | `bench/result_size_test.go` | none: the g7 and r8 A/B records under `bench/results/gp-feat-001/` cover these sizes |
+| `GussetWaitBuffer` | `bench/waitbuffer_test.go` | none: the g7 A/B record under `bench/results/gp-feat-001/` |
+| `BufferAllocParallel` | `bench/alloc_counters_test.go` | none: recorded under `bench/results/gp-feat-001/r10-*` |
 | Cargo `dispatch` (`diagnostic_opcode0`, etc.) | `crates/gusset/benches/dispatch.rs` | none: cargo benchmark recorded under `bench/results/dispatch/` |
 | Cargo `alloc_counters` | `crates/gusset/benches/alloc_counters.rs` | none: no committed cargo results file; the Go A/B is `bench/results/gp-feat-001/r10-*` |
 
