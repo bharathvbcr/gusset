@@ -1416,6 +1416,72 @@ func TestSupervisedRefusal_DropsTheCloseAdvice(t *testing.T) {
 	}
 }
 
+// A job whose worker dies under it, or panics beside it, fails from Wait with
+// an error that still matches what it matched but does not tell the caller to
+// Close: the supervisor owns Close, and the next call, with no Close, is served
+// by the replacement it starts.
+func TestSupervisor_WaitOnDeadGenerationDropsTheCloseAdvice(t *testing.T) {
+	t.Run("sigkill", func(t *testing.T) {
+		h := newHarness(t, Policy{MaxRestarts: 3, Window: time.Minute}, nil)
+		h.count = filepath.Join(t.TempDir(), "submits")
+		pid := h.echo()
+		// 2.55s asleep in the engine, counted when the worker accepts the job.
+		payload := []byte{9, 255, 0, 0xAB}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		id, err := h.s.Submit(ctx, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitCount(t, h.count, payload, 1)
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+		_, err = h.s.Wait(ctx, id)
+		if !errors.Is(err, gusset.ErrPoisoned) {
+			t.Fatalf("in-flight Wait = %v; want ErrPoisoned", err)
+		}
+		if strings.Contains(err.Error(), "Close it") {
+			t.Fatalf("in-flight Wait = %q; a supervised caller must not be told to Close", err)
+		}
+		if next := h.echo(); next == pid {
+			t.Fatalf("echo still on pid %d", pid)
+		}
+		if got := h.starts.Load(); got != 2 {
+			t.Fatalf("starts = %d; want one replacement", got)
+		}
+	})
+	t.Run("panic", func(t *testing.T) {
+		h := newHarness(t, Policy{MaxRestarts: 3, Window: time.Minute}, nil)
+		pid := h.echo()
+		// Both jobs land on this process, then panic: one ErrPanic, and the
+		// other either panics too or is refused as poisoned.
+		payload := []byte{9, 80, 1}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		id1, err := h.s.Submit(ctx, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id2, err := h.s.Submit(ctx, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []uint64{id1, id2} {
+			_, err := h.s.Wait(ctx, id)
+			if !errors.Is(err, gusset.ErrPanic) && !errors.Is(err, gusset.ErrPoisoned) {
+				t.Fatalf("in-flight Wait = %v; want ErrPanic or ErrPoisoned", err)
+			}
+			if strings.Contains(err.Error(), "Close it") {
+				t.Fatalf("in-flight Wait = %q; a supervised caller must not be told to Close", err)
+			}
+		}
+		if next := h.echo(); next == pid {
+			t.Fatal("echo reused the panicked process")
+		}
+	})
+}
+
 // A job submitted while the live worker is being SIGKILLed either runs on the
 // replacement or fails with an error that does not tell the caller to Close.
 // Run with -race.
