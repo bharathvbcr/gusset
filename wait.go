@@ -11,6 +11,15 @@ import (
 )
 
 // Wait waits for completion of an asynchronously submitted job ticket.
+//
+// A Wait ends a ticket exactly once. If ctx ends first, Wait asks the engine to
+// stop the job and returns ctx.Err(), and the ticket is spent: a second Wait on
+// it returns [ErrUnknownTicket], not the result. The job's pool permit stays
+// with the running work until the engine actually stops it (an engine that
+// never checks its context runs on), so the pool does not admit more work than
+// its size meanwhile. A second goroutine waiting on a ticket that already has a
+// waiter gets [ErrTicketBusy]. A waiter released because Close ended its ticket
+// gets an error that matches [ErrClosed].
 func (h *Handle) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	if h == nil || h.state == nil {
 		return nil, ErrNilHandle

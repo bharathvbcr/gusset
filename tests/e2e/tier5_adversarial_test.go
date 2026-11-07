@@ -234,11 +234,15 @@ type closeRaceOutcome struct {
 
 // closeRaceNamedError reports whether err is one of the answers an operation may
 // give when the handle is closed under it: the handle is closed, a ticket is no
-// longer there, or the caller's own context ended. Anything else is a bug.
+// longer there, or the caller's own timeout ended. Anything else is a bug.
+//
+// A bare context.Canceled is not an answer: every caller holds a context that is
+// never cancelled before it returns, so a cancel it sees was Close's, and Close's
+// contract is ErrClosed (A3-2). The deadline stays because each caller's own
+// 500 ms timeout can end under host load.
 func closeRaceNamedError(err error) bool {
 	return errors.Is(err, gusset.ErrClosed) ||
 		errors.Is(err, gusset.ErrUnknownTicket) ||
-		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded)
 }
 
