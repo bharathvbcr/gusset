@@ -745,20 +745,33 @@ func (p *Proc) notifyRetireLocked(cause string) {
 // runs when Wait abandons a ticket. If every pool permit is now held by a
 // cancelled ticket nothing can be submitted, so it arms one timer for stall.
 // When the timer fires, the generation is unresponsive only if no frame was
-// delivered since it was armed and the permits are still all held; a frame
-// restarts the judgement the next time a Wait abandons. The caller holds
-// p.mu. Without a supervisor (retire nil) or a stall bound it does nothing.
+// delivered since it was armed and the permits are still all held. A frame
+// inside the window restarts the judgement: if the permits are all held again
+// when the timer fires, the timer arms a fresh window itself, because with
+// every permit stranded no Submit gets through and no Wait can abandon to arm
+// it. The caller holds p.mu. Without a supervisor (retire nil) or a stall
+// bound it does nothing.
 func (p *Proc) judgeStallLocked() {
 	if p.retire == nil || p.stall <= 0 || p.stallArmed || p.retireSent || !p.stalledLocked() {
 		return
 	}
+	p.armStallLocked()
+}
+
+// armStallLocked starts one stall window. The caller holds p.mu and has
+// checked that the generation is stalled and not yet signalled.
+func (p *Proc) armStallLocked() {
 	p.stallArmed = true
 	seen := p.frames.Load()
 	time.AfterFunc(p.stall, func() {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		p.stallArmed = false
-		if p.closed || p.dead != nil || p.frames.Load() != seen || !p.stalledLocked() {
+		if p.closed || p.dead != nil || p.retireSent || !p.stalledLocked() {
+			return
+		}
+		if p.frames.Load() != seen {
+			p.armStallLocked()
 			return
 		}
 		p.notifyRetireLocked("unresponsive")
