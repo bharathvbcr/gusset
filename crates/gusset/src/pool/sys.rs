@@ -672,6 +672,27 @@ mod tests {
         assert!(outcome, "the guard's drop clobbered a foreign sigaltstack");
     }
 
+    /// Whether every page of `[base, base + len)` is mapped, asked with
+    /// `msync(MS_ASYNC)`, which fails with ENOMEM when any page of the range is
+    /// unmapped and otherwise schedules nothing for private anonymous memory.
+    /// The test used to ask `mprotect(PROT_NONE)`, which on a range another
+    /// test's `mmap` had reused in the meantime (tests run in parallel and map
+    /// alt stacks of this very size) disabled that worker's live signal stack.
+    /// `mincore(2)` was the first candidate, but on macOS it returns 0 for an
+    /// unmapped range, so it cannot answer this. The check stays a snapshot: a
+    /// parallel test can map the hole between the drop and the probe, which
+    /// reads as mapped.
+    fn range_is_mapped(base: *mut libc::c_void, len: usize) -> bool {
+        // SAFETY: msync(MS_ASYNC) does not access the range.
+        let rc = unsafe { libc::msync(base, len, libc::MS_ASYNC) };
+        if rc == 0 {
+            return true;
+        }
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        assert_eq!(errno, Some(libc::ENOMEM), "msync failed for another reason");
+        false
+    }
+
     /// The ordinary path still disables and unmaps what it installed.
     #[test]
     #[cfg_attr(miri, ignore)] // sigaltstack(2) and mmap: not Miri-runnable
@@ -679,18 +700,22 @@ mod tests {
         let result = std::thread::spawn(|| {
             let guard = install_or_panic();
             let (base, len) = (guard.map_base, guard.map_len);
+            // The probe must see the live mapping, or "unmapped" below proves
+            // nothing.
+            let mapped_while_live = range_is_mapped(base, len);
             drop(guard);
             let cur = current_altstack();
-            // mprotect fails with ENOMEM on an unmapped range, and on a
-            // mapped one only changes protections of a mapping nobody uses.
-            // SAFETY: the range is never accessed.
-            let probe = unsafe { libc::mprotect(base, len, libc::PROT_NONE) };
-            (cur.ss_flags & libc::SS_DISABLE != 0, probe != 0)
+            (
+                mapped_while_live,
+                cur.ss_flags & libc::SS_DISABLE != 0,
+                !range_is_mapped(base, len),
+            )
         })
         .join();
-        let Ok((disabled, unmapped)) = result else {
+        let Ok((mapped_while_live, disabled, unmapped)) = result else {
             panic!("the sigaltstack thread panicked");
         };
+        assert!(mapped_while_live, "the probe cannot see a live mapping");
         assert!(disabled, "our stack was left installed");
         assert!(unmapped, "our mapping was leaked on the normal path");
     }
