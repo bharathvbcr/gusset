@@ -16,19 +16,40 @@ var (
 	// failure() or the 'failure' result string, as `contains(needs.*.result, 'failure')`
 	// or `needs.x.result == 'failure'` spell it.
 	failureCond = regexp.MustCompile(`\bfailure\(\)|'failure'`)
-	// a cancelled that makes the job run: cancelled() not under `!`, or the
-	// 'cancelled' result string. `!cancelled()` means the opposite.
-	cancelledCond = regexp.MustCompile(`(?:^|[^!\w])cancelled\(\)|'cancelled'`)
+	// A status function that makes the job run when a needed job was cancelled
+	// (or timed out): always() or cancelled(), not under `!`. Without one,
+	// GitHub applies the implicit success() and skips the job as soon as a
+	// needed job did not succeed, so a failure-only report job never reports.
+	runsOnCancelFn = regexp.MustCompile(`(?:^|[^!\w.])(?:always|cancelled)\(\)`)
+	// cancelled() as the status function is itself the match.
+	cancelledFn = regexp.MustCompile(`(?:^|[^!\w.])cancelled\(\)`)
+	// 'cancelled' counts only as a needs result tested positively:
+	// contains(needs.*.result, 'cancelled') or needs.x.result == 'cancelled',
+	// not under `!` and not `!=`. An unrelated `github.event.x == 'cancelled'`
+	// does not match.
+	cancelledResult = regexp.MustCompile(`(?:^|[^!\w])contains\(\s*needs\.\*\.result\s*,\s*'cancelled'\s*\)|(?:^|[^!\w.])needs\.[\w-]+\.result\s*==\s*'cancelled'`)
+	trailingComment = regexp.MustCompile(`\s#.*$`)
 )
 
+// reportCondOK says whether a job-level `if:` that matches on failure also
+// runs, and matches, on cancelled. A `# ...` comment is not part of the
+// expression, so it is stripped first and cannot satisfy the rule.
+func reportCondOK(cond string) bool {
+	cond = trailingComment.ReplaceAllString(cond, "")
+	if cancelledFn.MatchString(cond) {
+		return true
+	}
+	return runsOnCancelFn.MatchString(cond) && cancelledResult.MatchString(cond)
+}
+
 // failureWithoutCancelledViolations reports every job whose job-level `if:`
-// matches on failure and not on cancelled.
+// matches on failure and does not run on cancelled (see reportCondOK).
 func failureWithoutCancelledViolations(name string, lines []string) []string {
 	var out []string
 	for _, job := range splitJobs(lines) {
 		jl := strings.Split(job, "\n")
 		cond, ok := jobKey(jl, "if")
-		if !ok || !failureCond.MatchString(cond) || cancelledCond.MatchString(cond) {
+		if !ok || !failureCond.MatchString(trailingComment.ReplaceAllString(cond, "")) || reportCondOK(cond) {
 			continue
 		}
 		out = append(out, name+": job "+jobName(jl)+" runs on failure but not on cancelled, so a timeout opens nothing: if: "+cond)
@@ -58,6 +79,11 @@ func TestPlantedFailureWithoutCancelledIsCaught(t *testing.T) {
 		return strings.Split("jobs:\n  report:\n    needs: [a]\n    if: "+cond+"\n    timeout-minutes: 10\n    steps:\n      - run: true\n", "\n")
 	}
 	bad := []string{
+		"always() && contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')",
+		"always() && needs.a.result == 'failure' && needs.a.result != 'cancelled'",
+		"failure() # cancelled()",
+		"failure() || github.event.x == 'cancelled'",
+		"contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')",
 		"failure()",
 		"${{ failure() }}",
 		"always() && contains(needs.*.result, 'failure')",
@@ -66,6 +92,8 @@ func TestPlantedFailureWithoutCancelledIsCaught(t *testing.T) {
 	}
 	good := []string{
 		"failure() || cancelled()",
+		"always() && (contains(needs.*.result, 'failure') || needs.a.result == 'cancelled')",
+		"always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) # also on cancel",
 		"always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))",
 		"always() && github.ref == 'refs/heads/main' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped'))",
 		"success()",
