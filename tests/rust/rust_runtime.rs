@@ -199,14 +199,50 @@ fn log_ring_evicts_oldest_and_stays_bounded() {
         "the oldest lines must have been evicted"
     );
 
-    // Every retained line must be intact: eviction drops whole lines, so no
-    // fragment of a half-evicted line may be left at the front.
+    // The ring is process-wide and this binary's other tests can log into it
+    // (LOG_RING_DRAIN_LOCK is crate-internal, so it cannot be taken here), so
+    // the drain may hold foreign lines between ours. Only this test's own
+    // `line-N` lines are judged, and they are judged strictly:
+    //  * each is whole, `line-` and digits only;
+    //  * their numbers rise by exactly one, so eviction took the oldest first
+    //    and never a line from the middle;
+    //  * the first line is not the tail of the line evicted before ours (a
+    //    half-evicted line would be left at the front of the ring).
+    let mut previous: Option<usize> = None;
     for line in text.lines() {
-        assert!(
-            line.starts_with("line-"),
-            "eviction must drop whole lines, found fragment: {:?}",
-            line
-        );
+        let Some(digits) = line.strip_prefix("line-") else {
+            continue;
+        };
+        let n: usize = digits
+            .parse()
+            .unwrap_or_else(|_| panic!("a line-N line must be whole, found {line:?}"));
+        if let Some(prev) = previous {
+            assert_eq!(n, prev + 1, "lines must be evicted oldest first, in order");
+        }
+        previous = Some(n);
+    }
+    let Some(last) = previous else {
+        panic!("no line-N line survived in {text:?}");
+    };
+    assert_eq!(
+        last,
+        LINES - 1,
+        "the newest line must be the last one retained"
+    );
+    let first_ours = text
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("line-")
+                .and_then(|d| d.parse::<usize>().ok())
+        })
+        .unwrap_or_else(|| panic!("no line-N line survived"));
+    if let Some(front) = text.lines().next() {
+        if !front.starts_with("line-") && first_ours > 0 {
+            assert!(
+                !format!("line-{}", first_ours - 1).ends_with(front),
+                "eviction must drop whole lines, found fragment at the front: {front:?}"
+            );
+        }
     }
 }
 
