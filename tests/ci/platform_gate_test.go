@@ -139,7 +139,7 @@ func hasGoNamedRefusal(steps [][]string) bool {
 func stepCode(step []string) string {
 	var b strings.Builder
 	for _, line := range strings.Split(stepRunBody(step), "\n") {
-		b.WriteString(stripShellComment(line))
+		b.WriteString(stripComment(line))
 		b.WriteByte('\n')
 	}
 	return b.String()

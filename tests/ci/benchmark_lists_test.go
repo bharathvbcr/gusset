@@ -379,17 +379,22 @@ var wholeBenchRun = regexp.MustCompile(`(?:^|\s)-(?:test\.)?bench[= ]'?\.'?(?:\s
 func wholePackageBenchViolations(name string, lines []string, manual []string) []string {
 	var out []string
 	skipArg := regexp.MustCompile(`(?:^|\s)-(?:test\.)?skip[= ]('[^']*'|"[^"]*"|\S+)`)
+	// Each command is judged by its own -skip: `a -bench . && b -bench . -skip x`
+	// must not let b's skip cover a. The split is quote-aware, because the skip
+	// pattern itself holds a `)`.
 	for _, ll := range logicalLines(lines) {
-		if !wholeBenchRun.MatchString(ll.text) {
-			continue
-		}
-		skip := ""
-		if m := skipArg.FindStringSubmatch(ll.text); m != nil {
-			skip = m[1]
-		}
-		for _, fn := range manual {
-			if !strings.Contains(skip, fn) {
-				out = append(out, name+":"+strconv.Itoa(ll.n)+": a whole-package bench run does not skip manual-only "+fn+": "+strings.TrimSpace(ll.text))
+		for _, seg := range commandSegments(ll.text) {
+			if !wholeBenchRun.MatchString(seg + " ") {
+				continue
+			}
+			skip := ""
+			if m := skipArg.FindStringSubmatch(seg); m != nil {
+				skip = m[1]
+			}
+			for _, fn := range manual {
+				if !strings.Contains(skip, fn) {
+					out = append(out, name+":"+strconv.Itoa(ll.n)+": a whole-package bench run does not skip manual-only "+fn+": "+strings.TrimSpace(seg))
+				}
 			}
 		}
 	}
@@ -447,10 +452,24 @@ func TestPlantedWholePackageBenchWithoutSkipIsCaught(t *testing.T) {
 		`go test -run '^$' -bench . -skip '^(BenchmarkOther)$' ./bench/...`,
 		"go test -run '^$' -bench . \\\n  -benchtime=1s ./bench/...",
 	}
+	// One run without the skip, joined by && to one with it: the second's skip
+	// must not cover the first. Each is one violation, in either order.
+	joined := []string{
+		`(cd "$dir/bench" && "$RUNNER_TEMP/$tag.test" "${common[@]}" -test.bench .) && (cd "$dir/y" && "$RUNNER_TEMP/y.test" -test.bench . -test.skip '^(BenchmarkHandleChurn)$')`,
+		`(cd "$dir/bench" && "$RUNNER_TEMP/$tag.test" "${common[@]}" -test.bench . -test.skip '^(BenchmarkHandleChurn)$') && (cd "$dir/y" && "$RUNNER_TEMP/y.test" -test.bench .)`,
+		"go test -bench . ./bench/... &&\n go test -bench . -skip '^(BenchmarkHandleChurn)$' ./bench/...",
+	}
+	for _, l := range joined {
+		if got := wholePackageBenchViolations("planted", strings.Split(l, "\n"), manual); len(got) != 1 {
+			t.Errorf("want exactly the unskipped run flagged, got %d: %s", len(got), l)
+		}
+	}
 	good := []string{
 		`go test -run '^$' -bench . -skip '^(BenchmarkHandleChurn)$' -benchtime=1s ./bench/...`,
 		`(cd "$dir/bench" && "$RUNNER_TEMP/$tag.test" -test.bench . -test.skip '^(BenchmarkHandleChurn)$')`,
 		"go test -bench . \\\n  -skip '^(BenchmarkHandleChurn)$' ./bench/...",
+		// The real matrix.yml shape: both sides run whole, each with its own skip.
+		`(cd "$dir/bench" && "$RUNNER_TEMP/$tag.test" "${common[@]}" -test.bench . -test.skip '^(BenchmarkHandleChurn)$') && (cd "$dir/x" && "$RUNNER_TEMP/y.test" -test.bench . -test.skip '^(BenchmarkHandleChurn)$')`,
 		`go test -bench '^(BenchmarkCallNoopBare)$' .`,
 		`# go test -bench . ./bench/...`,
 	}

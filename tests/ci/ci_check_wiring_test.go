@@ -133,8 +133,9 @@ func pipefailAfter(seg string, armed bool) bool {
 // inside a string); a heredoc body is read as commands, so a `| tee` inside one
 // is flagged; a `set -o pipefail` on its own line inside a function or an `if`
 // arms the whole script, so it errs toward accepting, while `f() { set -o
-// pipefail; }` on one line errs toward flagging; and a string spanning physical
-// lines is read line by line.
+// pipefail; }` on one line, and `( set -o pipefail; go test | tee out )` in a
+// subshell paren, err toward flagging; and a string spanning physical lines is
+// read line by line. TestTeeRuleKnownOverFlagging pins the over-flagging cases.
 func teeWithoutPipefailViolations(name string, lines []string) []string {
 	var out []string
 	for _, b := range runBlocks(lines) {

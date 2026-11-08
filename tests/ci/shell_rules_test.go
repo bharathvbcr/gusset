@@ -75,7 +75,7 @@ func flattenSubst(s string, keep *regexp.Regexp) string {
 func shellText(lines []string, keep *regexp.Regexp) string {
 	body := make([]string, 0, len(lines))
 	for _, l := range lines {
-		body = append(body, stripShellComment(l))
+		body = append(body, stripComment(l))
 	}
 	return flattenSubst(strings.ReplaceAll(strings.Join(body, "\n"), "\\\n", " "), keep)
 }
