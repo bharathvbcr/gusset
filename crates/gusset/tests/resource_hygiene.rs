@@ -43,7 +43,12 @@ fn pin_malloc_arenas() {
     {
         // SAFETY: mallopt only adjusts allocator tuning.
         let ok = unsafe { libc::mallopt(libc::M_ARENA_MAX, 1) };
-        assert_eq!(ok, 1, "mallopt(M_ARENA_MAX, 1) failed");
+        assert_eq!(
+            ok, 1,
+            "mallopt(M_ARENA_MAX, 1) was refused (returned {ok}); this usually means the allocator is not glibc's \
+             (a sanitizer such as ASan, or another malloc interposer). This test measures glibc arenas and \
+             /proc/self/maps and cannot run under one"
+        );
     }
 }
 
