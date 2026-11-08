@@ -221,7 +221,9 @@ func versionTree() map[string]string {
 }
 
 func TestVersionParityPassesWhenEveryInputAgrees(t *testing.T) {
-	out, err := lint(t, versionTree(), nil, "version-parity")
+	// The tag exists, so the baked commit is verified; with no tag the step is
+	// NOT VERIFIED (release window), which is not a PASS.
+	out, err := lintWith(t, versionTree(), nil, tagFixture(t, tagLocal, false, "", false), "version-parity")
 	if err != nil || !strings.Contains(out, "version-parity PASS") {
 		t.Fatalf("five agreeing inputs did not pass: %v\n%s", err, out)
 	}
