@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -45,7 +46,6 @@ var gatedBenchmarks = []string{
 	"bench:BenchmarkGussetSubmitWaitResult",
 	"bench:BenchmarkGussetWaitBuffer",
 	"bench:BenchmarkGussetWaitBufferResultSize",
-	"bench:BenchmarkHandleChurn",
 	"bench:BenchmarkStats",
 	"bench:BenchmarkSumSquares",
 	".:BenchmarkCallNoopBare",
@@ -58,6 +58,7 @@ var gatedBenchmarks = []string{
 // manualOnlyBenchmarks are not in the bench job. The value is why, and it must
 // not be empty.
 var manualOnlyBenchmarks = map[string]string{
+	"bench:BenchmarkHandleChurn":                  "one Open plus Close is worker-thread start and join, dominated by the kernel and the runner's load, the same reason BenchmarkSupervisorRestart is manual-only; it swings past the gate's 10% between identical runs. Package bench runs whole, so every whole-package run excludes it with -skip (TestWholePackageBenchRunsSkipManualOnlyBenchmarks). Run it by hand with `go test -run '^$' -bench HandleChurn ./bench/`.",
 	"internal/isolate:BenchmarkSupervisorRestart": "one restart is a kill plus a process start and handshake, dominated by the kernel and the runner's load; it swings well past the gate's 10% between identical runs, so gating it would fail on noise. Record it with RECORD_DIR=. RECORD_PKG=./internal/isolate bench/record.sh OUT 1s COUNT BenchmarkSupervisorRestart.",
 
 	"crates/gusset/benches/dispatch.rs":       "cargo bench compares its own arms (diagnostic vs registered engine, opcode 0 vs nonzero) interleaved inside one process and has no base-versus-head mode. `make bench-dispatch` records it.",
@@ -343,7 +344,7 @@ func TestGatedBenchmarksAreWhatTheJobRuns(t *testing.T) {
 		`go test -c -o "$RUNNER_TEMP/old-isolate.test" ./internal/isolate`,
 		`bench_side old "$RUNNER_TEMP/base" old.txt`,
 		`bench_side new "$PWD" new.txt`,
-		`-test.bench .)`,
+		`-test.bench . -test.skip '^(BenchmarkHandleChurn)$')`,
 		`-test.bench "$ROOT_BENCH"`,
 		`-test.bench "$ISOLATE_BENCH"`,
 		`benchgate regress -threshold 10 -min-samples 10 delta.csv`,
@@ -364,4 +365,103 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// wholeBenchRun matches `-bench .` / `-test.bench .`: every benchmark of the
+// package, with no name pattern to leave one out.
+var wholeBenchRun = regexp.MustCompile(`(?:^|\s)-(?:test\.)?bench[= ]'?\.'?(?:\s|\)|$)`)
+
+// wholePackageBenchViolations reports each whole-package benchmark run in lines
+// that does not name every manual-only benchmark of package bench in a
+// -skip/-test.skip argument. Package bench runs whole in the bench job and in
+// `make ci-local`, so a manual-only entry there that no run skips is still
+// gated, in fact: it would be compared against its base and fail on noise.
+func wholePackageBenchViolations(name string, lines []string, manual []string) []string {
+	var out []string
+	skipArg := regexp.MustCompile(`(?:^|\s)-(?:test\.)?skip[= ]('[^']*'|"[^"]*"|\S+)`)
+	for _, ll := range logicalLines(lines) {
+		if !wholeBenchRun.MatchString(ll.text) {
+			continue
+		}
+		skip := ""
+		if m := skipArg.FindStringSubmatch(ll.text); m != nil {
+			skip = m[1]
+		}
+		for _, fn := range manual {
+			if !strings.Contains(skip, fn) {
+				out = append(out, name+":"+strconv.Itoa(ll.n)+": a whole-package bench run does not skip manual-only "+fn+": "+strings.TrimSpace(ll.text))
+			}
+		}
+	}
+	return out
+}
+
+// manualOnlyInPackage lists the manual-only Go benchmark names of one package
+// directory.
+func manualOnlyInPackage(dir string) []string {
+	var out []string
+	for n := range manualOnlyBenchmarks {
+		if d, fn, ok := strings.Cut(n, ":"); ok && d == dir {
+			out = append(out, fn)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func TestWholePackageBenchRunsSkipManualOnlyBenchmarks(t *testing.T) {
+	manual := manualOnlyInPackage("bench")
+	if len(manual) == 0 {
+		t.Fatal("no manual-only benchmark in package bench; BenchmarkHandleChurn is one, so the lookup is broken")
+	}
+	runs := 0
+	var bench string
+	for _, j := range splitJobs(workflows(t)["matrix.yml"]) {
+		if strings.HasPrefix(strings.TrimSpace(j), "bench:") {
+			bench = j
+		}
+	}
+	for name, lines := range map[string][]string{
+		"matrix.yml (bench job)": strings.Split(bench, "\n"),
+		"Makefile":               readLines(t, "../../Makefile"),
+	} {
+		for _, ll := range logicalLines(lines) {
+			if wholeBenchRun.MatchString(ll.text) {
+				runs++
+			}
+		}
+		for _, v := range wholePackageBenchViolations(name, lines, manual) {
+			t.Error(v)
+		}
+	}
+	if runs < 3 {
+		t.Errorf("found %d whole-package bench runs; the bench job has two and make ci-local one, so the scan is broken", runs)
+	}
+}
+
+func TestPlantedWholePackageBenchWithoutSkipIsCaught(t *testing.T) {
+	manual := []string{"BenchmarkHandleChurn"}
+	bad := []string{
+		`go test -run '^$' -bench . -benchtime=1s ./bench/...`,
+		`(cd "$dir/bench" && "$RUNNER_TEMP/$tag.test" "${common[@]}" -test.bench .)`,
+		`go test -run '^$' -bench . -skip '^(BenchmarkOther)$' ./bench/...`,
+		"go test -run '^$' -bench . \\\n  -benchtime=1s ./bench/...",
+	}
+	good := []string{
+		`go test -run '^$' -bench . -skip '^(BenchmarkHandleChurn)$' -benchtime=1s ./bench/...`,
+		`(cd "$dir/bench" && "$RUNNER_TEMP/$tag.test" -test.bench . -test.skip '^(BenchmarkHandleChurn)$')`,
+		"go test -bench . \\\n  -skip '^(BenchmarkHandleChurn)$' ./bench/...",
+		`go test -bench '^(BenchmarkCallNoopBare)$' .`,
+		`# go test -bench . ./bench/...`,
+	}
+	for _, l := range bad {
+		if len(wholePackageBenchViolations("planted", strings.Split(l, "\n"), manual)) != 1 {
+			t.Errorf("not caught: %s", l)
+		}
+	}
+	for _, l := range good {
+		if v := wholePackageBenchViolations("planted", strings.Split(l, "\n"), manual); len(v) != 0 {
+			t.Errorf("compliant run flagged: %s: %v", l, v)
+		}
+	}
 }

@@ -904,10 +904,13 @@ jobs:
       # checked against each other: a benchmark added to either place without
       # the other fails `go test ./tests/ci`.
       #
-      # BenchmarkSupervisorRestart and the two Rust benches are manual-only.
-      # A restart is dominated by the kernel starting a process, which swings
-      # far past 10% between runs on a shared runner, so gating it would fail
-      # on noise. The Rust pair (cargo bench -p gusset --bench dispatch and
+      # BenchmarkSupervisorRestart, BenchmarkHandleChurn and the two Rust
+      # benches are manual-only. A restart is dominated by the kernel starting
+      # a process, and a handle open/close by starting and joining worker
+      # threads; both swing far past 10% between runs on a shared runner, so
+      # gating them would fail on noise. Package bench runs whole, so
+      # BenchmarkHandleChurn is excluded with -test.skip on every whole-package
+      # run below (tests/ci/benchmark_lists_test.go checks each one). The Rust pair (cargo bench -p gusset --bench dispatch and
       # alloc_counters) compares its own arms inside one process and has no
       # base-versus-head mode; `make bench-dispatch` and `make
       # bench-alloc-counters` record it through bench/record.sh. The reasons
@@ -925,7 +928,7 @@ jobs:
             local tag=$1 dir=$2 out=$3
             local common=(-test.run '^$' -test.benchtime=1s -test.count=1 -test.benchmem)
             {
-              (cd "$dir/bench" && "$RUNNER_TEMP/$tag.test" "${common[@]}" -test.bench .)
+              (cd "$dir/bench" && "$RUNNER_TEMP/$tag.test" "${common[@]}" -test.bench . -test.skip '^(BenchmarkHandleChurn)$')
               (cd "$dir" && "$RUNNER_TEMP/$tag-root.test" "${common[@]}" -test.bench "$ROOT_BENCH")
               (cd "$dir/internal/isolate" && "$RUNNER_TEMP/$tag-isolate.test" "${common[@]}" -test.bench "$ISOLATE_BENCH")
             } >> "$out"
@@ -955,7 +958,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked --release
-          go test -run '^$' -bench . -benchtime=1s -benchmem -count=10 ./bench/... > new.txt
+          go test -run '^$' -bench . -skip '^(BenchmarkHandleChurn)$' -benchtime=1s -benchmem -count=10 ./bench/... > new.txt
           go test -run '^$' -bench '^(BenchmarkCallNoopBare|BenchmarkCallNoopTraced)$' -benchtime=1s -benchmem -count=10 . >> new.txt
 
       # R5's noescape claim is only worth something if the allocation count it
