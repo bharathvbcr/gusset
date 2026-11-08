@@ -165,6 +165,13 @@ type Proc struct {
 	// kill and the group is left to whoever else kills it. Nil outside tests;
 	// atomic because the reader is already running when a test sets it.
 	killGate atomic.Pointer[func()]
+
+	// sendFailGate is a test seam: submitCounted runs it after a failed send
+	// has released its ticket and permit, before it decides what to return. It
+	// lets a test make the reader finish at that point, the order in which the
+	// caller's deadline and the worker's exit are both ready. Nil outside
+	// tests; atomic for the same reason as killGate.
+	sendFailGate atomic.Pointer[func()]
 }
 
 // Start runs cmd as a worker. cmd must run Serve reading its stdin and
@@ -635,12 +642,24 @@ func (p *Proc) submitCounted(ctx context.Context, in []byte) (id uint64, unsent 
 			<-p.sem
 		}
 		p.mu.Unlock()
+		if gate := p.sendFailGate.Load(); gate != nil {
+			(*gate)()
+		}
 		// The caller's deadline is the answer when the write itself could not
 		// finish in time, whether or not the reader has latched the worker.
 		// A write that did not fail that way still waits for the reader: the
 		// refusal carries the worker's exit, which is the caller's error.
-		if ctx.Err() != nil {
-			return 0, false, ctx.Err()
+		// writeLocked reports the first case as context.DeadlineExceeded
+		// even when the context's own timer has not run yet (ctx.Err() is
+		// still nil): the write deadline is the context's deadline, and the
+		// two fire together. That is honoured here, not left to the select
+		// below, which would pick the reader's exit about as often as the
+		// deadline when both are ready.
+		if cerr := ctx.Err(); cerr != nil {
+			return 0, false, cerr
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return 0, false, err
 		}
 		select {
 		case <-p.readerDone:

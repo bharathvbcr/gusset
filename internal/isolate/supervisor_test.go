@@ -28,7 +28,10 @@ type supHarness struct {
 	// forkSleep, when set, is the file each worker writes its `sleep 60`
 	// helper's pid to (forkSleepEnv).
 	forkSleep string
-	modeOf    func(n int) string
+	// gate, when set, is the file whose existence releases the workers'
+	// opSlow jobs (gateFileEnv).
+	gate   string
+	modeOf func(n int) string
 
 	mu     sync.Mutex
 	cmds   []*exec.Cmd
@@ -74,6 +77,9 @@ func (h *supHarness) factory() (*exec.Cmd, error) {
 	}
 	if h.forkSleep != "" {
 		env = append(env, forkSleepEnv+"="+h.forkSleep)
+	}
+	if h.gate != "" {
+		env = append(env, gateFileEnv+"="+h.gate)
 	}
 	cmd.Env = env
 	buf := &lockedBuffer{}
@@ -398,6 +404,50 @@ func TestSupervisor_PanicSpendsOneRestart(t *testing.T) {
 	}
 }
 
+// softDeadlineCtx has a deadline but never reports itself done: Err stays nil
+// and Done is nil. The write deadline then fires with ctx.Err() still nil, the
+// order a real context only reaches when its timer runs after the poller's.
+type softDeadlineCtx struct {
+	context.Context
+	d time.Time
+}
+
+func (c softDeadlineCtx) Deadline() (time.Time, bool) { return c.d, true }
+
+// A Submit whose write hit the caller's deadline answers with that deadline
+// even when the reader has already latched the worker's death. sendFailGate
+// kills the worker and waits for the reader at the point where both the
+// deadline and the exit are ready, so no timer or scheduler picks the winner;
+// with the choice left to a select, the exit was returned about as often as the
+// deadline.
+func TestProc_CutWriteReturnsTheDeadlineEvenWhenTheReaderIsDone(t *testing.T) {
+	p := startWorkerMode(t, "deaf")
+	fillStdin(t, p)
+	gate := func() {
+		if err := syscall.Kill(p.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			t.Error(err)
+		}
+		select {
+		case <-p.readerDone:
+		case <-time.After(10 * time.Second):
+			t.Error("the reader did not finish after the worker was killed")
+		}
+	}
+	p.sendFailGate.Store(&gate)
+
+	ctx := softDeadlineCtx{Context: context.Background(), d: time.Now().Add(100 * time.Millisecond)}
+	var err error
+	within(t, 10*time.Second, "cut Submit", func() {
+		_, err = p.Submit(ctx, []byte{0x5A})
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cut Submit = %v; want the deadline the write hit, not the worker's exit", err)
+	}
+	if got := len(p.sem); got != 0 {
+		t.Fatalf("%d permits held after the cut Submit", got)
+	}
+}
+
 func TestSupervisor_CutWriteRetiresOneRestart(t *testing.T) {
 	h := newHarness(t, Policy{MaxRestarts: 1, Window: time.Minute}, func(n int) string {
 		if n == 1 {
@@ -422,18 +472,13 @@ func TestSupervisor_CutWriteRetiresOneRestart(t *testing.T) {
 	within(t, 10*time.Second, "cut Submit", func() {
 		_, err = h.s.Submit(wctx, []byte{0x5A})
 	})
-	// Two outcomes are both the cut write. The write deadline and the
-	// request's context fire at the same instant, and the write's can be seen
-	// first: send then reports a cut frame while ctx.Err() is still nil, the
-	// frame poisons the generation, and a loaded host lets the retirement's
-	// kill latch the worker's death before the context's timer runs. The
-	// caller then gets the worker's exit as a supervisor refusal (poison, no
-	// "Close it" advice) instead of its deadline. What this test pins is the
-	// restart accounting below, not which of the two a race delivers.
-	deadline := errors.Is(err, context.DeadlineExceeded)
-	refusal := errors.Is(err, gusset.ErrPoisoned) && err != nil && !strings.Contains(err.Error(), "Close it")
-	if !deadline && !refusal {
-		t.Fatalf("cut Submit = %v; want the request's deadline or the poisoned generation's refusal without Close advice", err)
+	// The write deadline and the request's context fire at the same instant,
+	// so the caller's answer is its deadline whichever is seen first and
+	// whether or not the retirement has already latched the worker's death
+	// (TestProc_CutWriteReturnsTheDeadlineEvenWhenTheReaderIsDone forces the
+	// order that used to return the worker's exit instead).
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cut Submit = %v; want the request's deadline", err)
 	}
 	pid := h.echo()
 	if h.starts.Load() != 2 {
@@ -964,15 +1009,22 @@ func TestSupervisor_PartialFrameStallRetiredUnresponsive(t *testing.T) {
 }
 
 // A worker that is slow but answers is not wedged: the frame that lands inside
-// the stall window restarts the judgement, and the permits come back.
+// the stall window restarts the judgement, and the permits come back. The jobs
+// are held by the worker (h.gate) until every permit is stranded and are
+// released only then, so the answers do not depend on how soon the test's
+// Waits began; they land 50ms of work after the release, inside the 1s window.
 func TestSupervisor_SlowWorkerThatAnswersIsNotRetired(t *testing.T) {
-	h := newHarness(t, Policy{MaxRestarts: 2, Window: time.Minute, StallTimeout: 700 * time.Millisecond}, nil)
+	h := newHarness(t, Policy{MaxRestarts: 2, Window: time.Minute, StallTimeout: time.Second}, nil)
+	h.gate = filepath.Join(t.TempDir(), "release")
 	pid := h.echo()
-	p := abandonPool(t, h, []byte{9, 30}) // 300ms of work, never polling the deadline
+	p := abandonPool(t, h, []byte{opSlow, 5}) // 50ms of work, never polling the deadline
+	if err := os.WriteFile(h.gate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	begin := time.Now()
 
 	// Outlast the stall window, which started when the permits were stranded.
-	for time.Since(begin) < 1200*time.Millisecond {
+	for time.Since(begin) < 1500*time.Millisecond {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if len(p.sem) != 0 {
@@ -1642,6 +1694,6 @@ func TestSupervisor_SubmitRacingSigkill(t *testing.T) {
 		t.Fatal("no Submit succeeded across the rounds; the race never reached a replacement")
 	}
 	if advised.Load() != 0 {
-		t.Fatalf("%d Submits were told to Close", advised.Load())
+		t.Fatalf("%d Submits or Waits were told to Close", advised.Load())
 	}
 }
