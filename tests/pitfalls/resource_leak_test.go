@@ -125,14 +125,40 @@ func rustLiveVerdict(baseline, live uint64) (delta int64, leaked bool) {
 	return int64(live) - int64(baseline), !livebytes.NotLeaked(baseline, live)
 }
 
-// takeResourceBaseline is takeResourceSample with rustLive replaced by a
-// livebytes.Quiesce reading, so a straggler's cleanup cannot push the gauge
-// under the baseline after it is taken.
+// takeResourceBaseline is takeResourceSample with rustLive and fds replaced
+// by quiesced readings, so a straggler's cleanup cannot push either under the
+// baseline after it is taken. The fd checks stay exact (!=): a +1 leak that a
+// straggler closing two fds turns into -1 is caught by != and missed by >.
 func takeResourceBaseline(t *testing.T) resourceSample {
+	t.Helper()
+	return takeResourceBaselineWith(t, countFDs)
+}
+
+// takeResourceBaselineWith is takeResourceBaseline with the fd count read by
+// readFDs, so TestResourceBaselineQuiescesFDs can script it.
+func takeResourceBaselineWith(t *testing.T, readFDs func() int) resourceSample {
 	t.Helper()
 	s := takeResourceSample()
 	s.rustLive = livebytes.Quiesce(t)
+	s.fds = quiescedFDs(t, readFDs)
 	return s
+}
+
+// quiescedFDs returns the open-fd count once it has stopped moving (an
+// *os.File dropped without Close is closed later by a GC finalizer), or -1
+// when the platform has no fd directory to count, as countFDs does.
+func quiescedFDs(t *testing.T, readFDs func() int) int {
+	t.Helper()
+	if readFDs() < 0 {
+		return -1
+	}
+	return int(livebytes.QuiesceCount(t, "open fds", func() uint64 {
+		n := readFDs()
+		if n < 0 {
+			t.Fatalf("open fds became uncountable while quiescing")
+		}
+		return uint64(n)
+	}))
 }
 
 // settleResourceSampleAfterFree waits for the explicit frees to land, then
@@ -556,7 +582,7 @@ func TestResourceLeak_ThreadCountingFidelityAndActiveStackVerification(t *testin
 	time.Sleep(30 * time.Millisecond)
 	runtime.GC()
 
-	base := takeResourceSample()
+	base := takeResourceBaseline(t)
 	baseRSS := getProcessRSS()
 	t.Logf("Thread fidelity baseline: totalTasks=%d, goThreads=%d, rustThreads=%d, fds=%d, rss=%d KiB",
 		base.totalTasks, base.goThreads, base.rustThreads(), base.fds, baseRSS)
@@ -796,7 +822,7 @@ func TestResourceLeak_KqueueNetpollerRapidChurnStress(t *testing.T) {
 	runtime.GC()
 	time.Sleep(30 * time.Millisecond)
 	runtime.GC()
-	base := takeResourceSample()
+	base := takeResourceBaseline(t)
 
 	const churnCycles = 100
 	ctx := context.Background()

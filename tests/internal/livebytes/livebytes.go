@@ -18,6 +18,11 @@
 //
 // "Not leaked" is live <= baseline. A reading under the quiesced baseline is
 // a reclaim, not a leak; a reading that stays above it after settling is.
+//
+// QuiesceCount takes the same quiesced baseline for another process-wide
+// count a leak check compares, such as open file descriptors: an *os.File an
+// earlier test dropped without Close is closed by a GC finalizer, so that
+// count can also fall after a snapshot.
 package livebytes
 
 import (
@@ -65,6 +70,20 @@ func Quiesce(tb testing.TB) uint64 {
 		tb.Fatalf("LiveBytes did not quiesce: last=%d", live)
 	}
 	return live
+}
+
+// QuiesceCount is Quiesce for another process-wide count, read by read: it
+// GCs until two consecutive readings match and returns that reading. It fails
+// the test, naming the count, if it has not stopped moving after 30 seconds.
+func QuiesceCount(tb testing.TB, name string, read func() uint64) uint64 {
+	tb.Helper()
+	g := process
+	g.read = read
+	n, ok := g.quiesce()
+	if !ok {
+		tb.Fatalf("%s did not quiesce: last=%d", name, n)
+	}
+	return n
 }
 
 // Settle polls, without forcing a GC, until LiveBytes is at or under baseline

@@ -132,3 +132,22 @@ func TestProcessGaugeSeesAHeldBuffer(t *testing.T) {
 		t.Fatalf("after Free, LiveBytes stayed above the baseline: baseline=%d live=%d", baseline, live)
 	}
 }
+
+// TestQuiesceCountWaitsForAnotherCountToStopMoving runs QuiesceCount on a
+// scripted count: 12 -> 11 is a dropped *os.File's finalizer closing its fd
+// after the first read, so the baseline must be 11, not 12.
+func TestQuiesceCountWaitsForAnotherCountToStopMoving(t *testing.T) {
+	readings := []uint64{12, 11, 11}
+	i := 0
+	read := func() uint64 {
+		v := readings[min(i, len(readings)-1)]
+		i++
+		return v
+	}
+	if n := QuiesceCount(t, "open fds", read); n != 11 {
+		t.Fatalf("QuiesceCount = %d, want 11", n)
+	}
+	if i < 3 {
+		t.Fatalf("QuiesceCount read %d times, want at least 3", i)
+	}
+}
