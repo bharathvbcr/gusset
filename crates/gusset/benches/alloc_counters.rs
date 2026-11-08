@@ -21,7 +21,7 @@
 //!
 //! Same scheme as `dispatch.rs`: the arms run in rounds, every round runs each arm once,
 //! odd rounds in the listed order and even rounds reversed (ABBA), and a discarded
-//! round 0 comes first for the frequency ramp. [`MIN_ROUNDS`] is a floor, not a default:
+//! round 0 comes first for the frequency ramp. `common::MIN_ROUNDS` is a floor, not a default:
 //! benchstat will not quote a confidence interval below 6 samples.
 //!
 //! # Output
@@ -40,6 +40,9 @@
 //! Record it through `bench/record.sh` (`make bench-alloc-counters`), not by hand: the
 //! recorder refuses a loaded or shared machine and stamps the file.
 
+mod common;
+
+use common::parse_args;
 use gusset::alloc::{count_buffer_alloc, count_buffer_dealloc};
 use std::hint::black_box;
 use std::sync::Barrier;
@@ -49,9 +52,6 @@ use std::time::{Duration, Instant};
 /// Alloc-and-free pairs each thread runs per sample, unless `--iters` overrides it.
 const DEFAULT_ITERS: u32 = 200_000;
 
-/// The fewest rounds a run may ask for; also the default.
-const MIN_ROUNDS: u32 = 10;
-
 /// Bytes each pair counts: one cache line, the size of a small Gusset buffer.
 const BYTES: usize = 64;
 
@@ -59,8 +59,7 @@ const BYTES: usize = 64;
 const ARMS: [usize; 4] = [1, 2, 4, 8];
 
 fn fail(msg: &str) -> ! {
-    eprintln!("alloc_counters bench: {msg}");
-    std::process::exit(1);
+    common::fail("alloc_counters", msg)
 }
 
 /// Wall time for `threads` threads to each run `iters` alloc-and-free pairs, from the
@@ -92,48 +91,6 @@ fn time_pairs(threads: usize, iters: u32) -> Duration {
     })
 }
 
-struct Config {
-    rounds: u32,
-    iters: u32,
-}
-
-fn positive(flag: &str, value: Option<String>) -> u32 {
-    match value.as_deref().map(str::parse::<u32>) {
-        Some(Ok(n)) if n > 0 => n,
-        _ => fail(&format!("{flag} needs a positive integer")),
-    }
-}
-
-/// Reads `--rounds N` and `--iters N`. cargo appends `--bench` when it runs a bench
-/// target, so that one is accepted and ignored; anything else is refused rather than
-/// skipped, because a typo'd flag would otherwise run the defaults and look like the run
-/// that was asked for.
-fn parse_args() -> Config {
-    let mut cfg = Config {
-        rounds: MIN_ROUNDS,
-        iters: DEFAULT_ITERS,
-    };
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--bench" => {}
-            "--rounds" => cfg.rounds = positive("--rounds", args.next()),
-            "--iters" => cfg.iters = positive("--iters", args.next()),
-            other => fail(&format!(
-                "unknown argument {other}; usage: alloc_counters [--rounds N] [--iters N]"
-            )),
-        }
-    }
-    if cfg.rounds < MIN_ROUNDS {
-        fail(&format!(
-            "--rounds {} is below the floor of {MIN_ROUNDS}: fewer rounds cannot separate an \
-             order effect from a difference between arms",
-            cfg.rounds
-        ));
-    }
-    cfg
-}
-
 fn arm_name(threads: usize) -> String {
     format!("threads_{threads}")
 }
@@ -149,7 +106,7 @@ fn round_order(round: u32) -> Vec<usize> {
 }
 
 fn main() {
-    let cfg = parse_args();
+    let cfg = parse_args("alloc_counters", DEFAULT_ITERS);
 
     // Round 0: every arm once, discarded. An idle machine is not yet at a steady clock,
     // and the first arm to run would otherwise pay for the ramp.

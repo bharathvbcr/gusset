@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -95,6 +96,10 @@ type ticketState struct {
 	res       *result
 	waiter    chan result
 	abandoned bool
+	// cancelled is set when Wait gave the ticket up and sent the cancel
+	// frame. Discard abandons without cancelling and is not counted: the
+	// work it left behind is expected to run on.
+	cancelled bool
 }
 
 // Proc is the out-of-process Handle: the Caller contract served by a worker
@@ -130,14 +135,48 @@ type Proc struct {
 	procExited chan struct{} // closed after the one cmd.Wait returns
 	closeDone  chan struct{}
 	closeErr   error
+
+	// retire is a buffer-1 signal for a supervisor, nil when this Proc has
+	// none. deliver and poisonStream send once under mu. The supervisor's
+	// goroutine kills; the goroutine inside writeLocked does not.
+	retire      chan struct{}
+	retireSent  bool
+	retireCause string
+
+	// pgid is the process group start created for the worker (its own pid),
+	// or 0 when the group is not one this package owns. killTree signals it
+	// only when it is set.
+	pgid int
+
+	// stall is the supervisor's liveness bound, 0 when there is none.
+	// stallArmed is true while a judgement timer is pending, so a ticket
+	// that is dropped and re-abandoned cannot stack a second one.
+	stall      time.Duration
+	stallArmed bool
+
+	// stdinOnce makes the retirement close and poisonStream's close the same
+	// close. A second Close on an *os.File errors and does not close the
+	// descriptor twice; Once also keeps those two paths from racing.
+	stdinOnce sync.Once
 }
 
 // Start runs cmd as a worker. cmd must run Serve reading its stdin and
 // writing ProtocolOut; Start owns stdin and appends the protocol pipe to
-// cmd.ExtraFiles, naming its descriptor in EnvProtocolFD. cmd.Stdout and
-// cmd.Stderr stay as the caller set them. ctx bounds the handshake only: a
-// worker that has not announced itself by then is killed.
+// cmd.ExtraFiles, naming its descriptor in EnvProtocolFD. An existing
+// EnvProtocolFD entry is replaced, so a factory that copied a previous
+// command's environment cannot leave the child pointed at a dead descriptor.
+// cmd.Stdout and cmd.Stderr stay as the caller set them. ctx bounds the
+// handshake only: a worker that has not announced itself by then is killed.
 func Start(ctx context.Context, cmd *exec.Cmd) (*Proc, error) {
+	return start(ctx, cmd, nil, 0)
+}
+
+// start is Start with an optional supervisor signal. retire is nil for a Proc
+// that poisons in place. waitProc is the only cmd.Wait after a successful
+// return; the handshake failure path reaps the process that never became a
+// Proc. stall is the supervisor's StallTimeout; 0 turns the liveness rule off,
+// as it is for a bare Proc.
+func start(ctx context.Context, cmd *exec.Cmd, retire chan struct{}, stall time.Duration) (*Proc, error) {
 	if ctx == nil {
 		return nil, gusset.ErrNilContext
 	}
@@ -158,11 +197,15 @@ func Start(ctx context.Context, cmd *exec.Cmd) (*Proc, error) {
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()
 	}
-	cmd.Env = append(cmd.Env, EnvProtocolFD+"="+strconv.Itoa(3+len(cmd.ExtraFiles)))
+	// Drop every previous value, then append the descriptor this Start just
+	// created. Getenv returns the first match, so a stale entry left in front
+	// would win over one appended after it.
+	cmd.Env = replaceEnv(cmd.Env, EnvProtocolFD, strconv.Itoa(3+len(cmd.ExtraFiles)))
 	cmd.ExtraFiles = append(cmd.ExtraFiles, wr)
 	if cmd.WaitDelay == 0 {
 		cmd.WaitDelay = waitDelay
 	}
+	ownProcessGroup(cmd)
 	err = cmd.Start()
 	_ = wr.Close() // the child holds the only write end that matters
 	if err != nil {
@@ -186,8 +229,9 @@ func Start(ctx context.Context, cmd *exec.Cmd) (*Proc, error) {
 	if err == nil && (h.PoolSize < 1 || h.PoolSize > gusset.MaxPoolSize) {
 		err = fmt.Errorf("isolate: worker announced pool size %d outside [1, %d]", h.PoolSize, gusset.MaxPoolSize)
 	}
+	pgid := ownedGroup(cmd)
 	if err != nil {
-		_ = cmd.Process.Kill()
+		killTree(cmd, pgid)
 		_ = rd.Close()
 		_ = stdin.Close()
 		_ = cmd.Wait()
@@ -204,6 +248,9 @@ func Start(ctx context.Context, cmd *exec.Cmd) (*Proc, error) {
 		readerDone: make(chan struct{}),
 		procExited: make(chan struct{}),
 		closeDone:  make(chan struct{}),
+		retire:     retire,
+		stall:      stall,
+		pgid:       pgid,
 	}
 	// Exactly one goroutine calls cmd.Wait. It runs beside the reader: Wait
 	// is what starts WaitDelay, and a grandchild holding the protocol write
@@ -337,9 +384,65 @@ func (p *Proc) exited() bool {
 // failed. A worker that has already exited is reaped by waitProc; Kill here
 // would only race that Wait.
 func (p *Proc) killIfAlive() {
-	if !p.exited() && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
+	if !p.exited() {
+		p.killTree()
 	}
+}
+
+// ownProcessGroup puts the worker in a process group of its own, so a kill can
+// reach the helpers it spawned and not only the worker. A command that already
+// asked for a session (Setsid) is its own group leader and is left alone; one
+// that asked to join another group (Pgid != 0) keeps that choice, and
+// ownedGroup then reports no group this package may signal.
+//
+// Setpgid takes the worker out of the host's foreground process group. A
+// terminal's Ctrl-C (SIGINT) and job-control signals go to the foreground
+// group, so they no longer reach the worker directly: it learns the host is
+// going away from EOF on stdin, and the host's Close or a retirement ends it.
+func ownProcessGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	if cmd.SysProcAttr.Setsid || cmd.SysProcAttr.Pgid != 0 {
+		return
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+
+// ownedGroup is the process group id killTree may signal: the started worker's
+// own pid, when this package or the caller made it a group leader. It is 0
+// when the pid is unknown, is 1 or less, or is the host's own group. A group
+// signal to any of those is never sent.
+func ownedGroup(cmd *exec.Cmd) int {
+	if cmd.Process == nil || cmd.SysProcAttr == nil {
+		return 0
+	}
+	if !cmd.SysProcAttr.Setsid && !(cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0) {
+		return 0
+	}
+	pid := cmd.Process.Pid
+	if pid <= 1 || pid == syscall.Getpgrp() {
+		return 0
+	}
+	return pid
+}
+
+// killTree ends the worker and everything left in its group. The leader is
+// always killed; the group only when pgid is one ownedGroup vouched for.
+func killTree(cmd *exec.Cmd, pgid int) {
+	if pgid > 1 && pgid != syscall.Getpgrp() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+	if cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
+// killTree is the supervisor's and Close's kill. It is safe after the leader
+// has exited: the group may still hold descendants, and a group with members
+// keeps its id from being reused.
+func (p *Proc) killTree() {
+	killTree(p.cmd, p.pgid)
 }
 
 // streamSrc is the protocol pipe plus bytes peeled out of a bufio.Reader
@@ -406,6 +509,9 @@ func (p *Proc) deliver(resp response) bool {
 		res.err = resp.Err.decode()
 		if errors.Is(res.err, gusset.ErrPanic) || errors.Is(res.err, gusset.ErrPoisoned) {
 			p.poisoned = true
+			// Once per generation. A later ErrPoisoned from a sibling job is
+			// the same retirement, not another signal.
+			p.notifyRetireLocked("engine poison")
 		}
 	}
 	switch {
@@ -460,23 +566,34 @@ func (p *Proc) Submit(ctx context.Context, in any) (uint64, error) {
 }
 
 func (p *Proc) submit(ctx context.Context, in []byte) (uint64, error) {
+	id, _, err := p.submitCounted(ctx, in)
+	return id, err
+}
+
+// submitCounted is submit that also says whether the request was certainly not
+// written to the worker. unsent is true for every refusal before the frame is
+// sent (closed, dead, poisoned, a context that ended while queued for a permit,
+// an oversized input). It is false once a write began, because a write that
+// failed may still have delivered bytes. A supervisor retries on a replacement
+// only when unsent is true.
+func (p *Proc) submitCounted(ctx context.Context, in []byte) (id uint64, unsent bool, err error) {
 	if err := p.refusal(); err != nil {
-		return 0, err
+		return 0, true, err
 	}
 	if len(in) > maxInlineInput {
-		return 0, gusset.ErrInputTooLarge
+		return 0, true, gusset.ErrInputTooLarge
 	}
 	req := request{Op: opSubmit, In: in}
 	if err := readContext(ctx, &req); err != nil {
-		return 0, err
+		return 0, true, err
 	}
 
 	select {
 	case p.sem <- struct{}{}:
 	case <-ctx.Done():
-		return 0, ctx.Err()
+		return 0, true, ctx.Err()
 	case <-p.readerDone:
-		return 0, p.refusal()
+		return 0, true, p.refusal()
 	}
 	// Stamped after the permit wait, so time queued here is not handed to
 	// the worker as time the job may still run (R9, I3).
@@ -486,7 +603,7 @@ func (p *Proc) submit(ctx context.Context, in []byte) (uint64, error) {
 	if err := p.refusalLocked(); err != nil {
 		p.mu.Unlock()
 		<-p.sem
-		return 0, err
+		return 0, true, err
 	}
 	p.next++
 	req.ID = p.next
@@ -509,19 +626,19 @@ func (p *Proc) submit(ctx context.Context, in []byte) (uint64, error) {
 		// A write that did not fail that way still waits for the reader: the
 		// refusal carries the worker's exit, which is the caller's error.
 		if ctx.Err() != nil {
-			return 0, ctx.Err()
+			return 0, false, ctx.Err()
 		}
 		select {
 		case <-p.readerDone:
 		case <-ctx.Done():
-			return 0, ctx.Err()
+			return 0, false, ctx.Err()
 		}
 		if refusal := p.refusal(); refusal != nil {
-			return 0, refusal
+			return 0, false, refusal
 		}
-		return 0, err
+		return 0, false, err
 	}
-	return req.ID, nil
+	return req.ID, false, nil
 }
 
 // send writes one frame. A context that ends while this call is waiting for
@@ -593,15 +710,112 @@ func (p *Proc) writeLocked(ctx context.Context, req *request) error {
 
 // poisonStream latches poison and closes stdin. A partial frame must not be
 // followed by another, and closing the pipe is what unblocks a write stuck
-// in the kernel. Closing an already-closed pipe is an error from os.File and
-// does not close the descriptor twice.
+// in the kernel. The notify is under the lock this function already holds.
+// Killing the child, when a supervisor is attached, is that supervisor's
+// goroutine: the caller is writeLocked, and the goroutine it arms only moves
+// the write deadline.
 func (p *Proc) poisonStream() {
 	p.mu.Lock()
 	if !p.closed {
 		p.poisoned = true
 	}
+	p.notifyRetireLocked("cut frame")
 	p.mu.Unlock()
-	_ = p.stdin.Close()
+	p.closeStdin()
+}
+
+// notifyRetireLocked sends once on the supervisor signal. The channel is
+// buffer-1 and the send does not block; a second call is a no-op. The caller
+// holds p.mu.
+func (p *Proc) notifyRetireLocked(cause string) {
+	if p.retire == nil || p.retireSent {
+		return
+	}
+	p.retireSent = true
+	if cause != "" {
+		p.retireCause = cause
+	}
+	select {
+	case p.retire <- struct{}{}:
+	default:
+	}
+}
+
+// judgeStallLocked is the liveness rule, beside the reader and not in it. It
+// runs when Wait abandons a ticket. If every pool permit is now held by a
+// cancelled ticket nothing can be submitted, so it arms one timer for stall.
+// When the timer fires, the generation is unresponsive only if no frame was
+// delivered since it was armed and the permits are still all held. A frame
+// inside the window restarts the judgement: if the permits are all held again
+// when the timer fires, the timer arms a fresh window itself, because with
+// every permit stranded no Submit gets through and no Wait can abandon to arm
+// it. The caller holds p.mu. Without a supervisor (retire nil) or a stall
+// bound it does nothing.
+func (p *Proc) judgeStallLocked() {
+	if p.retire == nil || p.stall <= 0 || p.stallArmed || p.retireSent || !p.stalledLocked() {
+		return
+	}
+	p.armStallLocked()
+}
+
+// armStallLocked starts one stall window. The caller holds p.mu and has
+// checked that the generation is stalled and not yet signalled.
+func (p *Proc) armStallLocked() {
+	p.stallArmed = true
+	seen := p.frames.Load()
+	time.AfterFunc(p.stall, func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.stallArmed = false
+		if p.closed || p.dead != nil || p.retireSent || !p.stalledLocked() {
+			return
+		}
+		if p.frames.Load() != seen {
+			p.armStallLocked()
+			return
+		}
+		p.notifyRetireLocked("unresponsive")
+	})
+}
+
+// stalledLocked reports whether cancelled tickets hold every permit.
+func (p *Proc) stalledLocked() bool {
+	n := 0
+	for _, t := range p.tickets {
+		if t.cancelled && t.res == nil {
+			n++
+		}
+	}
+	return n >= cap(p.sem)
+}
+
+func (p *Proc) retireReason() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.retireCause != "" {
+		return p.retireCause
+	}
+	return "poison"
+}
+
+// closeStdin closes the worker's stdin once. poisonStream, retirement, and
+// Close all end here; the second and third calls do not close the descriptor
+// again.
+func (p *Proc) closeStdin() {
+	if p == nil || p.stdin == nil {
+		return
+	}
+	p.stdinOnce.Do(func() { _ = p.stdin.Close() })
+}
+
+// usable reports whether a new submission can still be sent to this process.
+// A supervisor uses it to avoid handing a caller a generation that has
+// already been poisoned or reaped. The caller may hold the supervisor lock;
+// this takes p.mu and nothing else.
+func (p *Proc) usable() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.closed && !p.poisoned && p.dead == nil && !p.exited()
 }
 
 func (p *Proc) refusal() error {
@@ -684,6 +898,8 @@ func (p *Proc) Wait(ctx context.Context, ticket uint64) ([]byte, error) {
 	}
 	t.waiter = nil
 	t.abandoned = true
+	t.cancelled = true
+	p.judgeStallLocked()
 	p.mu.Unlock()
 	// Best effort, and not on this goroutine. The cancel takes writeMu; doing
 	// that here would make the caller's deadline wait on a writer already in
@@ -764,7 +980,7 @@ func (p *Proc) close(budget time.Duration) error {
 	// ending the pipe is what releases that writer.
 	timer := time.NewTimer(budget)
 	defer timer.Stop()
-	_ = p.stdin.Close()
+	p.closeStdin()
 	select {
 	case <-p.readerDone:
 	case <-timer.C:
@@ -822,4 +1038,19 @@ func relativeTimeout(ctx context.Context) uint64 {
 		return uint64(remaining.Nanoseconds())
 	}
 	return 1
+}
+
+// replaceEnv drops every entry of key and appends key=value. The worker's
+// getenv returns the first match, so a stale descriptor left in front of a
+// newly appended one would be the one the child opens.
+func replaceEnv(env []string, key, value string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		k, _, ok := strings.Cut(e, "=")
+		if ok && k == key {
+			continue
+		}
+		out = append(out, e)
+	}
+	return append(out, key+"="+value)
 }

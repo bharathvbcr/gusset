@@ -15,7 +15,7 @@ use gusset::pool::{
 };
 use std::sync::{Arc, Mutex};
 
-#[path = "../../../tests/common/mod.rs"]
+#[path = "../../../tests/rust/common/mod.rs"]
 mod common;
 use common::{make_pipe, read_ticket, Must};
 

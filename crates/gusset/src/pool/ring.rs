@@ -25,7 +25,7 @@
 //! semantics before it reads them.
 //!
 //! The layout is part of the C ABI and is spelled out in `gusset.h`
-//! (`GUSSET_RING_*`); `tests/constants_match.rs` checks the offsets.
+//! (`GUSSET_RING_*`); `tests/rust/constants_match.rs` checks the offsets.
 
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 

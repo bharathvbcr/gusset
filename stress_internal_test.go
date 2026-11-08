@@ -6,10 +6,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"runtime"
+	"runtime/metrics"
 	"strconv"
 	"strings"
 	"sync"
@@ -824,4 +827,615 @@ func TestHammer_BoundaryUnderChaos(t *testing.T) {
 	if n := hm.unexpected.Load(); n != 0 {
 		t.Fatalf("%d unexpected outcomes", n)
 	}
+}
+
+// TestSoak_SingleHandleBookkeepingStaysFlat runs a long mix of Call,
+// Submit/Wait, WaitBuffer and abandoned deadlines on ONE handle that is never
+// closed, and at every checkpoint — with nothing in flight — requires every
+// bookkeeping map to be empty and the heap, Rust live bytes and goroutine
+// count to be where the first checkpoint left them.
+//
+// The hammer checks bookkeeping only after Close, so anything Close sweeps up
+// (a completed entry, a nil collecting marker, a take id, an abandoned ticket
+// whose completion was never matched) is invisible to it. A handle that lives
+// for weeks never gets that sweep: a per-ticket leak there is unbounded growth.
+//
+// GUSSET_SOAK sets the total operations (default 40000; the audit ran 2000000).
+func TestSoak_SingleHandleBookkeepingStaysFlat(t *testing.T) {
+	if testing.Short() {
+		t.Skip("soak skipped in -short mode")
+	}
+	total := 40000
+	if v := os.Getenv("GUSSET_SOAK"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			t.Fatalf("GUSSET_SOAK=%q: want a positive operation count", v)
+		}
+		total = n
+	}
+	const workers, checkpoints = 8, 8
+	perPhase := total / checkpoints / workers
+
+	h, err := Open(WithPoolSize(4), WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	s := h.state
+
+	var ops [5]atomic.Int64 // call, submitWaitLarge, completedPath, waitBuffer, abandon
+	var bad, lateResults atomic.Int64
+	fail := func(format string, args ...any) {
+		if bad.Add(1) <= 10 {
+			t.Errorf(format, args...)
+		}
+	}
+
+	var inputsMu sync.Mutex
+	var inputs []*Buffer
+	worker := func(r *rand.Rand) {
+		for i := 0; i < perPhase; i++ {
+			switch k := r.IntN(100); {
+			case k < 55: // Call: inline record, or a take copied onto the Go heap
+				n := r.IntN(64)
+				if r.IntN(8) == 0 {
+					n = 64 + r.IntN(inlineResultBytes-64)
+				}
+				in := make([]byte, n+1)
+				for j := 1; j < len(in); j++ {
+					in[j] = byte(r.Uint32())
+				}
+				out, err := h.Call(context.Background(), in)
+				if err != nil || !bytes.Equal(out, in) {
+					fail("Call(%d bytes): %d bytes, %v", len(in), len(out), err)
+				}
+				ops[0].Add(1)
+			case k < 75: // Submit + Wait of a large result: a take buffer id in takeIDs
+				n, seed := 4097+r.IntN(12000), byte(r.Uint32())
+				tk, err := h.Submit(context.Background(), mode16(n, seed))
+				if err != nil {
+					fail("Submit: %v", err)
+					continue
+				}
+				out, err := h.Wait(context.Background(), tk)
+				if err != nil || !generated(out, n, seed) {
+					fail("Wait(large %d): %d bytes, %v", n, len(out), err)
+				}
+				ops[1].Add(1)
+			case k < 88: // the completed-map path: the result lands before Wait
+				in := []byte{0, byte(r.Uint32()), 3}
+				if r.IntN(2) == 0 {
+					in = mode16(4097+r.IntN(4000), 7)
+				}
+				tk, err := h.Submit(context.Background(), in)
+				if err != nil {
+					fail("Submit: %v", err)
+					continue
+				}
+				time.Sleep(50 * time.Microsecond)
+				if _, err := h.Wait(context.Background(), tk); err != nil {
+					fail("Wait(completed): %v", err)
+				}
+				if _, err := h.Wait(context.Background(), tk); !errors.Is(err, ErrUnknownTicket) {
+					fail("second Wait: %v", err)
+				}
+				ops[2].Add(1)
+			case k < 99: // WaitBuffer of a large result, freed by the caller
+				n := 4097 + r.IntN(8000)
+				tk, err := h.Submit(context.Background(), mode16(n, 1))
+				if err != nil {
+					fail("Submit: %v", err)
+					continue
+				}
+				buf, err := h.WaitBuffer(context.Background(), tk)
+				if err != nil || !generated(buf.Bytes(), n, 1) {
+					fail("WaitBuffer: %v", err)
+				}
+				if buf != nil {
+					_ = buf.Free()
+				}
+				ops[3].Add(1)
+			default: // abandon: a 1 ms deadline on a 20 ms non-cooperative job
+				ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+				var err error
+				var out, want []byte
+				start := time.Now()
+				if r.IntN(2) == 0 {
+					want = []byte{0, 1, 2, 3}
+					out, err = h.Call(ctx, []byte{9, 2, 0, 1, 2, 3})
+				} else {
+					// A large abandoned result: a take buffer deliver must free.
+					// The input stays allocated until the phase ends — the job
+					// still reads it after the caller has gone.
+					in, aerr := h.NewBuffer(8000)
+					if aerr != nil {
+						fail("NewBuffer: %v", aerr)
+						cancel()
+						continue
+					}
+					b := in.Bytes()
+					for j := range b {
+						b[j] = byte(j * 5)
+					}
+					b[0], b[1], b[2] = 9, 2, 0
+					want = append([]byte(nil), b[2:]...)
+					inputsMu.Lock()
+					inputs = append(inputs, in)
+					inputsMu.Unlock()
+					var tk uint64
+					if tk, err = h.Submit(ctx, in); err == nil {
+						out, err = h.Wait(ctx, tk)
+					}
+				}
+				cancel()
+				// A result can win only when the deadline's timer fired late
+				// (the job takes 20 ms); then it must be the right result.
+				if err == nil {
+					lateResults.Add(1)
+					if el := time.Since(start); el < 20*time.Millisecond || !bytes.Equal(out, want) {
+						fail("abandon: nil error after %v with %d bytes (want %d, equal %v)", el, len(out), len(want), bytes.Equal(out, want))
+					}
+				}
+				ops[4].Add(1)
+			}
+		}
+	}
+
+	type sample struct {
+		heap, live      uint64
+		goroutines, ops int
+	}
+	var samples []sample
+	quiesce := func() {
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			s.mu.Lock()
+			n := len(s.semTickets) + len(s.pending) + len(s.completed) + len(s.abandoned) + len(s.takeIDs)
+			m := fmt.Sprintf("sem %d semTickets %d pending %d completed %d abandoned %d takeIDs %d",
+				len(s.sem), len(s.semTickets), len(s.pending), len(s.completed), len(s.abandoned), len(s.takeIDs))
+			s.mu.Unlock()
+			if n == 0 && len(s.sem) == 0 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("bookkeeping left behind on an open, idle handle: %s", m)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	measure := func(done int) {
+		quiesce()
+		for _, in := range inputs {
+			_ = in.Free()
+		}
+		inputs = nil
+		runtime.GC()
+		runtime.GC()
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		samples = append(samples, sample{ms.HeapInuse, Stats().LiveBytes, runtime.NumGoroutine(), done})
+	}
+
+	seed := uint64(time.Now().UnixNano())
+	t.Logf("seed %d, %d ops over %d workers", seed, perPhase*workers*checkpoints, workers)
+	measure(0)
+	for c := 0; c < checkpoints; c++ {
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func(r *rand.Rand) { defer wg.Done(); worker(r) }(rand.New(rand.NewPCG(seed, uint64(c*workers+w))))
+		}
+		wg.Wait()
+		measure((c + 1) * perPhase * workers)
+	}
+
+	for _, sm := range samples {
+		t.Logf("after %8d ops: HeapInuse %6d KiB, Rust live %6d KiB, goroutines %d", sm.ops, sm.heap>>10, sm.live>>10, sm.goroutines)
+	}
+	t.Logf("call %d submit+wait(large) %d completed-path %d waitbuffer %d abandon-attempts %d (%d got the result: the 1 ms timer fired after the 20 ms job)",
+		ops[0].Load(), ops[1].Load(), ops[2].Load(), ops[3].Load(), ops[4].Load(), lateResults.Load())
+
+	// Compare against the first loaded checkpoint: it has the warmed maps,
+	// channels and reader buffers every later one reuses.
+	base := samples[1]
+	const heapSlack, liveSlack = 2 << 20, 512 << 10
+	for _, sm := range samples[2:] {
+		if sm.heap > base.heap+heapSlack {
+			t.Errorf("Go heap grew: %d KiB after %d ops, %d KiB after %d", sm.heap>>10, sm.ops, base.heap>>10, base.ops)
+		}
+		if sm.live > base.live+liveSlack {
+			t.Errorf("Rust live bytes grew: %d after %d ops, %d after %d", sm.live, sm.ops, base.live, base.ops)
+		}
+		if sm.goroutines > base.goroutines {
+			t.Errorf("goroutines grew: %d after %d ops, %d after %d", sm.goroutines, sm.ops, base.goroutines, base.ops)
+		}
+	}
+}
+
+// mode16 asks the diagnostic engine for n generated bytes, byte i = i ^ seed.
+func mode16(n int, seed byte) []byte {
+	in := make([]byte, 6)
+	in[0] = 16
+	binary.LittleEndian.PutUint32(in[1:5], uint32(n))
+	in[5] = seed
+	return in
+}
+
+func generated(b []byte, n int, seed byte) bool {
+	if len(b) != n {
+		return false
+	}
+	for i, v := range b {
+		if v != byte(i)^seed {
+			return false
+		}
+	}
+	return true
+}
+
+// churnSample is the process-level footprint a handle can leak into.
+type churnSample struct {
+	goroutines int
+	goThreads  int64  // /sched/threads/total:threads (Go's Ms)
+	osTasks    int    // countOSThreads: Go's threads and Rust's workers; -1 unmeasured
+	fds        int    // /proc/self/fd or /dev/fd; -1 unmeasured
+	heapLive   uint64 // /memory/classes/heap/objects:bytes after GC
+	rustLive   uint64 // Stats().LiveBytes
+}
+
+func countDir(t *testing.T, dir string) int {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return -1
+	}
+	return len(ents)
+}
+
+// countOSThreads counts the process's OS threads: /proc/self/task on Linux,
+// one `ps -M` line per thread on darwin, which has no /proc. Reading only
+// /proc made every thread comparison -1 against -1 on macOS, a pass that
+// measured nothing.
+func countOSThreads(t *testing.T) int {
+	t.Helper()
+	if n := countDir(t, "/proc/self/task"); n >= 0 {
+		return n
+	}
+	if runtime.GOOS != "darwin" {
+		return -1
+	}
+	out, err := exec.Command("ps", "-M", "-p", strconv.Itoa(os.Getpid())).Output()
+	if err != nil {
+		return -1
+	}
+	return bytes.Count(out, []byte("\n")) - 1 // minus the header
+}
+
+func countFDs(t *testing.T) int {
+	t.Helper()
+	if n := countDir(t, "/proc/self/fd"); n >= 0 {
+		return n
+	}
+	return countDir(t, "/dev/fd")
+}
+
+func takeChurnSample(t *testing.T, gc bool) churnSample {
+	t.Helper()
+	if gc {
+		runtime.GC()
+		runtime.GC()
+	}
+	m := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
+	metrics.Read(m)
+	return churnSample{
+		goroutines: runtime.NumGoroutine(),
+		goThreads:  Threads(),
+		osTasks:    countOSThreads(t),
+		fds:        countFDs(t),
+		heapLive:   m[0].Value.Uint64(),
+		rustLive:   Stats().LiveBytes,
+	}
+}
+
+// rustThreads is the OS threads that are not Go Ms: Rust's workers.
+func (a churnSample) rustThreads() int64 { return int64(a.osTasks) - a.goThreads }
+
+func (a churnSample) max(b churnSample) churnSample {
+	a.goroutines = max(a.goroutines, b.goroutines)
+	a.goThreads = max(a.goThreads, b.goThreads)
+	a.osTasks = max(a.osTasks, b.osTasks)
+	a.fds = max(a.fds, b.fds)
+	a.heapLive = max(a.heapLive, b.heapLive)
+	a.rustLive = max(a.rustLive, b.rustLive)
+	return a
+}
+
+// churnOne opens a handle, makes a few calls of each egress shape, and either
+// closes it or drops it for the AddCleanup backstop. It returns the state of a
+// dropped handle (nil when closed), which does not keep the Handle reachable:
+// the cleanup's argument is the state.
+func churnOne(t *testing.T, i int, drop bool) *handleState {
+	h, err := Open(WithPoolSize(1+i%2), WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open #%d: %v", i, err)
+	}
+	ctx := context.Background()
+	small := []byte{0, byte(i), byte(i >> 8)} // inline completion record
+	if out, err := h.Call(ctx, small); err != nil || !bytes.Equal(out, small) {
+		t.Fatalf("Call #%d: %v", i, err)
+	}
+	mid := bytes.Repeat([]byte{byte(i)}, 300) // bare ticket, take copy
+	mid[0] = 0
+	if out, err := h.Call(ctx, mid); err != nil || !bytes.Equal(out, mid) {
+		t.Fatalf("Call(300) #%d: %v", i, err)
+	}
+	in, err := h.NewBuffer(8 << 10) // take-buffer egress, zero copy
+	if err != nil {
+		t.Fatalf("NewBuffer #%d: %v", i, err)
+	}
+	in.Bytes()[0] = 0
+	out, err := h.CallBuffer(ctx, in)
+	if err != nil {
+		t.Fatalf("CallBuffer #%d: %v", i, err)
+	}
+	if i%3 == 0 {
+		// Leave one result buffer to its own backstop as well.
+		_ = in.Free()
+		out.owner = nil
+	} else {
+		_ = out.Free()
+		_ = in.Free()
+	}
+	if drop {
+		s := h.state
+		return s
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close #%d: %v", i, err)
+	}
+	return nil
+}
+
+// Open and close handles in a loop — some dropped to the AddCleanup backstop
+// instead of closed — and require goroutines, OS threads, descriptors, the Go
+// heap and Rust live bytes to come back to a warm baseline.
+//
+// Every handle is a pipe, a drain goroutine and a pool of OS threads; a
+// per-handle leak of any of them is invisible to the single-handle soak.
+// GUSSET_CHURN sets the handle count (default 2000; the audit ran 20000).
+func TestChurn_HandlesLeaveNothingBehind(t *testing.T) {
+	if testing.Short() {
+		t.Skip("churn skipped in -short mode")
+	}
+	total := 2000
+	if v := os.Getenv("GUSSET_CHURN"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			t.Fatalf("GUSSET_CHURN=%q: want a positive handle count", v)
+		}
+		total = n
+	}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer slog.SetDefault(prev)
+
+	// Warm up: Go keeps idle Ms, so a cold baseline would read their creation
+	// as a leak.
+	for i := 0; i < 200; i++ {
+		churnOne(t, i, false)
+	}
+	base := takeChurnSample(t, true)
+	peak := base
+
+	// Dropped handles are collected in batches: one GC finds the whole batch
+	// unreachable at once. GUSSET_CHURN_BATCH sets its size (default 64).
+	churnBatch := 64
+	if v := os.Getenv("GUSSET_CHURN_BATCH"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			t.Fatalf("GUSSET_CHURN_BATCH=%q: want a positive count", v)
+		}
+		churnBatch = n
+	}
+	var dropped []*handleState
+	drops := 0
+	settle := func() {
+		runtime.GC()
+		runtime.GC()
+		for _, s := range dropped {
+			select {
+			case <-s.closeDone:
+			case <-time.After(30 * time.Second):
+				t.Fatal("a dropped handle was not closed by its AddCleanup backstop within 30 s")
+			}
+		}
+		dropped = dropped[:0]
+	}
+	start := time.Now()
+	for i := 0; i < total; i++ {
+		drop := i%8 == 7
+		if s := churnOne(t, 200+i, drop); s != nil {
+			dropped = append(dropped, s)
+			drops++
+		}
+		if len(dropped) >= churnBatch {
+			settle()
+		}
+		if i%250 == 0 {
+			peak = peak.max(takeChurnSample(t, false))
+		}
+	}
+	settle()
+	elapsed := time.Since(start)
+
+	t.Logf("%d handles (%d dropped to the backstop) in %v", total, drops, elapsed.Round(time.Millisecond))
+	// Go's own Ms are not a per-handle leak but a high-water mark: every
+	// backstop close is its own goroutine in a cgo call joining workers, one
+	// M each, and Go never retires an idle M. A batch of dropped handles
+	// collected by one GC therefore raises the count by up to the batch size
+	// (measured over 20000 handles: batch 1 -> +1, 8 -> +7, 64 -> +36,
+	// 256 -> +48), and it must not grow with the number of handles.
+	requireChurnBaseline(t, base, peak, int64(churnBatch)+8)
+}
+
+// requireChurnBaseline waits up to 30 s for the process to come back to base,
+// then fails on every resource still above it. goThreadSlack bounds Go's own
+// Ms, which are a high-water mark rather than a per-handle leak. A resource
+// the platform cannot count skips the test after the other checks have run,
+// rather than passing without having measured it.
+func requireChurnBaseline(t *testing.T, base, peak churnSample, goThreadSlack int64) {
+	t.Helper()
+	// Converge: cleanups for dropped result buffers and the last drain
+	// goroutines finish asynchronously.
+	var after churnSample
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		after = takeChurnSample(t, true)
+		ok := after.goroutines <= base.goroutines && after.fds <= base.fds &&
+			after.rustLive <= base.rustLive && after.rustThreads() <= base.rustThreads()
+		if ok || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Logf("baseline:   %+v", base)
+	t.Logf("peak:       %+v", peak)
+	t.Logf("after:      %+v", after)
+
+	if after.goroutines > base.goroutines {
+		t.Errorf("goroutines %d -> %d", base.goroutines, after.goroutines)
+	}
+	if after.fds > base.fds {
+		t.Errorf("open descriptors %d -> %d", base.fds, after.fds)
+	}
+	if after.rustLive > base.rustLive {
+		t.Errorf("Rust live bytes %d -> %d", base.rustLive, after.rustLive)
+	}
+	// Threads that are not Go's are Rust workers, and Close joins every one.
+	if after.rustThreads() > base.rustThreads() {
+		t.Errorf("non-Go OS threads (Rust workers) %d -> %d", base.rustThreads(), after.rustThreads())
+	}
+	if after.goThreads > base.goThreads+goThreadSlack {
+		t.Errorf("Go threads %d -> %d, past the bound +%d", base.goThreads, after.goThreads, goThreadSlack)
+	}
+	if after.heapLive > base.heapLive+4<<20 {
+		t.Errorf("Go heap %d -> %d bytes", base.heapLive, after.heapLive)
+	}
+	if base.osTasks < 0 || after.osTasks < 0 || base.fds < 0 || after.fds < 0 {
+		t.Skipf("OS threads or descriptors cannot be counted on %s; those checks did not run", runtime.GOOS)
+	}
+}
+
+// poisonOne runs the documented recovery path once (DECISIONS.md, 2026-09-30:
+// poison is per handle; recovery is Close and Open): a fresh handle answers, a
+// slow job is in flight when a sibling's panic poisons the handle, new work is
+// refused, and Close drains the in-flight job — collected by Wait on even
+// cycles, left for Close on odd ones. The panicking worker, the in-flight
+// result (a Rust take buffer when large) and the handle's pipe and drain
+// goroutine are what a recovery that leaks would leave behind.
+func poisonOne(t *testing.T, i int) {
+	h, err := Open(WithPoolSize(2), WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open #%d: %v", i, err)
+	}
+	ctx := context.Background()
+	if out, err := h.Call(ctx, []byte{0, byte(i)}); err != nil || !bytes.Equal(out, []byte{0, byte(i)}) {
+		t.Fatalf("Call on a fresh handle #%d: %v", i, err)
+	}
+	// Mode 9: sleep 20 ms, then echo slow[2:]. Over 4 KiB on alternate pairs
+	// of cycles, so both the inline and the take-buffer result are in flight.
+	n := 300
+	if i%4 >= 2 {
+		n = 5000
+	}
+	slow := bytes.Repeat([]byte{byte(i)}, n)
+	slow[0], slow[1], slow[2] = 9, 2, 0
+	var in any = slow
+	if n > 4096 {
+		// A []byte input is capped at 4 KiB; the large one goes as a Buffer.
+		buf, err := h.NewBuffer(n)
+		if err != nil {
+			t.Fatalf("NewBuffer #%d: %v", i, err)
+		}
+		copy(buf.Bytes(), slow)
+		defer func() { _ = buf.Free() }()
+		in = buf
+	}
+	inflight, err := h.Submit(ctx, in)
+	if err != nil {
+		t.Fatalf("Submit #%d: %v", i, err)
+	}
+	if _, err := h.Call(ctx, []byte{1}); !errors.Is(err, ErrPanic) {
+		t.Fatalf("mode 1 #%d: want ErrPanic, got %v", i, err)
+	}
+	if _, err := h.Call(ctx, []byte{0}); !errors.Is(err, ErrPoisoned) {
+		t.Fatalf("Call after the panic #%d: want ErrPoisoned, got %v", i, err)
+	}
+	if _, err := h.NewBuffer(64); !errors.Is(err, ErrPoisoned) {
+		t.Fatalf("NewBuffer after the panic #%d: want ErrPoisoned, got %v", i, err)
+	}
+	if i%2 == 0 {
+		// Poison refuses new work, not finished work (DECISIONS.md, 2026-09-22).
+		out, err := h.Wait(ctx, inflight)
+		if err != nil || !bytes.Equal(out, slow[2:]) {
+			t.Fatalf("Wait on the in-flight job #%d: %d bytes, %v", i, len(out), err)
+		}
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close of the poisoned handle #%d: %v", i, err)
+	}
+}
+
+// A poisoned handle closed and replaced by a fresh one, over and over, must
+// bring goroutines, OS threads, descriptors, the Go heap and Rust live bytes
+// back to a warm baseline: recovery from ErrPoisoned leaks nothing. The engine
+// here is the diagnostic one, which needs no registration; an adopter whose
+// panic tore its engine's captured state also runs clear_engine_handlers and
+// registers again in Rust before the Open, which no Go entry point does.
+// GUSSET_POISON_CHURN sets the cycle count (default 200).
+func TestChurn_PoisonedHandlesRecreateLeavingNothingBehind(t *testing.T) {
+	if testing.Short() {
+		t.Skip("poison churn skipped in -short mode")
+	}
+	total := 200
+	if v := os.Getenv("GUSSET_POISON_CHURN"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			t.Fatalf("GUSSET_POISON_CHURN=%q: want a positive cycle count", v)
+		}
+		total = n
+	}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer slog.SetDefault(prev)
+
+	// Warm up: Go keeps idle Ms, so a cold baseline would read their creation
+	// as a leak.
+	for i := 0; i < 20; i++ {
+		poisonOne(t, i)
+	}
+	base := takeChurnSample(t, true)
+	peak := base
+	start := time.Now()
+	for i := 0; i < total; i++ {
+		poisonOne(t, 20+i)
+		if i%25 == 0 {
+			peak = peak.max(takeChurnSample(t, false))
+		}
+	}
+	t.Logf("%d poisoned handles closed and reopened in %v", total, time.Since(start).Round(time.Millisecond))
+
+	// Recovery closes on the caller's goroutine, so there is no backstop
+	// burst: Go's Ms may only grow by the runtime's own slack.
+	h, err := Open(WithPoolSize(1), WithDiagnosticEngine())
+	if err != nil {
+		t.Fatalf("Open after recovery: %v", err)
+	}
+	if out, err := h.Call(context.Background(), []byte{0, 7}); err != nil || !bytes.Equal(out, []byte{0, 7}) {
+		t.Fatalf("Call on the recovered handle: %v", err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close of the recovered handle: %v", err)
+	}
+	requireChurnBaseline(t, base, peak, 8)
 }

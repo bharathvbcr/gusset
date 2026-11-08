@@ -23,6 +23,7 @@ package pitfalls_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"runtime"
@@ -167,8 +168,37 @@ func (d *diagFuzzer) close() {
 	}
 }
 
+// fuzzAllocatedMax bounds the output length a fuzz input may ask diagnostic
+// mode 16 for. The engine accepts up to 1 GiB, and the coverage-guided mutator
+// finds a length near it within minutes: one such call peaks at about 3 GiB
+// resident (the Rust output, its growth, and the copy into Go), and every
+// fuzz worker runs it. On a four-vCPU runner that starved the machine and the
+// workers died (nightly 41825244733, input 6617663891ad3163: the log froze
+// for 48 s, then "fuzzing process hung or terminated unexpectedly"). Like
+// FuzzBufferLifecycle's request, an OOM kill proves nothing about Gusset.
+const fuzzAllocatedMax = 1 << 20
+
+// boundAllocatedLength returns payload with a mode-16 output length reduced
+// modulo fuzzAllocatedMax, copying rather than editing the fuzzer's bytes.
+// A length over gusset.MaxBufferBytes passes through unchanged: the engine
+// refuses it before allocating anything, and that refusal is a path this
+// target must keep reaching. Every other payload is returned as it came.
+func boundAllocatedLength(payload []byte) []byte {
+	if len(payload) < 5 || payload[0] != 16 {
+		return payload
+	}
+	n := binary.LittleEndian.Uint32(payload[1:5])
+	if n < fuzzAllocatedMax || uint64(n) > gusset.MaxBufferBytes {
+		return payload
+	}
+	bounded := bytes.Clone(payload)
+	binary.LittleEndian.PutUint32(bounded[1:5], n%fuzzAllocatedMax)
+	return bounded
+}
+
 func (d *diagFuzzer) run(t fatalReporter, payload []byte) {
 	t.Helper()
+	payload = boundAllocatedLength(payload)
 	if d.h == nil {
 		h, err := d.open()
 		if err != nil {

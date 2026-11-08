@@ -21,7 +21,7 @@ completion path works there.
 | `x86_64-apple-darwin` | supported | `r14` under Rosetta on the arm64 runner (runtime); `cross` (compile) |
 | `x86_64-unknown-linux-gnu` | supported | `unit`, `race`, `soak`, `cgocheck2`, `memlimit`, `lint`, `bench`, `fuzz`, `r14`, `adopter`, the two floor jobs; nightly `sanitizer` (ASan), `miri`, `hammer`, `hammer-heap` (runtime) |
 | `aarch64-unknown-linux-gnu` | supported | `unit` and `r14` on a native arm64 runner (runtime); `cross` (compile) |
-| `x86_64-unknown-linux-musl` | supported | `musl`, `r14-musl` (runtime), `cross` (compile) |
+| `x86_64-unknown-linux-musl` | supported for what CI checks: a release build, the deep-recursion and thread-cap soak tests, the worker stack-size read-back, and the R14 sealed-staticlib harness. The rest of the Go and Rust suites does not run on musl | `musl` (`TestPitfall_DeepRecursionOnWorkerStack`, `TestPitfall_ThreadCapBoundedSoak`, `worker_stack_is_explicitly_sized_not_inherited`), `r14-musl` (`./tools/gussetseal`, `bench/r14/run.sh`) (runtime); `cross` (compile) |
 | `*-pc-windows-*` | **not supported** | Rust and Go builds fail with a named error |
 | other unix (FreeBSD, OpenBSD, illumos, …) | **not supported** | Rust build fails with the same named error |
 
@@ -60,7 +60,7 @@ flowchart LR
 
     subgraph DualVerification ["Dual Verification Gate"]
         Probe["pool::sys::current_thread_stack_size\n(Asserts allocated size on every platform)"]
-        CIJob["musl Alpine CI Container Job\n(Runs test suite where OS default is 128 KiB)"]
+        CIJob["musl Alpine CI Container Job\n(Runs the recursion, soak and read-back tests where OS default is 128 KiB)"]
         SafeRun --> Probe
         SafeRun --> CIJob
     end
@@ -76,7 +76,7 @@ Two things close that gap:
    worker, so `worker_stack_is_explicitly_sized_not_inherited` distinguishes "Gusset
    sized this stack" from "the platform happened to agree" on *every* platform.
    Diagnostic engine mode 8 exposes the same value end to end through the real pool.
-2. **The `musl` CI job** runs the suite where the default really is 128 KiB.
+2. **The `musl` CI job** runs two pitfall tests and the stack read-back where the default really is 128 KiB. It does not run the whole suite there.
 
 A worker that ends up with less stack than requested logs it rather than degrading
 silently, the same way a failed `sigaltstack` does.

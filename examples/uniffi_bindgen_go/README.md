@@ -67,19 +67,11 @@ Default UniFFI Go bindings rely on dynamic loading (`dlopen` / `.so` / `.dylib`)
 ## 3. Implementation Walkthrough
 
 ### The Wire Protocol: `RustBuffer`
-UniFFI passes arguments and return values across FFI using a structured buffer:
-
-```go
-type RustBuffer struct {
-    Capacity int64
-    Len      int64
-    Data     []byte
-}
-```
+UniFFI passes arguments and return values across FFI using a structured buffer of `(capacity, len, data)`. The Rust crate declares that layout as `RustBuffer`; the Go side needs only the serialized bytes, so it has no such type.
 
 The Go package `examples/uniffi_bindgen_go` provides `RustBufferWriter` and `RustBufferReader` implementing UniFFI's big-endian binary encoding:
-- Primitive numeric types (`int8` through `int64`, `uint8` through `uint64`, `float64`) are encoded in big-endian order.
-- Strings and byte slices are encoded with a 4-byte big-endian length prefix followed by UTF-8 bytes.
+- Numeric types are encoded in big-endian order. The methods that exist are `int8`, `int16`, `int32`, `int64`, `uint8`, `uint32` and `float64`, plus `bool` (one byte). There is no `uint16` or `uint64` method.
+- Strings and byte slices are encoded with a 4-byte big-endian length prefix followed by the bytes. `WriteString` and `WriteBytes` return `ErrStringTooLong` (and write nothing) past `math.MaxInt32` bytes, and `ReadString` returns `ErrInvalidEncoding` for bytes that are not valid UTF-8, as the Rust engine does. `ExecuteSlowJob` returns `ErrDelayOutOfRange` for a delay that does not fit the engine's 32-bit millisecond field.
 - Results use a 1-byte status header (`0 = Success`, `1 = Error`) followed by either the return value or a serialized error structure (`code + message`).
 
 ### The Gusset Transport Adapter
@@ -101,7 +93,7 @@ type GussetTransport struct {
 `GussetTransport` delegates execution to `handle.Call(ctx, payload)`, translating Gusset runtime sentinels (`gusset.ErrPanic`, `gusset.ErrPoisoned`, `gusset.ErrClosed`) into typed errors.
 
 ### The Rust Reference Engine
-In the Rust crate (`examples/uniffi_bindgen_go/rust/src/lib.rs`), the UniFFI engine registers its handler using `gusset::set_engine_handler`:
+The Rust crate (`examples/uniffi_bindgen_go/rust/`) is also the umbrella crate of `docs/adoption.md` step 1: `[lib] name = "gusset"` and `crate-type = ["staticlib", "rlib"]`, so its `libgusset.a` holds Gusset and this engine, the one unsealed staticlib R14 allows. It exports one C function, `int32_t init_uniffi_engine(uint32_t opcode)`, which registers the handler with `register_engine` under a nonzero opcode and returns 0, or -1 when the opcode is 0 or already taken. A nonzero opcode keeps the engine out of the global slot, so it never displaces another engine (or the diagnostic engine Gusset's own tests use) in the same process. On the Go side, `RegisterCompiledEngine(opcode)` in `engine_link.go` (built only with `-tags gusset_uniffi_engine`) calls it, and a handle opened with `gusset.WithOpcode(opcode)` reaches the engine. The handler:
 
 ```rust
 pub fn uniffi_dispatch_handler(ctx: &JobContext, input: &[u8]) -> Result<JobOutput, String> {
@@ -129,13 +121,28 @@ pub fn uniffi_dispatch_handler(ctx: &JobContext, input: &[u8]) -> Result<JobOutp
 
 ## 4. Running the Tests
 
-To execute the test suite:
+What is tested, and what is not:
+
+- **Rust engine** (`rust/`, its own Cargo workspace, so `cargo test --workspace` at the repository root skips it): CI runs `cargo clippy` and `cargo test` on it in the `unit` job. `make test` runs the same `cargo test`.
+- **Go client and wire code**: `go test ./...`, run by the same job.
+- **Golden wire bytes**: `testdata/golden.txt` holds request and response bytes. The Rust tests assert the engine produces exactly those responses; the Go tests assert the typed client produces exactly those requests and that the Go reference engine produces exactly those responses. A change to the wire format on either side fails that side's tests.
+- **The typed client against the compiled Rust engine**: `make test-uniffi-link`, which CI runs in the same `unit` job on Linux x86-64, Linux arm64 and macOS. It builds the crate's umbrella `libgusset.a` into `rust/target`, checks the cgo shim with `gussetvet` against `exports.txt`, and runs the package's tests with `-tags gusset_uniffi_engine` and the umbrella's directory first in `CGO_LDFLAGS`, ahead of `internal/ffi`'s own `-L`, so `-lgusset` resolves to the umbrella and Gusset's `target/release/libgusset.a` is never opened. `TestCompiledEngine_TypedClientMatchesGolden` opens a real handle with no diagnostic engine, checks the opcode is refused before `init_uniffi_engine` runs, then sends every golden vector (opcodes 1-4) through the typed client and compares both directions byte for byte. It also asserts `straße` upper-cases to `STRASSE`: Rust's `to_uppercase` applies Unicode special casing, and Go's `strings.ToUpper`, which the reference engine uses, answers `STRAßE`, so only the compiled engine passes. The panic vector poisons the handle, and a fresh handle reaches the same engine. Without the umbrella on the link path the tagged build fails with `_init_uniffi_engine` undefined instead of running.
+- **Not covered by the untagged suite**: `go test ./...` builds without the tag, so it runs the typed client against the reference engine only. It links Gusset's own archive exactly as before; the tagged build never writes `target/` or `internal/ffi/zz_archive_hash.go`.
 
 ```bash
 go test -v ./examples/uniffi_bindgen_go/...
+cargo test --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml
+make test-uniffi-link
 ```
 
-The test suite covers:
+`rust/Cargo.lock` is this crate's own lockfile and pins gusset's dependencies (`libc`, `static_assertions`) separately from the root `Cargo.lock`. CI builds it with `--locked`, so a change to the dependencies in `crates/gusset/Cargo.toml` fails the `unit` job until the same change runs:
+
+```bash
+cargo update --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml
+```
+
+The Go test suite covers:
+0. `TestGolden_ClientAndReferenceEngineMatchRustBytes`: Ties the Go client and reference engine to the Rust engine's bytes through `testdata/golden.txt`. With `-tags gusset_uniffi_engine`, `TestCompiledEngine_TypedClientMatchesGolden` replays the same vectors against the compiled engine (above).
 1. `TestRustBuffer_BinarySerialization`: Validates big-endian wire encoding, decoding, and underflow protections.
 2. `TestGussetUniFFI_Calculate_Success`: Tests typed domain calculations (`Add`, `Multiply`, `Sqrt`).
 3. `TestGussetUniFFI_Calculate_TypedErrors`: Tests typed domain error handling (`MathErrDivisionByZero`, `MathErrNegativeRoot`).

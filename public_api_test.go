@@ -20,7 +20,7 @@ var updatePublicAPI = flag.Bool("update-public-api", false, "rewrite testdata/pu
 const publicAPIFile = "testdata/public_api.txt"
 
 // TestPublicSurfaceMatchesCommittedList is the Go half of what
-// crates/gusset/tests/exports_match.rs does for the C ABI: the exported surface
+// tests/rust/exports_match.rs does for the C ABI: the exported surface
 // of package gusset is a committed file, and adding, removing or re-typing an
 // export without updating it fails here. Several exports (Buffer.ID,
 // TraceCarrier, OpcodeContextKey, MaxDrain, MaxBufferBytes, ErrGeneric,

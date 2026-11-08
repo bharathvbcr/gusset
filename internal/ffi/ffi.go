@@ -68,6 +68,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"unsafe"
 )
 
@@ -266,7 +267,7 @@ const (
 
 // TakeOwnedFlag marks a Take buffer id as the result's own buffer, which the
 // caller frees once consumed. Taken from the header so Go and Rust share one
-// definition (tests/constants_match.rs checks the Rust side).
+// definition (tests/rust/constants_match.rs checks the Rust side).
 const TakeOwnedFlag uint64 = C.GUSSET_TAKE_OWNED_FLAG
 
 // AbiLayout is the Go representation of AbiLayout.
@@ -398,13 +399,43 @@ func GetAbiLayout() AbiLayout {
 	return out
 }
 
-// Init initializes the Gusset runtime.
+// The two calls Init makes into Rust, as variables so a test can stand in for
+// them. A panic inside gusset_init cannot be provoked in a production build,
+// and no export or environment knob may exist that does it.
+var (
+	cInit     = func() int { return int(C.gusset_init()) }
+	drainLogs = DrainLogs
+)
+
+// initLogBytes is the size of the buffer Init drains the log ring into: the
+// ring's whole capacity (LOG_RING_CAPACITY, 64 KiB), so one drain returns every
+// line it holds and the last one is the newest.
+const initLogBytes = 64 << 10
+
+// Init initializes the Gusset runtime. gusset_init has no status out-parameter,
+// so on a non-OK code the reason exists only as a line in the Rust log ring;
+// Init drains the ring once and appends its last line to the error.
 func Init() error {
-	code := C.gusset_init()
-	if code != C.FFI_OK {
-		return &Error{Code: int(code), Msg: "initialization failed"}
+	code := cInit()
+	if code == FFI_OK {
+		return nil
 	}
-	return nil
+	msg := "initialization failed"
+	buf := make([]byte, initLogBytes)
+	n := drainLogs(buf)
+	if n > len(buf) {
+		n = len(buf)
+	}
+	if line := lastLogLine(buf[:n]); line != "" {
+		msg += ": " + line
+	}
+	return &Error{Code: code, Msg: msg}
+}
+
+// lastLogLine returns the last non-empty line of drained log bytes.
+func lastLogLine(b []byte) string {
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
 }
 
 // Shutdown shuts down the Gusset runtime.

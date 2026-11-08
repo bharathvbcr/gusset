@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // TestTier4_MultiWorker_ETLPipeline simulates an end-to-end data ingestion and batch transformation pipeline
@@ -185,7 +186,7 @@ func TestTier4_HighFrequency_StreamProcessor(t *testing.T) {
 	const totalEvents = 1000
 	const slidingWindowSize = 32
 
-	initialStats := gusset.Stats()
+	initialLive := livebytes.Quiesce(t)
 
 	type inFlight struct {
 		ticket uint64
@@ -236,10 +237,10 @@ func TestTier4_HighFrequency_StreamProcessor(t *testing.T) {
 	}
 
 	// Verify steady state memory: no unbounded live bytes growth
-	finalStats := gusset.Stats()
-	if finalStats.LiveBytes != initialStats.LiveBytes {
+	finalLive, leakFree := livebytes.Settle(initialLive)
+	if !leakFree {
 		t.Errorf("stream processing caused live byte drift: initial=%d, final=%d",
-			initialStats.LiveBytes, finalStats.LiveBytes)
+			initialLive, finalLive)
 	}
 
 	t.Logf("High-frequency stream processing complete: %d events processed smoothly", processedCount.Load())

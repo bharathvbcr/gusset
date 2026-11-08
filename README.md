@@ -89,7 +89,7 @@ flowchart TD
 3. **(I3) Deadline & Cancellation:** Deadlines and cancellations are enforced inside Rust between work units using relative `timeout_ns` and per-job `AtomicBool` flags.
 4. **(I4) Bounded Concurrency:** In-flight calls per handle never exceed the configured pool size. Callers park on the Go semaphore, never on an OS thread in cgo. Pool size is capped at `gusset.MaxPoolSize` (1024); a larger request is refused, not clamped. On Linux the completion pipe is grown to hold one inline record per worker, or one 8-byte ticket per worker when it cannot, and `Open` is refused only when even the tickets will not fit. `Open` attaches a completion ring by default, so steady-state records live there and the pipe carries wake tokens and overflow.
 5. **(I5) Rust-Owned Stacks:** Heavy Rust work runs on Rust-spawned threads with an explicit 8 MiB stack, never on the caller's g0 stack (musl's default is 128 KiB). Each worker installs its own guard-paged `sigaltstack` (at least 64 KiB, larger where the kernel's signal frame needs it) so Go's signal handler can run on a Rust thread, and a failure to do so is logged rather than silently accepted. The alternate stack does not make a stack overflow survivable: the process still exits. Workers also block SIGPIPE, so a write to a closed pipe returns EPIPE instead of killing the process.
-6. **(I6) ABI Verification:** Go `init()` verifies ABI version, struct sizes, alignments, and the offset and size of every named field against Rust before the process starts serving — for the four `#[repr(C)]` types in the ABI manifest, `AllocStats` included. (`RingShared` and `Slot` are `#[repr(C)]` too; C reads them through offsets that `tests/constants_match.rs` checks.)
+6. **(I6) ABI Verification:** Go `init()` verifies ABI version, struct sizes, alignments, and the offset and size of every named field against Rust before the process starts serving — for the four `#[repr(C)]` types in the ABI manifest, `AllocStats` included. (`RingShared` and `Slot` are `#[repr(C)]` too; C reads them through offsets that `tests/rust/constants_match.rs` checks.)
 
 ---
 
@@ -216,13 +216,13 @@ flowchart LR
 ## Installation
 
 ### One-Command Install
-Install Gusset's runtime library, C header, pkg-config definition, and `gussetvet` linter from a **release tag**, never from `main`. Fetch the script from the tag you want (the script at tag `T` clones `T` by default), read it, then run it:
+Install Gusset's runtime library, C header, pkg-config definition, and `gussetvet` linter. Fetch `install.sh` from `main` (protected), or from a commit you have reviewed, read it, then run it. It builds the release tag it names (`GUSSET_DEFAULT_REF`) and stops before building anything unless that tag still resolves to the commit baked into the script (`GUSSET_DEFAULT_COMMIT`), so what you build comes from a release tag and never from `main`'s tree:
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/bharathvbcr/gusset/<tag>/install.sh
+curl -fsSLO https://raw.githubusercontent.com/bharathvbcr/gusset/main/install.sh
 less install.sh
 bash install.sh
 ```
-`GUSSET_REF` overrides the ref to clone. To verify what gets built, pin the commit you reviewed: `GUSSET_REF=<tag> GUSSET_COMMIT=<sha> bash install.sh` stops before building if the tag resolves to any other commit (`git ls-remote https://github.com/bharathvbcr/gusset <tag>` prints it). Piped into `bash`, the script never builds the current directory. Scripts from tags up to and including v0.0.2 predate this and clone `main`; use a later tag's script.
+Do not fetch the script from a release tag to get that check: a moved tag brings its own script, and a tag's `install.sh` cannot name that tag's own commit. To install a specific other tag, name its commit yourself: `GUSSET_REF=<tag> GUSSET_COMMIT=<sha> bash install.sh`, where `<sha>` is what `git ls-remote https://github.com/bharathvbcr/gusset '<tag>^{}'` prints (for a lightweight tag, `<tag>`). An explicit `GUSSET_COMMIT` replaces the baked one. A `GUSSET_REF` other than the default is cloned unchecked unless you also set `GUSSET_COMMIT`. Piped into `bash`, the script never builds the current directory. Scripts from tags up to and including v0.0.2 predate this and clone `main`; use a later script.
 
 ### Local / From Source
 ```bash
@@ -237,7 +237,7 @@ By default, this installs into `~/.local` (or `/usr/local` if run with write per
 ## The Public Surface
 
 ### 17 Exported Rust Functions
-Gusset exports strictly 17 C ABI functions from `libgusset.a` (enforced by `tests/exports_match.rs`):
+Gusset exports strictly 17 C ABI functions from `libgusset.a` (enforced by `tests/rust/exports_match.rs`):
 - `gusset_abi_layout(out)`: Layout and struct size/alignment verification.
 - `gusset_abi_fields(offsets, sizes, cap)`: Named-field offsets and sizes of all `#[repr(C)]` types.
 - `gusset_init()`: Global runtime initialization and panic hook installation.
@@ -488,7 +488,7 @@ We welcome contributions! Please review our community guidelines before submitti
 
 Gusset's design builds upon insights, hard-won lessons, and patterns from prior Go–Rust integration work:
 - **[rust2go](https://github.com/ihciah/rust2go)**: Pioneered parameter ownership and buffer passing across the boundary; informed Gusset's rejection of manual-assembly Go callbacks and `cgocheck=0`.
-- **[uniffi-bindgen-go](https://github.com/NordSecurity/uniffi-bindgen-go)**: The binding generator Gusset is meant to sit under; a worked example combining the two is provided in [`examples/uniffi_bindgen_go`](examples/uniffi_bindgen_go/). Gusset borrows its `RustBuffer` shape (ptr, len, capacity) as a design reference (`AGENTS.md`, Borrow and avoid).
+- **[uniffi-bindgen-go](https://github.com/NordSecurity/uniffi-bindgen-go)**: The binding generator Gusset is meant to sit under; a worked example combining the two is provided in [`examples/uniffi_bindgen_go`](examples/uniffi_bindgen_go/) (a typed Go client and a Rust reference engine, each tested in CI against shared golden wire bytes, and linked into one test binary by `make test-uniffi-link`, which the CI `unit` job runs: the crate builds an umbrella `libgusset.a` and the typed client replays the golden vectors against it through a real handle). Gusset borrows its `RustBuffer` shape (ptr, len, capacity) as a design reference (`AGENTS.md`, Borrow and avoid).
 - **[iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2)**: Inspired Gusset's Phase 4 zero-copy shared memory IPC architecture for GPU hardware crash containment.
 - **[Stoolap](https://stoolap.io/blog/2026/04/08/calling-a-rust-library-from-go-with-cgo-disabled/)**: Established benchmark discipline demonstrating that engine compute, rather than FFI trampolines, dominates real workloads.
 - **[Tokio](https://tokio.rs/)**: Influenced Gusset's cooperative flag-based cancellation model across FFI rather than dropped futures.

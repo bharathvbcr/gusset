@@ -22,7 +22,7 @@ use gusset::header::{CallHeader, GUSSET_FLAG_DIAGNOSTIC_ENGINE};
 use gusset::Handle;
 use std::ptr;
 
-#[path = "../../../tests/common/mod.rs"]
+#[path = "../../../tests/rust/common/mod.rs"]
 mod common;
 use common::{make_pipe, read_ticket};
 

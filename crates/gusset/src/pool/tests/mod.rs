@@ -8,7 +8,8 @@ mod engine;
 mod respawn;
 mod submit;
 pub(super) use respawn::{
-    injected_delay, DELAY_BEFORE_CLEAR, DELAY_BEFORE_REMOVE, FAILING_WORKER_MS,
+    injected_delay, injected_delay_ms, DELAY_AFTER_EXIT, DELAY_BEFORE_CLEAR, DELAY_BEFORE_REMOVE,
+    FAILING_WORKER_MS,
 };
 
 use super::*;
@@ -16,7 +17,7 @@ use crate::header::GUSSET_FLAG_DIAGNOSTIC_ENGINE;
 
 // The helpers every Rust test binary shares; see that file for why it lives
 // outside this crate's `src`.
-#[path = "../../../../../tests/common/mod.rs"]
+#[path = "../../../../../tests/rust/common/mod.rs"]
 mod common;
 use common::{make_pipe, read_ticket, Must};
 

@@ -1659,6 +1659,13 @@ mod argument_refusal_tests {
     }
 }
 
+/// Held by every unit test that logs a line and then drains the process-wide
+/// log ring to find it. Draining consumes, and tests in this binary run in
+/// parallel, so without it one test's drain can take another's line between
+/// that test's log and its own drain.
+#[cfg(test)]
+pub(crate) static LOG_RING_DRAIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A panic caught inside `gusset_shutdown` or `gusset_init` is reported as
 /// `FFI_PANIC`. Both returned `FFI_ERR`, and for shutdown that is the
 /// drain-budget-expired code, so Go told the caller "work still in flight" when
@@ -1689,5 +1696,36 @@ mod lifecycle_panic_tests {
         // SAFETY: no pointer arguments.
         let rc = unsafe { gusset_init() };
         assert_eq!(rc, FFI_PANIC);
+    }
+
+    /// `gusset_init(void)` has no status out-parameter, so the panic text is
+    /// reported only through the log ring; `ffi.Init` drains it from there.
+    #[test]
+    fn an_init_panic_text_lands_in_the_log_ring() {
+        let _drain = LOG_RING_DRAIN_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        fault::arm();
+        // SAFETY: no pointer arguments.
+        assert_eq!(unsafe { gusset_init() }, FFI_PANIC);
+
+        // Other tests in this binary log too, so read the whole ring and look
+        // for the line rather than expecting it to be the only one.
+        let mut drained = Vec::new();
+        loop {
+            let mut buf = vec![0u8; LOG_RING_CAPACITY];
+            let mut written = 0usize;
+            // SAFETY: `buf` is writable for `buf.len()` bytes and `written` is a valid out pointer.
+            unsafe { gusset_drain_logs(buf.as_mut_ptr(), buf.len(), &mut written) };
+            if written == 0 {
+                break;
+            }
+            drained.extend_from_slice(&buf[..written]);
+        }
+        let text = String::from_utf8_lossy(&drained);
+        assert!(
+            text.lines().any(|l| l.contains("gusset: init panicked: ")),
+            "the init panic text never reached the log ring: {text:?}"
+        );
     }
 }

@@ -2,9 +2,29 @@ package uniffi_bindgen_go
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"time"
 )
+
+// ErrDelayOutOfRange is returned by ExecuteSlowJob for a delay whose millisecond
+// count does not fit the engine's signed 32-bit field (about 24.8 days). The
+// request is refused rather than wrapped to a different, possibly negative, delay.
+var ErrDelayOutOfRange = errors.New("uniffi: delay exceeds the engine's 32-bit millisecond range")
+
+// delayMillis converts a delay to the wire's int32 milliseconds. A zero or
+// negative delay is sent as 0, which the engine treats as no wait.
+func delayMillis(d time.Duration) (int32, error) {
+	ms := d.Milliseconds()
+	if ms < 0 {
+		return 0, nil
+	}
+	if ms > math.MaxInt32 {
+		return 0, fmt.Errorf("%w: %v", ErrDelayOutOfRange, d)
+	}
+	return int32(ms), nil
+}
 
 // Function IDs / opcodes for UniFFI dispatch
 const (
@@ -35,7 +55,9 @@ func NewClient(transport Transport) *Client {
 func (c *Client) Calculate(ctx context.Context, req CalculateRequest) (*CalculateResponse, error) {
 	w := NewWriter(32)
 	w.WriteUint8(FnCalculate)
-	w.WriteString(string(req.Op))
+	if err := w.WriteString(string(req.Op)); err != nil {
+		return nil, err
+	}
 	w.WriteFloat64(req.A)
 	w.WriteFloat64(req.B)
 
@@ -81,7 +103,9 @@ func (c *Client) Calculate(ctx context.Context, req CalculateRequest) (*Calculat
 func (c *Client) TransformText(ctx context.Context, req TextTransformRequest) (*TextTransformResponse, error) {
 	w := NewWriter(16 + len(req.Text))
 	w.WriteUint8(FnTransformText)
-	w.WriteString(req.Text)
+	if err := w.WriteString(req.Text); err != nil {
+		return nil, err
+	}
 	w.WriteBool(req.ToUppercase)
 	w.WriteBool(req.Reverse)
 
@@ -121,9 +145,13 @@ func (c *Client) TransformText(ctx context.Context, req TextTransformRequest) (*
 
 // ExecuteSlowJob tests cooperative cancellation and deadlines.
 func (c *Client) ExecuteSlowJob(ctx context.Context, delay time.Duration) (*SlowJobResponse, error) {
+	ms, err := delayMillis(delay)
+	if err != nil {
+		return nil, err
+	}
 	w := NewWriter(8)
 	w.WriteUint8(FnExecuteSlowJob)
-	w.WriteInt32(int32(delay.Milliseconds()))
+	w.WriteInt32(ms)
 
 	out, err := c.transport.Call(ctx, w.Bytes())
 	if err != nil {

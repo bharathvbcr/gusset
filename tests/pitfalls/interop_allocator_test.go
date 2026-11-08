@@ -16,6 +16,7 @@ import (
 
 	"github.com/bharathvbcr/gusset"
 	"github.com/bharathvbcr/gusset/internal/hostprobe"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // modeAllocated is diagnostic mode 16: a generated output built through
@@ -60,7 +61,7 @@ func TestInterop_AllocatorBackedOutputAllPaths(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	base := gusset.Stats().LiveBytes
+	base := livebytes.Quiesce(t)
 	for _, n := range []int{1, 63, 4096, 4097, 65536, 1 << 20, 16 << 20} {
 		seed := byte(n * 7)
 
@@ -102,7 +103,7 @@ func TestInterop_AllocatorBackedOutputAllPaths(t *testing.T) {
 			t.Fatalf("Free %d: %v", n, err)
 		}
 	}
-	if live := gusset.Stats().LiveBytes; live > base {
+	if live, ok := livebytes.Settle(base); !ok {
 		t.Fatalf("live Rust bytes %d above baseline %d after every buffer was freed", live, base)
 	}
 }
@@ -114,7 +115,7 @@ func TestInterop_AllocatorStress(t *testing.T) {
 	if testing.Short() {
 		t.Skip("stress")
 	}
-	base := gusset.Stats().LiveBytes
+	base := livebytes.Quiesce(t)
 	h, err := gusset.Open(gusset.WithPoolSize(8), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +192,7 @@ func TestInterop_AllocatorStress(t *testing.T) {
 	if err := h.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if live := gusset.Stats().LiveBytes; live > base {
+	if live, ok := livebytes.Settle(base); !ok {
 		t.Fatalf("live Rust bytes %d above baseline %d after Close", live, base)
 	}
 	t.Logf("ok=%d timed_out=%d", ok.Load(), timedOut.Load())

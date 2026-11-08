@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-#[path = "../../../tests/common/mod.rs"]
+#[path = "../../../tests/rust/common/mod.rs"]
 mod common;
 use common::read_repo_file;
 

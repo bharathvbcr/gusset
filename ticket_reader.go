@@ -18,7 +18,7 @@ import (
 // inline result in a completion record: what a full record weighs beyond the
 // result bytes it can carry. Taken from the header's two maxima rather than
 // typed, so the reader cannot disagree with gusset.h about where the payload
-// starts; tests/constants_match.rs pins the difference to those two u64 words
+// starts; tests/rust/constants_match.rs pins the difference to those two u64 words
 // and fails if this file goes back to a literal.
 const inlineHeaderBytes = ffi.InlineRecordMax - ffi.InlineResultMax
 
@@ -187,6 +187,11 @@ func (tr *ticketReader) popRing() (uint64, []byte, bool, error) {
 		data = tr.ringData[:n]
 		w &^= ffi.InlineRecordFlag
 	}
+	if w == 0 {
+		// Tickets start at 1 and a ring slot never carries a wake token, so a
+		// zero id is a corrupt slot, not a completion.
+		return 0, nil, false, fmt.Errorf("gusset: corrupt ring record (ticket 0)")
+	}
 	atomic.StoreUint64((*uint64)(slot), tr.head+tr.ring.Capacity)
 	tr.head++
 	tr.completed()
@@ -254,6 +259,9 @@ func (tr *ticketReader) parseBuffered() (ticket uint64, data []byte, inline bool
 	if len(b) < size {
 		return 0, nil, false, 0, nil
 	}
+	if w&^ffi.InlineRecordFlag == 0 {
+		return 0, nil, false, 0, fmt.Errorf("gusset: corrupt completion record (inline ticket 0)")
+	}
 	return w &^ ffi.InlineRecordFlag, b[inlineHeaderBytes : inlineHeaderBytes+int(n)], true, size, nil
 }
 
@@ -286,6 +294,10 @@ func (tr *ticketReader) nextPipe() (ticket uint64, data []byte, inline bool, err
 			return 0, nil, false, err
 		}
 		if size > 0 {
+			if t == 0 {
+				// Without a ring nothing writes wake tokens, and tickets start at 1.
+				return 0, nil, false, fmt.Errorf("gusset: corrupt completion record (ticket 0)")
+			}
 			tr.start += size
 			tr.completed()
 			return t, d, in, nil

@@ -713,6 +713,11 @@ arm_exec() {
 
 # The cargo bench's own floor on rounds (benchstat will not quote an interval
 # below 6 samples), so the warm-up asks for it rather than for -count=1.
+# WARM_COUNT=10 below is that floor: it must equal MIN_ROUNDS in
+# crates/gusset/benches/common/mod.rs, the one copy the Rust benches use. It
+# stays a literal here because a shell script cannot import a Rust constant. A
+# drift would not fail the run: the warm-up's exit status is ignored below, so a
+# value under the floor would only turn the warm-up into a refused no-op.
 WARM_COUNT=1
 case $1 in
 cargo:*) WARM_COUNT=10 ;;

@@ -1,6 +1,7 @@
 package pitfalls_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // TestHardening_UntrustedInputCannotSelectPanic is the headline regression.
@@ -113,7 +115,7 @@ func TestHardening_PoolSizeIsBounded(t *testing.T) {
 }
 
 // Unknown CallHeader flag bits are rejected rather than silently dropped. Covered
-// in tests/rust_runtime.rs (submit_rejects_unknown_header_flags): the public Go API
+// in tests/rust/rust_runtime.rs (submit_rejects_unknown_header_flags): the public Go API
 // deliberately exposes no way to set arbitrary flag bits, and adding a test-only
 // accessor would put production surface in the package to serve a test.
 
@@ -481,22 +483,6 @@ func TestPitfall_ThreadsMetricIsLive(t *testing.T) {
 	}
 }
 
-// waitLiveBytes polls Stats().LiveBytes until ok accepts it or 30s pass, and
-// returns the last reading with whether ok accepted it.
-func waitLiveBytes(ok func(uint64) bool) (uint64, bool) {
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		live := gusset.Stats().LiveBytes
-		if ok(live) {
-			return live, true
-		}
-		if time.Now().After(deadline) {
-			return live, false
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 // TestPitfall_DiscardReleasesUncollectedResults pins the bound on results
 // nobody Waits for.
 //
@@ -549,14 +535,14 @@ func TestPitfall_DiscardReleasesUncollectedResults(t *testing.T) {
 	if _, err := h.Wait(ctx, submit([]byte{0})); err != nil {
 		t.Fatalf("warm-up Wait failed: %v", err)
 	}
-	baseline := gusset.Stats().LiveBytes
+	baseline := livebytes.Quiesce(t)
 
 	tickets := make([]uint64, 0, rounds)
 	for i := 0; i < rounds; i++ {
 		tickets = append(tickets, submit([]byte{0}))
 	}
 	retained := baseline + rounds*payload
-	if live, ok := waitLiveBytes(func(v uint64) bool { return v >= retained }); !ok {
+	if live, ok := livebytes.WaitUntil(func(v uint64) bool { return v >= retained }); !ok {
 		t.Fatalf("%d uncollected %d-byte results should be held until Wait, Discard or Close: "+
 			"live %d, baseline %d", rounds, payload, live, baseline)
 	}
@@ -566,7 +552,7 @@ func TestPitfall_DiscardReleasesUncollectedResults(t *testing.T) {
 			t.Fatalf("Discard of stored result %d: %v", i, err)
 		}
 	}
-	if live, ok := waitLiveBytes(func(v uint64) bool { return v < baseline+payload }); !ok {
+	if live, ok := livebytes.WaitUntil(func(v uint64) bool { return v < baseline+payload }); !ok {
 		t.Fatalf("Discard did not release the take buffers: live %d, baseline %d, %d results of %d bytes",
 			live, baseline, rounds, payload)
 	}
@@ -588,12 +574,163 @@ func TestPitfall_DiscardReleasesUncollectedResults(t *testing.T) {
 	if err := h.Discard(running); err != nil {
 		t.Fatalf("Discard of a running ticket: %v", err)
 	}
-	if live, ok := waitLiveBytes(func(v uint64) bool { return v < baseline+payload }); !ok {
+	if live, ok := livebytes.WaitUntil(func(v uint64) bool { return v < baseline+payload }); !ok {
 		t.Fatalf("a result discarded while running was kept when it landed: live %d, baseline %d", live, baseline)
 	}
 
 	// The handle still works, and Discard did not cancel or poison anything.
 	if _, err := h.Call(ctx, []byte{0, 1}); err != nil {
 		t.Fatalf("Call after Discard: %v", err)
+	}
+}
+
+// nilSafeSpan is a pointer carrier whose methods dereference the receiver, the
+// way any struct-backed span context does.
+type nilSafeSpan struct{ trace [16]byte }
+
+func (s *nilSafeSpan) TraceID() [16]byte { return s.trace }
+func (s *nilSafeSpan) SpanID() [8]byte   { return [8]byte{s.trace[0]} }
+
+// TestPitfall_TypedNilTraceCarrierDoesNotPanicOrLeakPermit pins a typed-nil
+// pointer stored under SpanContextKey.
+//
+// `ctx.Value(key).(TraceCarrier)` succeeds for a (*T)(nil), and `sc != nil` is
+// true for an interface holding one, so TraceID() ran on a nil receiver and
+// panicked on the caller's goroutine. It ran after the pool permit was taken,
+// so a caller that recovered had also lost a permit for good: pool-size such
+// calls and every later Submit parked forever (I4).
+func TestPitfall_TypedNilTraceCarrierDoesNotPanicOrLeakPermit(t *testing.T) {
+	const pool = 2
+	h, err := gusset.Open(gusset.WithPoolSize(pool), gusset.WithDiagnosticEngine())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+
+	var carrier *nilSafeSpan
+	base, cancelBase := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelBase()
+	ctx := context.WithValue(base, gusset.SpanContextKey, carrier)
+	for i := 0; i < pool+1; i++ {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("call %d: a typed-nil carrier panicked the caller: %v", i, r)
+				}
+			}()
+			if _, err := h.Call(ctx, []byte{0, 1}); err == nil {
+				t.Errorf("call %d: a typed-nil carrier must be refused, got nil error", i)
+			}
+		}()
+	}
+
+	// Every permit must still be there: pool concurrent submits get in at once.
+	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for i := 0; i < pool; i++ {
+		tk, err := h.Submit(sctx, []byte{0, byte(i)})
+		if err != nil {
+			t.Fatalf("submit %d after the carrier failures: %v (a permit leaked)", i, err)
+		}
+		if _, err := h.Wait(sctx, tk); err != nil {
+			t.Fatalf("wait %d: %v", i, err)
+		}
+	}
+
+	// A working carrier on the same handle still propagates.
+	ok := &nilSafeSpan{trace: [16]byte{0xAB}}
+	out, err := h.Call(context.WithValue(sctx, gusset.SpanContextKey, ok), []byte{7})
+	if err != nil || len(out) != 24 || out[0] != 0xAB || out[16] != 0xAB {
+		t.Fatalf("carrier propagation broke: %v %v", out, err)
+	}
+
+	// The guard is on the hot path of every traced call: it must not allocate.
+	traced := context.WithValue(context.Background(), gusset.SpanContextKey, ok)
+	bare := context.Background()
+	in := []byte{0, 1}
+	for i := 0; i < 50; i++ { // warm both paths
+		_, _ = h.Call(traced, in)
+		_, _ = h.Call(bare, in)
+	}
+	withCarrier := testing.AllocsPerRun(200, func() { _, _ = h.Call(traced, in) })
+	without := testing.AllocsPerRun(200, func() { _, _ = h.Call(bare, in) })
+	if withCarrier > without {
+		t.Fatalf("a trace carrier costs %.1f allocs/call, a bare context %.1f", withCarrier, without)
+	}
+}
+
+// A job that was already running when a sibling panicked still delivers its
+// result, whatever that result's size.
+//
+// Poison refuses *new* work (I2). gusset_take used to allocate the egress
+// buffer for a result of 4 KiB or less through the public, poison-checked
+// buf_alloc, so a job that finished successfully after a sibling's panic lost
+// its result and surfaced a generic FFI_ERR "handle is poisoned" — neither the
+// result nor ErrPoisoned. A result over 4 KiB was already promoted to a buffer
+// on the worker and came back intact, so the outcome depended on output size.
+func TestPitfall_InFlightResultSurvivesSiblingPanic(t *testing.T) {
+	large := make([]byte, 5000)
+	large[0], large[1], large[2] = 9, 30, 0 // sleep 300 ms, then echo large[2:]
+	for i := 3; i < len(large); i++ {
+		large[i] = byte(i)
+	}
+
+	cases := []struct {
+		name  string
+		input []byte
+		want  []byte
+	}{
+		{"small", []byte{9, 30, 0, 1, 2, 3}, []byte{0, 1, 2, 3}},
+		{"large", large, large[2:]},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
+			if err != nil {
+				t.Fatalf("Open failed: %v", err)
+			}
+			defer h.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			var in any = tc.input
+			if len(tc.input) > 4096 {
+				buf, err := h.NewBuffer(len(tc.input))
+				if err != nil {
+					t.Fatalf("NewBuffer: %v", err)
+				}
+				defer buf.Free()
+				copy(buf.Bytes(), tc.input)
+				in = buf
+			}
+
+			slow, err := h.Submit(ctx, in)
+			if err != nil {
+				t.Fatalf("Submit slow job: %v", err)
+			}
+			boom, err := h.Submit(ctx, []byte{9, 5, 1}) // panic after 50 ms
+			if err != nil {
+				t.Fatalf("Submit panicking job: %v", err)
+			}
+
+			if _, err := h.Wait(ctx, boom); !errors.Is(err, gusset.ErrPanic) {
+				t.Fatalf("sibling: expected ErrPanic, got %v", err)
+			}
+
+			got, err := h.Wait(ctx, slow)
+			if err != nil {
+				t.Fatalf("in-flight job finished after the sibling's panic and lost its result: %v", err)
+			}
+			if !bytes.Equal(got, tc.want) {
+				t.Fatalf("result corrupted: got %d bytes, want %d", len(got), len(tc.want))
+			}
+
+			// Poison still refuses new work (I2).
+			if _, err := h.Call(ctx, []byte{0}); !errors.Is(err, gusset.ErrPoisoned) {
+				t.Fatalf("new call after panic: expected ErrPoisoned, got %v", err)
+			}
+		})
 	}
 }

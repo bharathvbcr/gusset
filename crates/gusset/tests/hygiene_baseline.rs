@@ -17,7 +17,7 @@
 
 #![cfg(target_os = "linux")]
 
-#[path = "../../../tests/common/mod.rs"]
+#[path = "../../../tests/rust/common/mod.rs"]
 mod common;
 use common::procfs::{baseline, settled, usage};
 use std::time::Duration;

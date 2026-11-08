@@ -27,6 +27,18 @@ import (
 // archive and the same diagnostic engine.
 const workerEnv = "GUSSET_ISOLATE_WORKER"
 
+// countFileEnv, when set on a worker, is a file faulty.Submit appends one
+// line to per submission. The supervisor tests use it to show a payload was
+// not submitted again after the worker died. Empty means the worker does not
+// record submissions.
+const countFileEnv = "GUSSET_ISOLATE_COUNT_FILE"
+
+// forkSleepEnv, when set on a worker, is a file the worker writes the pid of a
+// `sleep 60` helper to before it does anything else. The helper stays in the
+// worker's process group and holds none of its pipes, so only a group kill ends
+// it; the retirement and Close tests read the pid and poll for its exit.
+const forkSleepEnv = "GUSSET_ISOLATE_FORK_SLEEP"
+
 const workerPool = 2
 
 // Fault bytes: the worker's own process dies the way an uncatchable fault
@@ -118,7 +130,19 @@ func workerMain() int {
 		fmt.Fprintln(os.Stderr, "worker:", err)
 		return 1
 	}
+	if path := os.Getenv(forkSleepEnv); path != "" {
+		if err := forkSleepHelper(path); err != nil {
+			fmt.Fprintln(os.Stderr, "worker:", err)
+			return 1
+		}
+	}
 	mode := os.Getenv(modeEnv)
+	if mode == "delay-hello" {
+		// The handshake stays in progress long enough for a caller to give
+		// up. The process then announces normally.
+		time.Sleep(1500 * time.Millisecond)
+		mode = ""
+	}
 	if mode == "nostdin" {
 		_ = os.Stdin.Close() // before hello: the host's first write fails
 	}
@@ -142,6 +166,20 @@ func workerMain() int {
 	return 0
 }
 
+// forkSleepHelper starts `sleep 60` with no inherited pipes and publishes its
+// pid atomically (write then rename), so a reader never sees a partial number.
+func forkSleepHelper(path string) error {
+	gc := exec.Command("sleep", "60")
+	if err := gc.Start(); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.Itoa(gc.Process.Pid)), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // misbehave announces itself and then fails the protocol one way, staying
 // alive so only the host can end it.
 func misbehave(mode string, out *os.File) int {
@@ -154,6 +192,11 @@ func misbehave(mode string, out *os.File) int {
 		if err := gc.Start(); err != nil {
 			return 1
 		}
+	}
+	if mode == "no-hello" {
+		// A loader stall or a deadlocked init: alive, and never announces.
+		time.Sleep(time.Minute)
+		return 0
 	}
 	if err := writeFrame(out, &response{Op: opHello, Version: protocolVersion, PoolSize: workerPool}, maxResponseFrame); err != nil {
 		return 1
@@ -177,6 +220,13 @@ func misbehave(mode string, out *os.File) int {
 		var hdr [4]byte
 		binary.BigEndian.PutUint32(hdr[:], 1000)
 		_, _ = out.Write(append(hdr[:], "0123456789"...))
+	case "die-on-first-job":
+		// Healthy until it is given work: hello, then exit on the first
+		// request without answering it. The death is caused by the job, so a
+		// test decides when the generation dies.
+		var req request
+		_ = readFrame(bufio.NewReader(os.Stdin), maxRequestFrame, &req)
+		return 0
 	case "dup", "reorder", "unknown":
 		return scripted(mode, out)
 	case "answer-hold":
@@ -253,6 +303,9 @@ func (f faulty) Submit(ctx context.Context, in any) (uint64, error) {
 	if os.Getenv(modeEnv) == "stray" {
 		fmt.Fprint(os.Stdout, "INFO engine ready\n")
 	}
+	if b, ok := in.([]byte); ok {
+		noteSubmit(b)
+	}
 	if b, ok := in.([]byte); ok && len(b) > 0 {
 		switch b[0] {
 		case faultKill:
@@ -266,6 +319,23 @@ func (f faulty) Submit(ctx context.Context, in any) (uint64, error) {
 		}
 	}
 	return f.Handle.Submit(ctx, in)
+}
+
+// noteSubmit appends the payload's hex to countFileEnv when that variable is
+// set. A missing file or a short write is ignored: the test that asked for
+// the record fails on the count, and a worker that is not under that test
+// does not have the variable.
+func noteSubmit(in []byte) {
+	path := os.Getenv(countFileEnv)
+	if path == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	_, _ = fmt.Fprintf(f, "%x\n", in)
+	_ = f.Close()
 }
 
 func startWorker(t *testing.T) *Proc {
