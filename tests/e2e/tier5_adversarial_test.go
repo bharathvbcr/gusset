@@ -342,7 +342,13 @@ func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 						record(cid, "waitbuffer-nil", errors.New("WaitBuffer returned a nil Buffer and a nil error"))
 						return
 					}
-					closed, echoErr := closeRaceEchoVerdict(outBuf.Bytes(), closeStarted.Load())
+					// Read Bytes before the flag: a nil from a closed handle
+					// means Close had already started, so the flag is then
+					// true. Read the other way round, a Close starting
+					// between the two would turn a closed result into an error.
+					got := outBuf.Bytes()
+					started := closeStarted.Load()
+					closed, echoErr := closeRaceEchoVerdict(got, started)
 					switch {
 					case echoErr != nil:
 						record(cid, "waitbuffer-bad-echo", echoErr)
