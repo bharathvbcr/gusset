@@ -2,8 +2,15 @@
 # Gusset: installer. Builds the release archive and gussetvet and installs them
 # with `make install`, the one owner of what an install consists of.
 #
-# From a release tag (the default):
-#   curl -fsSL https://raw.githubusercontent.com/bharathvbcr/gusset/<tag>/install.sh | bash
+# Fetched from main (protected) or a commit you reviewed, it builds the release
+# tag GUSSET_DEFAULT_REF and refuses unless that tag still resolves to
+# GUSSET_DEFAULT_COMMIT (README "One-Command Install"):
+#   curl -fsSLO https://raw.githubusercontent.com/bharathvbcr/gusset/main/install.sh
+#   less install.sh
+#   bash install.sh
+# Do not fetch it from a release tag: a tag's own install.sh cannot name that
+# tag's commit, so its default install refuses. For another tag, name the
+# commit yourself: GUSSET_REF=<tag> GUSSET_COMMIT=<sha> bash install.sh
 # From a checkout, building that checkout:
 #   ./install.sh
 #
