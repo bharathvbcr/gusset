@@ -27,12 +27,10 @@ type runBlock struct {
 var (
 	runKey   = regexp.MustCompile(`^(\s*)(- )?run:\s*(.*)$`)
 	shellKey = regexp.MustCompile(`^\s*shell:\s*(.*)$`)
-	// `cmd | tee` and `cmd |& tee` (stderr into the pipe); `||` is not a pipe.
-	teePipe     = regexp.MustCompile(`(?:^|[^|])\|&?\s*(?:sudo\s+)?tee\b`)
-	setPipefail = regexp.MustCompile(`\bset\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*o\s+pipefail\b`)
-	// `set +o pipefail` (or `set +eo pipefail`) turns it off again.
-	unsetPipefail = regexp.MustCompile(`\bset\s+(?:[-+][A-Za-z]+\s+)*\+[A-Za-z]*o\s+pipefail\b`)
-	shellOpt      = regexp.MustCompile(`-[A-Za-z]*o\s+pipefail\b`)
+	// `cmd | tee`, `cmd |& tee`, `| sudo tee`, `| command tee`, `| /usr/bin/tee`;
+	// `||` is not a pipe.
+	teePipe  = regexp.MustCompile(`(?:^|[^|])\|&?\s*(?:(?:sudo|command|exec|time)\s+)*(?:\S*/)?tee\b`)
+	shellOpt = regexp.MustCompile(`-[A-Za-z]*o\s+pipefail\b`)
 )
 
 // runBlocks extracts every `run:` step body together with its step's `shell:`.
@@ -93,24 +91,48 @@ func stepShell(lines []string, i, keyCol int) string {
 	return ""
 }
 
+// pipefailAfter applies one `set ...` command to the armed state: `-o pipefail`
+// (also `-eo pipefail`, `-euo pipefail`, after any other options such as
+// `set -o errexit -o pipefail` or `set +e -o pipefail`) arms it, `+o pipefail`
+// (also `+eo pipefail`) disarms it. Anything else leaves it alone.
+func pipefailAfter(seg string, armed bool) bool {
+	f := strings.Fields(seg)
+	if len(f) == 0 || f[0] != "set" {
+		return armed
+	}
+	for i := 1; i+1 < len(f); i++ {
+		if f[i+1] != "pipefail" || len(f[i]) < 2 || !strings.HasSuffix(f[i], "o") {
+			continue
+		}
+		switch f[i][0] {
+		case '-':
+			armed = true
+		case '+':
+			armed = false
+		}
+	}
+	return armed
+}
+
 // teeWithoutPipefailViolations reports a `cmd | tee f` whose step neither sets
 // pipefail before it nor runs under `shell: bash -o pipefail {0}`. Without it
 // the pipeline's status is tee's, so a failing command is green; the unset
-// `shell:` default is `bash -e {0}`, which has no pipefail.
+// `shell:` default is `bash -e {0}`, which has no pipefail. Commands are read
+// by scriptLines (heredoc bodies, quoted strings and comments are not pipes)
+// and judged in order, a `set` and a tee on one line each in its own segment;
+// its doc comment lists what a line scanner cannot see (`xargs tee`, scope).
 func teeWithoutPipefailViolations(name string, lines []string) []string {
 	var out []string
 	for _, b := range runBlocks(lines) {
 		// A `shell: bash -o pipefail {0}` step starts armed, but a later
 		// `set +o pipefail` in its script disarms it as much as in any other.
 		armed := shellOpt.MatchString(b.shell)
-		for _, ll := range logicalLines(b.body) {
-			if unsetPipefail.MatchString(ll.text) {
-				armed = false
-			} else if setPipefail.MatchString(ll.text) {
-				armed = true
-			}
-			if teePipe.MatchString(ll.text) && !armed {
-				out = append(out, name+":"+strconv.Itoa(b.n)+": a pipe into tee with no `set -o pipefail` before it and no `shell: bash -o pipefail {0}`: "+strings.TrimSpace(ll.text))
+		for _, ll := range scriptLines(b.body) {
+			for _, seg := range shellSegments(ll.text) {
+				armed = pipefailAfter(strings.TrimSpace(seg), armed)
+				if teePipe.MatchString(seg) && !armed {
+					out = append(out, name+":"+strconv.Itoa(b.n)+": a pipe into tee with no `set -o pipefail` before it and no `shell: bash -o pipefail {0}`: "+strings.TrimSpace(ll.text))
+				}
 			}
 		}
 	}
@@ -121,7 +143,7 @@ func TestEveryTeePipeRunsUnderPipefail(t *testing.T) {
 	teeLines := 0
 	for name, lines := range workflows(t) {
 		for _, b := range runBlocks(lines) {
-			for _, ll := range logicalLines(b.body) {
+			for _, ll := range scriptLines(b.body) {
 				if teePipe.MatchString(ll.text) {
 					teeLines++
 				}
