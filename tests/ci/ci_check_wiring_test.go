@@ -75,6 +75,9 @@ func stepShell(lines []string, i, keyCol int) string {
 			}
 		}
 	}
+	if lo < 0 {
+		lo = 0 // a run key with no step header above it (a one-step fragment)
+	}
 	for j := lo; j < len(lines); j++ {
 		if j > lo && j != i && strings.TrimSpace(lines[j]) != "" && indentOf(lines[j]) <= dash {
 			break
