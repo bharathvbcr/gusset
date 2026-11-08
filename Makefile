@@ -121,8 +121,8 @@ test: linked-target-dir
 # libgusset.a, never this umbrella). This recipe's own form, a plain
 # `go test -count=1`, relinks every time (measured on go1.27.3: two identical
 # runs both ran the linker), so it never links a stale archive. A cached link
-# does exist for `go test -c -o <file>`, which skipped the linker after a byte
-# of the archive changed. The recipe therefore also hashes the umbrella and
+# does exist for `go test -c -o <file>` when that output file already exists,
+# and then it skipped the linker after a byte of the archive changed. The recipe therefore also hashes the umbrella and
 # passes the digest in -ldflags, which the link's cache key includes: it costs
 # nothing here and keeps the recipe safe if it is ever changed to a form that
 # caches the link. The -X names no real variable, which the linker ignores; the
