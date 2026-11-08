@@ -767,10 +767,13 @@ func TestSupervisor_GrandchildDrainBeforeNextHello(t *testing.T) {
 	// A call that already bound the dying generation fails with that
 	// generation and is not replayed. The following call must reach hello
 	// on the replacement without waiting out the grandchild's sleep.
-	echoDeadline := time.Now().Add(3 * time.Second)
+	// The bounds here only stop a hang. A short per-call deadline would be
+	// spent on the replacement's exec and hello, and on a loaded host a call
+	// that gave up mid-handshake is a margin the test would then be judged by.
+	echoDeadline := time.Now().Add(20 * time.Second)
 	var last error
 	for {
-		cctx, ccancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
 		out, err := s.Call(cctx, []byte{0, 0x42})
 		ccancel()
 		if err == nil && bytes.Equal(out, []byte{0, 0x42}) {
@@ -795,8 +798,15 @@ func TestSupervisor_GrandchildDrainBeforeNextHello(t *testing.T) {
 }
 
 func TestSupervisor_WindowSlides(t *testing.T) {
-	const window = 200 * time.Millisecond
+	// The window is slid by moving the supervisor's clock, not by sleeping:
+	// with a real 200ms window a host that stalls between the deaths and the
+	// budget check lets the window slide on its own, and the check then sees a
+	// replacement it forbids. The clock stands still until the test moves it.
+	const window = time.Minute
 	h := newHarness(t, Policy{MaxRestarts: 1, Window: window}, nil)
+	var offset atomic.Int64
+	base := time.Now()
+	h.s.now = func() time.Time { return base.Add(time.Duration(offset.Load())) }
 	pid := h.echo()
 	pid = h.killAndEcho(pid)
 	if h.starts.Load() != 2 {
@@ -806,9 +816,9 @@ func TestSupervisor_WindowSlides(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.waitBudget(2)
-	// Both deaths are inside the window. After it slides, time.Now subtraction
+	// Both deaths are inside the window. After it slides, the subtraction
 	// drops them and one more process is allowed.
-	time.Sleep(window + 200*time.Millisecond)
+	offset.Add(int64(window + time.Second))
 	if next := h.echo(); next == 0 || next == pid {
 		t.Fatalf("echo after the window slid did not start a new process (pid %d)", next)
 	}
@@ -841,24 +851,38 @@ func TestSupervisor_TicketIDsStopAtTheCeiling(t *testing.T) {
 	}
 }
 
-// abandonPool gives up one Call per permit, each on a short deadline, so every
-// permit of the live generation is held by a ticket whose caller left.
-func abandonPool(t *testing.T, h *supHarness, payload []byte) {
+// abandonPool gives up one job per permit, so every permit of the live
+// generation is held by a ticket whose caller left. Submit runs under a long
+// bound (10s is a hang limit, not a timing margin), so the first worker's
+// start and handshake are not charged to anything short; only the Wait is
+// short, and it ends in the cancel whether the deadline fires before or after
+// the Wait begins, so a slow host cannot leave a permit unheld. It returns the
+// generation's Proc, taken before any permit is stranded: after a stall
+// retirement s.live is nil until the next caller starts a replacement, so the
+// proc cannot be read back from the supervisor later.
+func abandonPool(t *testing.T, h *supHarness, payload []byte) *Proc {
 	t.Helper()
+	ectx, ecancel := context.WithTimeout(context.Background(), 10*time.Second)
+	g, err := h.s.ensure(ectx)
+	ecancel()
+	if err != nil {
+		t.Fatalf("starting the worker to abandon its pool = %v", err)
+	}
 	for i := 0; i < workerPool; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		_, err := h.s.Call(ctx, payload)
-		cancel()
+		sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
+		id, err := h.s.Submit(sctx, payload)
+		scancel()
+		if err != nil {
+			t.Fatalf("Submit %d while abandoning the pool = %v", i, err)
+		}
+		wctx, wcancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		_, err = h.s.Wait(wctx, id)
+		wcancel()
 		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("abandoning Call %d = %v; want DeadlineExceeded", i, err)
+			t.Fatalf("abandoning Wait %d = %v; want DeadlineExceeded", i, err)
 		}
 	}
-}
-
-func liveProc(h *supHarness) *Proc {
-	h.s.mu.Lock()
-	defer h.s.mu.Unlock()
-	return h.s.live.proc
+	return g.proc
 }
 
 // stallRetiredAsUnresponsive is the A4-1 flow for a worker that is alive and
@@ -873,8 +897,7 @@ func stallRetiredAsUnresponsive(t *testing.T, mode string) {
 		return ""
 	})
 	// The first Call starts the worker; the worker's mode never answers.
-	abandonPool(t, h, []byte{0, 1})
-	old := liveProc(h)
+	old := abandonPool(t, h, []byte{0, 1})
 	abandoned := time.Now()
 
 	// A caller that arrives after the permits are stranded parks on the
@@ -934,8 +957,7 @@ func TestSupervisor_PartialFrameStallRetiredUnresponsive(t *testing.T) {
 func TestSupervisor_SlowWorkerThatAnswersIsNotRetired(t *testing.T) {
 	h := newHarness(t, Policy{MaxRestarts: 2, Window: time.Minute, StallTimeout: 700 * time.Millisecond}, nil)
 	pid := h.echo()
-	abandonPool(t, h, []byte{9, 30}) // 300ms of work, never polling the deadline
-	p := liveProc(h)
+	p := abandonPool(t, h, []byte{9, 30}) // 300ms of work, never polling the deadline
 	begin := time.Now()
 
 	// Outlast the stall window, which started when the permits were stranded.
@@ -1137,12 +1159,58 @@ func TestProc_CloseTimeoutKillsWorkerGroup(t *testing.T) {
 	waitGone(t, helper, "after the Close timeout")
 }
 
+// The reaped-before-reader order: the worker is already gone when the reader
+// wakes, so killIfAlive skips and the group is left to Close's own kill. Close
+// must therefore kill the group itself. killGate holds the reader, once the
+// killed worker's pipe closes, until waitProc has reaped the leader: the order
+// that left a helper behind when Close killed only the worker.
+func TestProc_CloseBudgetKillsGroupWhenTheReapWinsTheRace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "helper.pid")
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = append(os.Environ(), workerEnv+"=1", modeEnv+"=hang", forkSleepEnv+"="+path)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	p, err := Start(ctx, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := helperPID(t, path)
+	gate := func() {
+		select {
+		case <-p.procExited:
+		case <-time.After(10 * time.Second):
+			t.Error("the worker was not reaped within 10s of its protocol stream failing")
+		}
+	}
+	p.killGate.Store(&gate)
+	err = p.close(300 * time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "killed") {
+		t.Fatalf("close = %v; a worker that ignores stdin EOF must be killed at the budget", err)
+	}
+	waitGone(t, helper, "after the Close timeout with the leader already reaped")
+}
+
+// The handshake never completes (mode no-hello), so Start returns only when
+// its context ends. The context ends when the worker has published its helper
+// pid, not after a fixed time, so the worker's exec and start-up are not part
+// of the budget; 10s only bounds a worker that never gets that far.
 func TestStart_HandshakeFailureKillsWorkerGroup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "helper.pid")
 	cmd := exec.Command(os.Args[0])
 	cmd.Env = append(os.Environ(), workerEnv+"=1", modeEnv+"=no-hello", forkSleepEnv+"="+path)
-	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	go func() {
+		for ctx.Err() == nil {
+			if b, err := os.ReadFile(path); err == nil {
+				if pid, perr := strconv.Atoi(strings.TrimSpace(string(b))); perr == nil && pid > 1 {
+					cancel()
+					return
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
 	if _, err := Start(ctx, cmd); err == nil {
 		t.Fatal("Start = nil; the worker never announces")
 	}
@@ -1510,7 +1578,13 @@ func TestSupervisor_SubmitRacingSigkill(t *testing.T) {
 					return
 				}
 				succeeded.Add(1)
-				_, _ = h.s.Wait(ctx, id)
+				// The generation may die under the job: Wait then fails, but
+				// with the supervisor's refusal and never the advice to Close
+				// a worker the caller does not own.
+				if _, err := h.s.Wait(ctx, id); err != nil && (strings.Contains(err.Error(), "Close it") || errors.Is(err, gusset.ErrClosed)) {
+					advised.Add(1)
+					t.Errorf("Wait on a job whose worker was SIGKILLed returned %q", err)
+				}
 			}()
 		}
 		close(start)

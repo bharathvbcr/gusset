@@ -158,6 +158,13 @@ type Proc struct {
 	// close. A second Close on an *os.File errors and does not close the
 	// descriptor twice; Once also keeps those two paths from racing.
 	stdinOnce sync.Once
+
+	// killGate is a test seam: when set, killIfAlive runs it before it looks at
+	// whether the worker has exited. It lets a test hold the reader until
+	// waitProc has reaped the leader, the order in which killIfAlive skips the
+	// kill and the group is left to whoever else kills it. Nil outside tests;
+	// atomic because the reader is already running when a test sets it.
+	killGate atomic.Pointer[func()]
 }
 
 // Start runs cmd as a worker. cmd must run Serve reading its stdin and
@@ -384,6 +391,9 @@ func (p *Proc) exited() bool {
 // failed. A worker that has already exited is reaped by waitProc; Kill here
 // would only race that Wait.
 func (p *Proc) killIfAlive() {
+	if gate := p.killGate.Load(); gate != nil {
+		(*gate)()
+	}
 	if !p.exited() {
 		p.killTree()
 	}
@@ -984,7 +994,10 @@ func (p *Proc) close(budget time.Duration) error {
 	select {
 	case <-p.readerDone:
 	case <-timer.C:
-		_ = p.cmd.Process.Kill()
+		// The group, not only the worker: the reader's killIfAlive skips a
+		// worker that waitProc has already reaped, so a helper the worker
+		// spawned would outlive this Close if the kill here left it alone.
+		p.killTree()
 		_ = p.rd.Close()
 		<-p.readerDone
 		p.closeErr = fmt.Errorf("isolate: worker did not exit within %v of Close and was killed", budget)
