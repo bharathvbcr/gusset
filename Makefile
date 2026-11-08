@@ -118,11 +118,16 @@ test: linked-target-dir
 #
 # The Go build cache does not hash the archive the linker reads (internal/ffi/
 # gen.go exists for that reason, and it hashes only target/{release,debug}/
-# libgusset.a, never this umbrella). The recipe therefore hashes the umbrella
-# itself and passes the digest in -ldflags, which the cache keys on, so a rebuilt
-# or changed archive relinks and an unchanged one reuses the link. The -X names
-# no real variable, which the linker ignores; the value is only a cache key.
-# tests/ci/uniffi_link_cache_test.go holds the recipe to this.
+# libgusset.a, never this umbrella). This recipe's own form, a plain
+# `go test -count=1`, relinks every time (measured on go1.27.3: two identical
+# runs both ran the linker), so it never links a stale archive. A cached link
+# does exist for `go test -c -o <file>`, which skipped the linker after a byte
+# of the archive changed. The recipe therefore also hashes the umbrella and
+# passes the digest in -ldflags, which the link's cache key includes: it costs
+# nothing here and keeps the recipe safe if it is ever changed to a form that
+# caches the link. The -X names no real variable, which the linker ignores; the
+# value is only a cache key. tests/ci/uniffi_link_cache_test.go holds the
+# recipe to this.
 UNIFFI_UMBRELLA := examples/uniffi_bindgen_go/rust/target/debug/libgusset.a
 
 test-uniffi-link:
