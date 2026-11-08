@@ -682,9 +682,11 @@ mod tests {
     /// test's `mmap` had reused in the meantime (tests run in parallel and map
     /// alt stacks of this very size) disabled that worker's live signal stack.
     /// `mincore(2)` was the first candidate, but on macOS it returns 0 for an
-    /// unmapped range, so it cannot answer this. The check stays a snapshot: a
-    /// parallel test can map the hole between the drop and the probe, which
-    /// reads as mapped.
+    /// unmapped range, so it cannot answer this. The check stays a snapshot,
+    /// and it has the old probe's race: if a parallel test's `mmap` reuses a
+    /// page of the hole between the drop and the probe, that page reads as
+    /// mapped and the test fails falsely. The window is microseconds wide, and
+    /// unlike the `mprotect` probe the check itself damages nothing.
     fn mapped_pages(base: *mut libc::c_void, len: usize) -> usize {
         // SAFETY: sysconf has no preconditions.
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;

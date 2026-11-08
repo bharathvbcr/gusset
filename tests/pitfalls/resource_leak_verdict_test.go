@@ -23,7 +23,8 @@ func scriptedFDs(readings ...int) (func() int, *int) {
 //
 // It tests the baseline helper only, from scripted readings. It does not
 // detect a leak: the exact comparison against this baseline is in the
-// ResourceLeak tests, and planting a leaked fd there is what proves it.
+// ResourceLeak tests, and no test here plants a leaked fd to show that
+// comparison fails.
 func TestResourceBaselineQuiescesFDs(t *testing.T) {
 	cases := []struct {
 		name     string
