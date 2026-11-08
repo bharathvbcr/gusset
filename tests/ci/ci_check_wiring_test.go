@@ -104,6 +104,9 @@ func pipefailAfter(seg string, armed bool) bool {
 		return armed
 	}
 	for i := 1; i+1 < len(f); i++ {
+		if f[i] == "--" {
+			break // what follows is positional parameters, not options
+		}
 		if f[i+1] != "pipefail" || len(f[i]) < 2 || !strings.HasSuffix(f[i], "o") {
 			continue
 		}
@@ -121,17 +124,25 @@ func pipefailAfter(seg string, armed bool) bool {
 // pipefail before it nor runs under `shell: bash -o pipefail {0}`. Without it
 // the pipeline's status is tee's, so a failing command is green; the unset
 // `shell:` default is `bash -e {0}`, which has no pipefail. Commands are read
-// by scriptLines (heredoc bodies, quoted strings and comments are not pipes)
-// and judged in order, a `set` and a tee on one line each in its own segment;
-// its doc comment lists what a line scanner cannot see (`xargs tee`, scope).
+// by logicalLines (continuations, comments), quoted strings are blanked
+// (printf '| tee' is not a pipe), and a `set` and a tee on one line are judged
+// in order, each in its own segment.
+//
+// Limits of a line scanner, accepted: `xargs tee` and `find -exec tee` (tee is
+// run by another program, not piped to); `bash -c '... | tee'` (the pipeline is
+// inside a string); a heredoc body is read as commands, so a `| tee` inside one
+// is flagged; a `set -o pipefail` on its own line inside a function or an `if`
+// arms the whole script, so it errs toward accepting, while `f() { set -o
+// pipefail; }` on one line errs toward flagging; and a string spanning physical
+// lines is read line by line.
 func teeWithoutPipefailViolations(name string, lines []string) []string {
 	var out []string
 	for _, b := range runBlocks(lines) {
 		// A `shell: bash -o pipefail {0}` step starts armed, but a later
 		// `set +o pipefail` in its script disarms it as much as in any other.
 		armed := shellOpt.MatchString(b.shell)
-		for _, ll := range scriptLines(b.body) {
-			for _, seg := range shellSegments(ll.text) {
+		for _, ll := range logicalLines(b.body) {
+			for _, seg := range pipelineSegments(blankQuotes(ll.text)) {
 				armed = pipefailAfter(strings.TrimSpace(seg), armed)
 				if teePipe.MatchString(seg) && !armed {
 					out = append(out, name+":"+strconv.Itoa(b.n)+": a pipe into tee with no `set -o pipefail` before it and no `shell: bash -o pipefail {0}`: "+strings.TrimSpace(ll.text))
@@ -146,8 +157,8 @@ func TestEveryTeePipeRunsUnderPipefail(t *testing.T) {
 	teeLines := 0
 	for name, lines := range workflows(t) {
 		for _, b := range runBlocks(lines) {
-			for _, ll := range scriptLines(b.body) {
-				if teePipe.MatchString(ll.text) {
+			for _, ll := range logicalLines(b.body) {
+				if teePipe.MatchString(blankQuotes(ll.text)) {
 					teeLines++
 				}
 			}

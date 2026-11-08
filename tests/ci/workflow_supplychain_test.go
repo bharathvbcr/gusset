@@ -103,19 +103,28 @@ type logicalLine struct {
 
 var echoString = regexp.MustCompile(`\becho\s+("[^"]*"|'[^']*')`)
 
-// logicalLines joins backslash continuations, drops comments, and blanks the
-// string an echo prints: that text is not a command, but a command after it on
-// the same line (`echo "cargo check"; cargo check`) still is, and `&& echo ok`
-// no longer hides the command before it.
+// logicalLines joins a command that goes on onto its next line (a trailing
+// backslash, or a trailing `|`, `|&`, `&&` or `||`, which cannot end a command),
+// drops comments (whole-line and trailing), and blanks the string an echo
+// prints: that text is not a command, but a command after it on the same line
+// (`echo "cargo check"; cargo check`) still is, and `&& echo ok` no longer hides
+// the command before it. It is the one reader of a script body; the rules that
+// also need other strings blanked apply blankQuotes to its result.
+//
+// Limits of a line reader, shared by every rule built on it: heredoc bodies are
+// read as commands (no workflow has one; a rule that sees `<<` in a quoted
+// string or `$((x<<y))` must not be fooled into skipping lines, so none is
+// detected), a string that spans physical lines is read line by line, and
+// `$(...)` and subshell scope are not tracked.
 func logicalLines(lines []string) []logicalLine {
 	var out []logicalLine
 	for i := 0; i < len(lines); i++ {
 		if isComment(lines[i]) {
 			continue
 		}
-		start, text := i+1, lines[i]
-		for strings.HasSuffix(strings.TrimRight(text, " \t"), `\`) && i+1 < len(lines) {
-			text = strings.TrimSuffix(strings.TrimRight(text, " \t"), `\`) + " " + strings.TrimSpace(lines[i+1])
+		start, text := i+1, stripComment(lines[i])
+		for continues(text) && i+1 < len(lines) {
+			text = strings.TrimSuffix(strings.TrimRight(text, " \t"), `\`) + " " + strings.TrimSpace(stripComment(lines[i+1]))
 			i++
 		}
 		out = append(out, logicalLine{start, echoString.ReplaceAllString(text, "echo")})
@@ -123,11 +132,72 @@ func logicalLines(lines []string) []logicalLine {
 	return out
 }
 
-var commandSplit = regexp.MustCompile(`;|&&|\|\||\||\)`)
+// continues says a command goes on on the next physical line.
+func continues(text string) bool {
+	t := strings.TrimRight(text, " \t")
+	return strings.HasSuffix(t, `\`) || strings.HasSuffix(t, "|") || strings.HasSuffix(t, "|&") || strings.HasSuffix(t, "&&")
+}
+
+// stripComment drops a trailing `# ...` comment: a `#` that starts the line or
+// follows whitespace, outside quotes (so `$#`, `${#x}` and `'a # b'` stay).
+func stripComment(l string) string {
+	var quote byte
+	for i := 0; i < len(l); i++ {
+		c := l[i]
+		switch {
+		case quote != 0:
+			if c == '\\' && quote == '"' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '\\':
+			i++
+		case c == '#' && (i == 0 || l[i-1] == ' ' || l[i-1] == '\t'):
+			return l[:i]
+		}
+	}
+	return l
+}
+
+// blankQuotes empties the contents of '...' and "..." strings, leaving the
+// quotes, so text inside a string (printf '| tee') is not read as a command.
+func blankQuotes(l string) string {
+	var b strings.Builder
+	var quote byte
+	for i := 0; i < len(l); i++ {
+		c := l[i]
+		switch {
+		case quote != 0:
+			if c == '\\' && quote == '"' {
+				i++
+			} else if c == quote {
+				quote = 0
+				b.WriteByte(c)
+			}
+		case c == '\'' || c == '"':
+			quote = c
+			b.WriteByte(c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+var (
+	commandSplit  = regexp.MustCompile(`;|&&|\|\||\||\)`)
+	pipelineSplit = regexp.MustCompile(`;|&&|\|\||\)`)
+)
 
 // commandSegments splits a logical line at shell command separators, so
 // --locked has to appear in the same command as the cargo it governs.
-func commandSegments(s string) []string { return commandSplit.Split(s, -1) }
+// pipelineSegments does the same but keeps a pipeline (`a | b`, `a |& b`) whole,
+// for the rule that asks what a pipe feeds.
+func commandSegments(s string) []string  { return commandSplit.Split(s, -1) }
+func pipelineSegments(s string) []string { return pipelineSplit.Split(s, -1) }
 
 // toolInstallViolations reports an unpinned tool install: @latest, or a cargo
 // install that is not both --locked and --version.
