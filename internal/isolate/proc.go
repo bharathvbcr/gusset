@@ -448,9 +448,13 @@ func killTree(cmd *exec.Cmd, pgid int) {
 	}
 }
 
-// killTree is the supervisor's and Close's kill. It is safe after the leader
-// has exited: the group may still hold descendants, and a group with members
-// keeps its id from being reused.
+// killTree is the supervisor's and Close's kill. After the leader has exited
+// the group may still hold descendants, and that is what the group signal is
+// for. A group keeps its id from being reused only while it has members: once
+// the leader is reaped and the group is empty, the number is free, and a signal
+// sent then could reach an unrelated group given the same id (DECISIONS
+// 2026-11-07 and 2026-11-08). Callers therefore signal soon after the exit and
+// never hold a group id for later.
 func (p *Proc) killTree() {
 	killTree(p.cmd, p.pgid)
 }

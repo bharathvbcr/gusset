@@ -418,11 +418,22 @@ func TestSupervisor_CutWriteRetiresOneRestart(t *testing.T) {
 	wctx, wcancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer wcancel()
 	var err error
-	within(t, time.Second, "cut Submit", func() {
+	// 10s only bounds a hang. The cut itself is the 150ms deadline.
+	within(t, 10*time.Second, "cut Submit", func() {
 		_, err = h.s.Submit(wctx, []byte{0x5A})
 	})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("cut Submit = %v; want the request's deadline", err)
+	// Two outcomes are both the cut write. The write deadline and the
+	// request's context fire at the same instant, and the write's can be seen
+	// first: send then reports a cut frame while ctx.Err() is still nil, the
+	// frame poisons the generation, and a loaded host lets the retirement's
+	// kill latch the worker's death before the context's timer runs. The
+	// caller then gets the worker's exit as a supervisor refusal (poison, no
+	// "Close it" advice) instead of its deadline. What this test pins is the
+	// restart accounting below, not which of the two a race delivers.
+	deadline := errors.Is(err, context.DeadlineExceeded)
+	refusal := errors.Is(err, gusset.ErrPoisoned) && err != nil && !strings.Contains(err.Error(), "Close it")
+	if !deadline && !refusal {
+		t.Fatalf("cut Submit = %v; want the request's deadline or the poisoned generation's refusal without Close advice", err)
 	}
 	pid := h.echo()
 	if h.starts.Load() != 2 {
@@ -1139,6 +1150,40 @@ func TestSupervisor_RetireKillsWorkerGroup(t *testing.T) {
 			waitGone(t, helper, "after retire")
 		})
 	}
+}
+
+// The reaped-leader order for retirement: the leader is already reaped when the
+// reader's stream ends, so its killIfAlive skips and the group is left to
+// retire's own killTree. killGate holds the reader until waitProc has reaped, so
+// without retire's kill the helper survives. (The "leader exited" subtest above
+// cannot force this order: there the reader usually kills the group first.)
+func TestSupervisor_RetireKillsWorkerGroupWhenTheReapWinsTheRace(t *testing.T) {
+	h := newHarness(t, Policy{MaxRestarts: 1, Window: time.Minute}, nil)
+	h.forkSleep = filepath.Join(t.TempDir(), "helper.pid")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	g, err := h.s.ensure(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helper := helperPID(t, h.forkSleep)
+	gate := func() {
+		select {
+		case <-g.proc.procExited:
+		case <-time.After(10 * time.Second):
+			t.Error("the worker was not reaped within 10s of its protocol stream ending")
+		}
+	}
+	g.proc.killGate.Store(&gate)
+	if err := syscall.Kill(g.proc.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-g.settled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("generation was never retired")
+	}
+	waitGone(t, helper, "after retire with the leader already reaped")
 }
 
 func TestProc_CloseTimeoutKillsWorkerGroup(t *testing.T) {
