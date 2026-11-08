@@ -314,15 +314,10 @@ fn count_alloc_always(size: usize) {
     }
 }
 
-/// Moves the live total from `old` to `new` bytes after a resize. Unless
-/// `always`, a no-op once [`counting_is_active`]: the counted global allocator
-/// below has already seen the bytes.
+/// Moves the live total from `old` to `new` bytes after a resize.
 #[cfg(gusset_allocator_api)]
 #[inline]
-fn count_resize(old: usize, new: usize, always: bool) {
-    if !always && counting_is_active() {
-        return;
-    }
+fn count_resize(old: usize, new: usize) {
     if new > old {
         add_live_bytes(new - old);
     } else if old > new {
@@ -510,7 +505,7 @@ impl<A: 'static> Counting<A> {
     #[inline]
     fn count_moved(&self, old: usize, new: usize) {
         if !self.forwards_to_counted_global() {
-            count_resize(old, new, true);
+            count_resize(old, new);
         }
     }
 }
@@ -593,7 +588,7 @@ unsafe impl Allocator for BufferAlloc {
     ) -> Result<NonNull<[u8]>, AllocError> {
         let (o, n) = Self::pair(old, new)?;
         let block = unsafe { System.grow(ptr, o, n) }?;
-        count_resize(o.size(), n.size(), true);
+        count_resize(o.size(), n.size());
         Ok(block)
     }
 
@@ -605,7 +600,7 @@ unsafe impl Allocator for BufferAlloc {
     ) -> Result<NonNull<[u8]>, AllocError> {
         let (o, n) = Self::pair(old, new)?;
         let block = unsafe { System.grow_zeroed(ptr, o, n) }?;
-        count_resize(o.size(), n.size(), true);
+        count_resize(o.size(), n.size());
         Ok(block)
     }
 
@@ -617,7 +612,7 @@ unsafe impl Allocator for BufferAlloc {
     ) -> Result<NonNull<[u8]>, AllocError> {
         let (o, n) = Self::pair(old, new)?;
         let block = unsafe { System.shrink(ptr, o, n) }?;
-        count_resize(o.size(), n.size(), true);
+        count_resize(o.size(), n.size());
         Ok(block)
     }
 }

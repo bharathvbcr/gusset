@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // TestTeardown_UnconsumedTakeBuffersReclaimedOnClose verifies that when a handle
@@ -18,7 +19,7 @@ import (
 // ordering in handleState.close() deallocates all Rust buffer memory before
 // nulling the handle pointer, restoring LiveBytes to baseline.
 func TestTeardown_UnconsumedTakeBuffersReclaimedOnClose(t *testing.T) {
-	baselineLive := gusset.Stats().LiveBytes
+	baselineLive := livebytes.Quiesce(t)
 
 	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
 	if err != nil {
@@ -41,17 +42,8 @@ func TestTeardown_UnconsumedTakeBuffersReclaimedOnClose(t *testing.T) {
 	}
 
 	// Allow the worker pool and drain loop to process and buffer the completions into takeIDs.
-	deadline := time.Now().Add(1 * time.Second)
-	var activeLive uint64
-	for time.Now().Before(deadline) {
-		activeLive = gusset.Stats().LiveBytes
-		if activeLive > baselineLive {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	if activeLive <= baselineLive {
+	activeLive, grown := livebytes.WaitUntil(func(live uint64) bool { return live > baselineLive })
+	if !grown {
 		t.Fatalf("expected LiveBytes to increase from baseline %d, got %d", baselineLive, activeLive)
 	}
 
@@ -60,8 +52,8 @@ func TestTeardown_UnconsumedTakeBuffersReclaimedOnClose(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baselineLive {
+	finalLive, leakFree := livebytes.Settle(baselineLive)
+	if !leakFree {
 		t.Fatalf("expected LiveBytes to return to baseline %d after Close, got %d", baselineLive, finalLive)
 	}
 }
@@ -70,7 +62,7 @@ func TestTeardown_UnconsumedTakeBuffersReclaimedOnClose(t *testing.T) {
 // (>4096 bytes) returning Rust take buffers, waits for them to populate takeIDs without
 // calling Wait() or Discard(), and asserts that Close() reclaims every byte.
 func TestTeardown_LargeBatchTakeBuffersReclaimedOnClose(t *testing.T) {
-	baselineLive := gusset.Stats().LiveBytes
+	baselineLive := livebytes.Quiesce(t)
 
 	const poolSize = 16
 	const jobCount = 200
@@ -101,17 +93,8 @@ func TestTeardown_LargeBatchTakeBuffersReclaimedOnClose(t *testing.T) {
 	}
 
 	expectedGrowth := uint64(jobCount * bufferSize)
-	deadline := time.Now().Add(5 * time.Second)
-	var activeLive uint64
-	for time.Now().Before(deadline) {
-		activeLive = gusset.Stats().LiveBytes
-		if activeLive >= baselineLive+expectedGrowth {
-			break
-		}
-		time.Sleep(15 * time.Millisecond)
-	}
-
-	if activeLive < baselineLive+expectedGrowth {
+	activeLive, grown := livebytes.WaitUntil(func(live uint64) bool { return live >= baselineLive+expectedGrowth })
+	if !grown {
 		t.Fatalf("expected LiveBytes to increase to at least %d (growth >= %d), got activeLive %d",
 			baselineLive+expectedGrowth, expectedGrowth, activeLive)
 	}
@@ -120,8 +103,8 @@ func TestTeardown_LargeBatchTakeBuffersReclaimedOnClose(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baselineLive {
+	finalLive, leakFree := livebytes.Settle(baselineLive)
+	if !leakFree {
 		t.Fatalf("LEAK DETECTED: expected LiveBytes to return to baseline %d after Close(), got %d (delta %d)",
 			baselineLive, finalLive, int64(finalLive)-int64(baselineLive))
 	}
@@ -130,7 +113,7 @@ func TestTeardown_LargeBatchTakeBuffersReclaimedOnClose(t *testing.T) {
 // TestTeardown_InFlightLargeTakeBuffersReclaimedOnClose tests closing a handle immediately
 // while 200 large jobs are actively in flight.
 func TestTeardown_InFlightLargeTakeBuffersReclaimedOnClose(t *testing.T) {
-	baselineLive := gusset.Stats().LiveBytes
+	baselineLive := livebytes.Quiesce(t)
 
 	const poolSize = 16
 	const jobCount = 200
@@ -158,8 +141,8 @@ func TestTeardown_InFlightLargeTakeBuffersReclaimedOnClose(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baselineLive {
+	finalLive, leakFree := livebytes.Settle(baselineLive)
+	if !leakFree {
 		t.Fatalf("LEAK DETECTED: expected LiveBytes to return to baseline %d after in-flight Close(), got %d (delta %d)",
 			baselineLive, finalLive, int64(finalLive)-int64(baselineLive))
 	}
@@ -168,7 +151,7 @@ func TestTeardown_InFlightLargeTakeBuffersReclaimedOnClose(t *testing.T) {
 // TestTeardown_ConcurrentSubmitAndCloseTakeBufferReclamation runs 100 concurrent goroutines
 // submitting and abandoning take buffers while concurrently closing and reopening handles.
 func TestTeardown_ConcurrentSubmitAndCloseTakeBufferReclamation(t *testing.T) {
-	baselineLive := gusset.Stats().LiveBytes
+	baselineLive := livebytes.Quiesce(t)
 
 	type handleHolder struct {
 		mu sync.RWMutex
@@ -349,12 +332,12 @@ func TestTeardown_ConcurrentSubmitAndCloseTakeBufferReclamation(t *testing.T) {
 	}
 	holder.mu.Unlock()
 
-	finalLive := gusset.Stats().LiveBytes
+	finalLive, leakFree := livebytes.Settle(baselineLive)
 	t.Logf("Concurrency Stats: Submits=%d (Closed=%d), WaitBuffer=%d (Closed=%d), Discards=%d, AbandonTimeouts=%d, HandleSwaps=%d",
 		submitSuccess.Load(), submitClosed.Load(), waitSuccess.Load(), waitClosed.Load(),
 		discardCount.Load(), abandonTimeoutCount.Load(), handleSwapCount.Load())
 
-	if finalLive != baselineLive {
+	if !leakFree {
 		t.Fatalf("LEAK DETECTED after high-concurrency race test: expected LiveBytes to return to baseline %d, got %d (delta %d)",
 			baselineLive, finalLive, int64(finalLive)-int64(baselineLive))
 	}
@@ -709,5 +692,45 @@ func TestPanicFirewall_NonStringAndDoublePanicDestructor(t *testing.T) {
 		if err := h.Close(); err != nil {
 			t.Fatalf("Close failed after panic for depth %d: %v", depth, err)
 		}
+	}
+}
+
+// TestUncollected_DeadlineTurnsTheBlockAtTheCeilingIntoErrTooManyUncollected pins the
+// contract Submit documents (A3-1): with the ceiling at 2, a pool of 1 and two
+// uncollected results, the third Submit blocks, and only its ctx deadline ends
+// the block, with an error that matches both ErrTooManyUncollected and
+// context.DeadlineExceeded. A pool of 1 makes the ceiling exact: the third Submit
+// cannot take its permit until the second job has stored its result, so it
+// always sees two uncollected results. A characterization test: it passes on the
+// code before the doc change, which is the fix for this item.
+func TestUncollected_DeadlineTurnsTheBlockAtTheCeilingIntoErrTooManyUncollected(t *testing.T) {
+	h, err := gusset.Open(
+		gusset.WithPoolSize(1),
+		gusset.WithDiagnosticEngine(),
+		gusset.WithMaxUncollected(2),
+	)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer h.Close()
+
+	in := []byte{0, 1, 2, 3} // mode 0 echo
+	for i := 0; i < 2; i++ {
+		if _, err := h.Submit(context.Background(), in); err != nil {
+			t.Fatalf("Submit %d under the ceiling failed: %v", i, err)
+		}
+	}
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(250*time.Millisecond))
+	defer cancel()
+	_, err = h.Submit(ctx, in)
+	if err == nil {
+		t.Fatal("third Submit at the ceiling returned a ticket; want it blocked until its deadline")
+	}
+	if !errors.Is(err, gusset.ErrTooManyUncollected) {
+		t.Fatalf("third Submit = %v, want errors.Is(err, ErrTooManyUncollected)", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("third Submit = %v, want errors.Is(err, context.DeadlineExceeded)", err)
 	}
 }

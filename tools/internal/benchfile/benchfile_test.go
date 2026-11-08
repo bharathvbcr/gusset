@@ -34,6 +34,7 @@ const goodHeader = `# gusset-bench: v1
 # gusset-bench-cpu-idle-before: 80.1
 # gusset-bench-cpu-idle-after: 79.4
 # gusset-bench-min-idle: 60
+# gusset-bench-count: 2
 # gusset-bench-exclusive: yes
 `
 
@@ -276,5 +277,111 @@ func TestArm(t *testing.T) {
 		if got := Arm(tc.name); got != tc.want {
 			t.Errorf("Arm(%q) = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// rowsOf repeats a benchmark line n times.
+func rowsOf(name string, n int) string {
+	return strings.Repeat("BenchmarkRecount/"+name+"\t1000\t100.0 ns/op\n", n)
+}
+
+// The recorder certifies `gusset-bench-count: 10`. A file whose sub-benchmarks
+// each have 3 rows agrees with itself, so every structural check passes it, and
+// only the comparison with the header shows it lost 7 of 10 rounds.
+func TestRequireProvenanceComparesRowsToRecordedCount(t *testing.T) {
+	header := strings.Replace(goodHeader, "count: 2", "count: 10", 1)
+	short := header + rowsOf("a", 3) + rowsOf("b", 3)
+	f, err := Parse(writeTemp(t, short))
+	if err != nil {
+		t.Fatalf("structural parse should accept an internally consistent file: %v", err)
+	}
+	err = f.RequireProvenance()
+	if err == nil {
+		t.Fatal("count 10 with 3 rows per sub-benchmark was accepted")
+	}
+	for _, want := range []string{"BenchmarkRecount/a", "3 row(s)", "gusset-bench-count 10"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not mention %q: %v", want, err)
+		}
+	}
+
+	full := header + rowsOf("a", 10) + rowsOf("b", 10)
+	f, err = Parse(writeTemp(t, full))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.RequireProvenance(); err != nil {
+		t.Fatalf("a file with exactly count rows per sub-benchmark was rejected: %v", err)
+	}
+}
+
+// One arm missing a sub-benchmark in some rounds, and one missing it entirely
+// while the others keep count, both have a name with the wrong row count.
+func TestRequireProvenanceRejectsASubBenchmarkMissingFromARound(t *testing.T) {
+	header := strings.Replace(goodHeader, "count: 2", "count: 4", 1)
+	f, err := Parse(writeTemp(t, header+rowsOf("a", 4)+rowsOf("b", 3)))
+	if err == nil {
+		// Parse's arm check does not see this: each name is its own arm here.
+		err = f.RequireProvenance()
+	}
+	if err == nil || !strings.Contains(err.Error(), "BenchmarkRecount/b") {
+		t.Fatalf("a sub-benchmark with 3 of 4 rounds was accepted: %v", err)
+	}
+}
+
+// Variant mode runs every sub-benchmark COUNT times in each variant, so the
+// expected rows are COUNT times the number of variant header lines.
+func TestRequireProvenanceCountsVariants(t *testing.T) {
+	header := strings.Replace(goodHeader, "count: 2", "count: 3", 1) +
+		"# gusset-bench-variant-head: abc1234, 0 tracked path(s) modified, /x\n" +
+		"# gusset-bench-variant-fixed: def5678, 0 tracked path(s) modified, /y\n"
+	ok, err := Parse(writeTemp(t, header+rowsOf("a", 6)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ok.RequireProvenance(); err != nil {
+		t.Fatalf("3 rounds x 2 variants = 6 rows was rejected: %v", err)
+	}
+	bad, err := Parse(writeTemp(t, header+rowsOf("a", 3)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bad.RequireProvenance(); err == nil {
+		t.Fatal("3 rows with 2 variants was accepted")
+	}
+}
+
+// A header with no count cannot be compared, which is not the same as a match.
+func TestRequireProvenanceRefusesAMissingOrBadCount(t *testing.T) {
+	for _, header := range []string{
+		strings.Replace(goodHeader, "# gusset-bench-count: 2\n", "", 1),
+		strings.Replace(goodHeader, "count: 2", "count: x", 1),
+		strings.Replace(goodHeader, "count: 2", "count: 0", 1),
+	} {
+		f, err := Parse(writeTemp(t, header+cleanTransport))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.RequireProvenance(); err == nil || !strings.Contains(err.Error(), "gusset-bench-count") {
+			t.Errorf("header %q: want a gusset-bench-count error, got %v", header, err)
+		}
+	}
+}
+
+// `for i := 2; i+1 < len(fields)` stopped before a dangling token, so a row
+// whose last metric lost its unit parsed as if it were whole.
+func TestParseRejectsAnOddTrailingToken(t *testing.T) {
+	for _, line := range []string{
+		"BenchmarkOdd-8\t1000\t100.0 ns/op\t0 B/op\t7",
+		"BenchmarkOdd-8\t1000\t100.0 ns/op\t7",
+		"BenchmarkOdd-8\t1000\t100.0 ns/op\t0 B/op\t0 allocs/op\tstray",
+	} {
+		_, err := parseRow(line, 1)
+		if err == nil || !strings.Contains(err.Error(), "odd trailing token") {
+			t.Errorf("%q: want an odd trailing token error, got %v", line, err)
+		}
+	}
+	if _, err := parseRow("BenchmarkOdd-8\t1000\t100.0 ns/op\t0 B/op", 1); err != nil {
+		t.Errorf("a whole row was rejected: %v", err)
 	}
 }

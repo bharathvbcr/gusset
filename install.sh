@@ -2,16 +2,26 @@
 # Gusset: installer. Builds the release archive and gussetvet and installs them
 # with `make install`, the one owner of what an install consists of.
 #
-# From a release tag (the default):
-#   curl -fsSL https://raw.githubusercontent.com/bharathvbcr/gusset/<tag>/install.sh | bash
+# Fetched from main (protected) or a commit you reviewed, it builds the release
+# tag GUSSET_DEFAULT_REF and refuses unless that tag still resolves to
+# GUSSET_DEFAULT_COMMIT (README "One-Command Install"):
+#   curl -fsSLO https://raw.githubusercontent.com/bharathvbcr/gusset/main/install.sh
+#   less install.sh
+#   bash install.sh
+# Do not fetch it from a release tag: a tag's own install.sh cannot name that
+# tag's commit, so its default install refuses. For another tag, name the
+# commit yourself: GUSSET_REF=<tag> GUSSET_COMMIT=<sha> bash install.sh
 # From a checkout, building that checkout:
 #   ./install.sh
 #
 # Environment:
 #   GUSSET_REF        tag or branch to clone when not run from a checkout
 #                     (default: GUSSET_DEFAULT_REF below)
-#   GUSSET_COMMIT     if set, the commit the cloned ref must resolve to; the
-#                     install stops before building anything otherwise
+#   GUSSET_COMMIT     the commit the cloned ref must resolve to; the install
+#                     stops before building anything otherwise. Overrides
+#                     GUSSET_DEFAULT_COMMIT. Unset, the default ref is checked
+#                     against GUSSET_DEFAULT_COMMIT below; any other GUSSET_REF
+#                     is cloned unchecked, so pass GUSSET_COMMIT with it
 #   GUSSET_REPO_URL   repository to clone (default: the upstream GitHub repository)
 #   GUSSET_PREFIX     install prefix (also PREFIX); GUSSET_LIBDIR, GUSSET_INCLUDEDIR,
 #                     GUSSET_BINDIR override the sub-directories
@@ -26,6 +36,12 @@
 set -euo pipefail
 
 GUSSET_DEFAULT_REF="v0.0.3"
+# The commit GUSSET_DEFAULT_REF must resolve to, so a default install of a tag
+# that was moved refuses instead of building the new tree. lint.sh's
+# version-parity holds it to the tag when the tag is present. A tag's own
+# install.sh cannot name that tag's commit, so this protects a script fetched
+# from main or a pinned commit, not one fetched from the tag itself.
+GUSSET_DEFAULT_COMMIT="ffae8aa4577cdc3a8b21e0e4d67e282001c19dfd"
 GUSSET_UPSTREAM_URL="https://github.com/bharathvbcr/gusset.git"
 
 BOLD=$'\033[1m'
@@ -82,8 +98,12 @@ if [ -z "$SRC" ]; then
 	SRC="$TEMP_DIR/gusset"
 	head="$(git -C "$SRC" rev-parse HEAD)"
 	info "Cloned commit $head"
-	if [ -n "${GUSSET_COMMIT:-}" ] && [ "$head" != "$GUSSET_COMMIT" ]; then
-		error "$REF resolves to $head, not the GUSSET_COMMIT $GUSSET_COMMIT; nothing was built"
+	if [ -n "${GUSSET_COMMIT:-}" ]; then
+		if [ "$head" != "$GUSSET_COMMIT" ]; then
+			error "$REF resolves to $head, not the GUSSET_COMMIT $GUSSET_COMMIT; nothing was built"
+		fi
+	elif [ "$REF" = "$GUSSET_DEFAULT_REF" ] && [ "$head" != "$GUSSET_DEFAULT_COMMIT" ]; then
+		error "$REF resolves to $head, not the commit $GUSSET_DEFAULT_COMMIT this script was released with; the tag may have been moved. Nothing was built. Review $head and set GUSSET_COMMIT=$head to install it anyway"
 	fi
 fi
 

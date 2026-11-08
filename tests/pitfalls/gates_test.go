@@ -25,6 +25,7 @@ import (
 	"github.com/bharathvbcr/gusset"
 	"github.com/bharathvbcr/gusset/internal/ffi"
 	"github.com/bharathvbcr/gusset/tests/cgoprobe"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // cgocheckViolationEnv makes the test binary re-enter itself as the violating
@@ -187,6 +188,7 @@ func TestMemLimit_LiveStatsTrackLargeRustAllocation(t *testing.T) {
 		tolerance = 0.01             // 1%
 	)
 
+	beforeLive := livebytes.Quiesce(t)
 	before := gusset.Stats()
 
 	bufs := make([]*gusset.Buffer, 0, chunks)
@@ -199,7 +201,7 @@ func TestMemLimit_LiveStatsTrackLargeRustAllocation(t *testing.T) {
 	}
 
 	during := gusset.Stats()
-	grew := int64(during.LiveBytes) - int64(before.LiveBytes)
+	grew := int64(during.LiveBytes) - int64(beforeLive)
 	want := int64(chunk) * chunks
 
 	delta := float64(grew-want) / float64(want)
@@ -236,11 +238,11 @@ func TestMemLimit_LiveStatsTrackLargeRustAllocation(t *testing.T) {
 		}
 	}
 
-	after := gusset.Stats()
-	if int64(after.LiveBytes) > int64(before.LiveBytes)+int64(chunk) {
+	if live, ok := livebytes.Settle(beforeLive + chunk); !ok {
 		t.Fatalf("after freeing %d MiB, live bytes are %d against a %d baseline: "+
-			"the allocator is not symmetric (I1/R4)", want>>20, after.LiveBytes, before.LiveBytes)
+			"the allocator is not symmetric (I1/R4)", want>>20, live, beforeLive)
 	}
+	after := gusset.Stats()
 
 	if after.AllocCount <= before.AllocCount {
 		t.Fatalf("alloc count did not advance across %d allocations", chunks)

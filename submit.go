@@ -77,11 +77,24 @@ func (h *Handle) CallBuffer(ctx context.Context, in *Buffer) (*Buffer, error) {
 //
 // Collect every ticket with Wait or WaitBuffer, or give it up with Discard. A
 // finished job returns its pool permit before anyone Waits (DECISIONS
-// 2026-09-30), so a caller that never collects is not slowed down: its results
-// accumulate on the handle until Wait, Discard or Close, without bound. A
-// result over 4 KiB is held as Rust memory, which Go's GC pacer and
-// GOMEMLIMIT do not see, so a fire-and-forget loop can exhaust memory long
-// before the Go heap looks large.
+// 2026-09-30), so results accumulate on the handle until Wait, Discard or
+// Close, up to a ceiling: [DefaultMaxUncollected] completed results, or
+// whatever [WithMaxUncollected] set (0 removes the ceiling). At the ceiling
+// Submit blocks, holding a pool permit, until a Wait, WaitBuffer or Discard
+// frees a slot, so a single goroutine that Submits past the ceiling without
+// collecting parks itself for good. The ceiling is soft by up to poolSize-1:
+// the check is not atomic with the result being stored, so submitters already
+// past it can still land their results. A ctx deadline (or cancel) is what ends
+// the block, and the error then matches both [ErrTooManyUncollected] and
+// ctx.Err(). Submit never returns [ErrTooManyUncollected] on its own.
+//
+// ctx only bounds Submit itself and stamps its deadline into the job. Cancelling
+// ctx after Submit has returned does not cancel the job; only a [Handle.Wait]
+// whose context ends asks the engine to stop it.
+//
+// A result over 4 KiB is held as Rust memory, which Go's GC pacer and
+// GOMEMLIMIT do not see, so a fire-and-forget loop with the ceiling removed can
+// exhaust memory long before the Go heap looks large.
 func (h *Handle) Submit(ctx context.Context, in any) (uint64, error) {
 	if h == nil || h.state == nil {
 		return 0, ErrNilHandle

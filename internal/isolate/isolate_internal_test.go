@@ -33,6 +33,12 @@ const workerEnv = "GUSSET_ISOLATE_WORKER"
 // record submissions.
 const countFileEnv = "GUSSET_ISOLATE_COUNT_FILE"
 
+// forkSleepEnv, when set on a worker, is a file the worker writes the pid of a
+// `sleep 60` helper to before it does anything else. The helper stays in the
+// worker's process group and holds none of its pipes, so only a group kill ends
+// it; the retirement and Close tests read the pid and poll for its exit.
+const forkSleepEnv = "GUSSET_ISOLATE_FORK_SLEEP"
+
 const workerPool = 2
 
 // Fault bytes: the worker's own process dies the way an uncatchable fault
@@ -124,6 +130,12 @@ func workerMain() int {
 		fmt.Fprintln(os.Stderr, "worker:", err)
 		return 1
 	}
+	if path := os.Getenv(forkSleepEnv); path != "" {
+		if err := forkSleepHelper(path); err != nil {
+			fmt.Fprintln(os.Stderr, "worker:", err)
+			return 1
+		}
+	}
 	mode := os.Getenv(modeEnv)
 	if mode == "delay-hello" {
 		// The handshake stays in progress long enough for a caller to give
@@ -154,6 +166,20 @@ func workerMain() int {
 	return 0
 }
 
+// forkSleepHelper starts `sleep 60` with no inherited pipes and publishes its
+// pid atomically (write then rename), so a reader never sees a partial number.
+func forkSleepHelper(path string) error {
+	gc := exec.Command("sleep", "60")
+	if err := gc.Start(); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.Itoa(gc.Process.Pid)), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // misbehave announces itself and then fails the protocol one way, staying
 // alive so only the host can end it.
 func misbehave(mode string, out *os.File) int {
@@ -166,6 +192,11 @@ func misbehave(mode string, out *os.File) int {
 		if err := gc.Start(); err != nil {
 			return 1
 		}
+	}
+	if mode == "no-hello" {
+		// A loader stall or a deadlocked init: alive, and never announces.
+		time.Sleep(time.Minute)
+		return 0
 	}
 	if err := writeFrame(out, &response{Op: opHello, Version: protocolVersion, PoolSize: workerPool}, maxResponseFrame); err != nil {
 		return 1
@@ -189,6 +220,13 @@ func misbehave(mode string, out *os.File) int {
 		var hdr [4]byte
 		binary.BigEndian.PutUint32(hdr[:], 1000)
 		_, _ = out.Write(append(hdr[:], "0123456789"...))
+	case "die-on-first-job":
+		// Healthy until it is given work: hello, then exit on the first
+		// request without answering it. The death is caused by the job, so a
+		// test decides when the generation dies.
+		var req request
+		_ = readFrame(bufio.NewReader(os.Stdin), maxRequestFrame, &req)
+		return 0
 	case "dup", "reorder", "unknown":
 		return scripted(mode, out)
 	case "answer-hold":

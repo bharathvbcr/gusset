@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -151,7 +152,7 @@ func (t *referenceEngineTransport) Call(ctx context.Context, payload []byte) ([]
 
 		res := text
 		if toUpper {
-			res = makeUpper(res)
+			res = strings.ToUpper(res)
 		}
 		if reverse {
 			res = makeReverse(res)
@@ -209,16 +210,6 @@ func (t *referenceEngineTransport) Close() error {
 	defer t.mu.Unlock()
 	t.isClosed = true
 	return nil
-}
-
-func makeUpper(s string) string {
-	b := []byte(s)
-	for i := range b {
-		if b[i] >= 'a' && b[i] <= 'z' {
-			b[i] -= 32
-		}
-	}
-	return string(b)
 }
 
 func makeReverse(s string) string {
@@ -678,6 +669,31 @@ func TestAdversarial_RustBufferReaderMalformedPayloads(t *testing.T) {
 		if _, err := rNegBytes.ReadBytes(); !errors.Is(err, uniffi.ErrBufferUnderflow) {
 			t.Fatalf("ReadBytes with negative length %d: got %v, want ErrBufferUnderflow", neg, err)
 		}
+	}
+
+	// Invalid UTF-8 in a string is refused, as the Rust engine refuses it. The
+	// reader must not consume the bytes it rejected.
+	for name, payload := range map[string][]byte{
+		"lone continuation": {0, 0, 0, 2, 0xff, 0xfe},
+		"truncated rune":    {0, 0, 0, 1, 0xc3},
+		"overlong NUL":      {0, 0, 0, 2, 0xc0, 0x80},
+		"surrogate half":    {0, 0, 0, 3, 0xed, 0xa0, 0x80},
+	} {
+		rBad := uniffi.NewReader(payload)
+		if s, err := rBad.ReadString(); !errors.Is(err, uniffi.ErrInvalidEncoding) || s != "" {
+			t.Fatalf("ReadString %s: got %q, %v, want ErrInvalidEncoding", name, s, err)
+		}
+		if rBad.Remaining() != len(payload)-4 {
+			t.Fatalf("ReadString %s consumed rejected bytes: %d remaining", name, rBad.Remaining())
+		}
+		// ReadBytes carries no encoding promise: the same bytes are accepted.
+		if b, err := uniffi.NewReader(payload).ReadBytes(); err != nil || len(b) != len(payload)-4 {
+			t.Fatalf("ReadBytes %s: got %x, %v", name, b, err)
+		}
+	}
+	// Valid multi-byte UTF-8 still reads.
+	if s, err := uniffi.NewReader([]byte{0, 0, 0, 2, 0xc3, 0xa9}).ReadString(); err != nil || s != "\u00e9" {
+		t.Fatalf("ReadString valid UTF-8: got %q, %v", s, err)
 	}
 
 	// Oversized length claiming more bytes than remain

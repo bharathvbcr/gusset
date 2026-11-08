@@ -15,11 +15,12 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // TestPrecisionZeroLeak_ProlongedSingleHandleSoak drives 50,000 operations (or 5,000
 // in short mode) across 16 goroutines on a single handle with pool size 16 and diagnostic
-// engine, asserting exact zero delta in Rust LiveBytes (Features 20 & 23).
+// engine, asserting no Rust LiveBytes above the quiesced baseline (Features 20 & 23).
 func TestPrecisionZeroLeak_ProlongedSingleHandleSoak(t *testing.T) {
 	totalOps := 50000
 	warmupOps := 2000
@@ -50,14 +51,9 @@ func TestPrecisionZeroLeak_ProlongedSingleHandleSoak(t *testing.T) {
 	}
 	_ = warmupH.Close()
 
-	// Settle after warmup
-	runtime.GC()
-	time.Sleep(10 * time.Millisecond)
-	runtime.GC()
-	runtime.GC()
-
+	// Settle after warmup: the baseline is taken once the gauge stops moving.
+	baseLive := livebytes.Quiesce(t)
 	baseStats := gusset.Stats()
-	baseLive := baseStats.LiveBytes
 	t.Logf("Calibrated baseline: LiveBytes=%d, AllocCount=%d, PeakBytes=%d, targetOps=%d",
 		baseLive, baseStats.AllocCount, baseStats.PeakBytes, totalOps)
 
@@ -197,20 +193,10 @@ func TestPrecisionZeroLeak_ProlongedSingleHandleSoak(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	// Settle protocol: 3x runtime.GC() and 10ms sleep with polling
-	deadline := time.Now().Add(10 * time.Second)
-	var finalStats gusset.AllocStats
-	for {
-		runtime.GC()
-		time.Sleep(10 * time.Millisecond)
-		runtime.GC()
-		runtime.GC()
-
-		finalStats = gusset.Stats()
-		if finalStats.LiveBytes == baseLive || time.Now().After(deadline) {
-			break
-		}
-	}
+	// Settle: GC and poll until the gauge is at or under the quiesced baseline
+	// (the soak abandons some buffers to their AddCleanup on purpose).
+	_, leakFree := livebytes.SettleGC(baseLive)
+	finalStats := gusset.Stats()
 
 	t.Logf("Operations summary: calls=%d, bufCalls=%d, submits=%d, waitBufs=%d, discards=%d, droppedBufs=%d",
 		opCallsCompleted.Load(), opBufCallsDone.Load(), opSubmitsCompleted.Load(),
@@ -220,7 +206,7 @@ func TestPrecisionZeroLeak_ProlongedSingleHandleSoak(t *testing.T) {
 		finalStats.PeakBytes, finalStats.AllocCount)
 
 	delta := int64(finalStats.LiveBytes) - int64(baseLive)
-	if delta != 0 {
+	if !leakFree {
 		t.Fatalf("ZERO-LEAK INVARIANT VIOLATION: baseline LiveBytes=%d, final LiveBytes=%d (delta=%d)",
 			baseLive, finalStats.LiveBytes, delta)
 	}
@@ -228,7 +214,7 @@ func TestPrecisionZeroLeak_ProlongedSingleHandleSoak(t *testing.T) {
 
 // TestPrecisionZeroLeak_HeavyMultiHandleSoakChurn creates 200 handles (or 20 in short mode),
 // exercises them with concurrent operations, and closes them across 32 concurrent goroutines,
-// settling and asserting finalStats.LiveBytes - baseStats.LiveBytes == 0 (Features 20 & 23).
+// settling and asserting finalStats.LiveBytes <= the quiesced baseline (Features 20 & 23).
 func TestPrecisionZeroLeak_HeavyMultiHandleSoakChurn(t *testing.T) {
 	totalHandles := 200
 	if testing.Short() {
@@ -256,13 +242,8 @@ func TestPrecisionZeroLeak_HeavyMultiHandleSoakChurn(t *testing.T) {
 	}
 	_ = wH.Close()
 
-	runtime.GC()
-	time.Sleep(10 * time.Millisecond)
-	runtime.GC()
-	runtime.GC()
-
+	baseLive := livebytes.Quiesce(t)
 	baseStats := gusset.Stats()
-	baseLive := baseStats.LiveBytes
 	t.Logf("Multi-handle churn baseline: LiveBytes=%d, AllocCount=%d", baseLive, baseStats.AllocCount)
 
 	var (
@@ -340,27 +321,17 @@ func TestPrecisionZeroLeak_HeavyMultiHandleSoakChurn(t *testing.T) {
 
 	wg.Wait()
 
-	// Settle protocol: 3x runtime.GC() and 10ms sleep with polling
-	deadline := time.Now().Add(10 * time.Second)
-	var finalStats gusset.AllocStats
-	for {
-		runtime.GC()
-		time.Sleep(10 * time.Millisecond)
-		runtime.GC()
-		runtime.GC()
-
-		finalStats = gusset.Stats()
-		if finalStats.LiveBytes == baseLive || time.Now().After(deadline) {
-			break
-		}
-	}
+	// Settle: GC and poll until the gauge is at or under the quiesced baseline
+	// (the soak abandons some buffers to their AddCleanup on purpose).
+	_, leakFree := livebytes.SettleGC(baseLive)
+	finalStats := gusset.Stats()
 
 	t.Logf("Multi-handle churn completed: handles=%d, totalOps=%d, baseLive=%d, finalLive=%d (delta=%d)",
 		totalHandles, opsExecuted.Load(), baseLive, finalStats.LiveBytes,
 		int64(finalStats.LiveBytes)-int64(baseLive))
 
 	delta := int64(finalStats.LiveBytes) - int64(baseLive)
-	if delta != 0 {
+	if !leakFree {
 		t.Fatalf("ZERO-LEAK INVARIANT VIOLATION after multi-handle churn: baseline LiveBytes=%d, final LiveBytes=%d (delta=%d)",
 			baseLive, finalStats.LiveBytes, delta)
 	}
@@ -375,6 +346,7 @@ func TestPrecisionZeroLeak_HeapPlateauVsLeak(t *testing.T) {
 	defer slog.SetDefault(prevLog)
 
 	settleGC()
+	baseLive := livebytes.Quiesce(t)
 
 	const workers = 16
 	const batchOps = 50000
@@ -516,22 +488,22 @@ func TestPrecisionZeroLeak_HeapPlateauVsLeak(t *testing.T) {
 		int64(m3.HeapObjects)-int64(m0.HeapObjects),
 		m3.HeapAlloc>>10, gusset.Stats().LiveBytes)
 
-	if gusset.Stats().LiveBytes != 0 {
-		t.Fatalf("Rust LiveBytes leaked: %d", gusset.Stats().LiveBytes)
+	if finalLive, leakFree := livebytes.Settle(baseLive); !leakFree {
+		t.Fatalf("Rust LiveBytes leaked: %d over a quiesced baseline of %d", finalLive, baseLive)
 	}
 }
 
 // TestPrecisionZeroLeak_UnconsumedLargeTicketsTeardownZeroLeak attacks the take buffer
 // lifecycle by submitting thousands of large (>4096B) asynchronous jobs without
 // collecting or discarding them, and closing the handle. Verifies that Handle.Close
-// frees all unconsumed take buffers in Rust memory with exact zero LiveBytes delta.
+// frees all unconsumed take buffers in Rust memory with no LiveBytes above the quiesced baseline.
 func TestPrecisionZeroLeak_UnconsumedLargeTicketsTeardownZeroLeak(t *testing.T) {
 	prevLog := slog.Default()
 	slog.SetDefault(slog.New(discardHandler{}))
 	defer slog.SetDefault(prevLog)
 
 	settleGC()
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 
 	ctx := context.Background()
 
@@ -570,8 +542,8 @@ func TestPrecisionZeroLeak_UnconsumedLargeTicketsTeardownZeroLeak(t *testing.T) 
 	}
 
 	settleGC()
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("Unconsumed tickets leak detected: baseline LiveBytes=%d, final LiveBytes=%d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -586,7 +558,7 @@ func TestPrecisionZeroLeak_RapidContextCancellationBufferZeroLeak(t *testing.T) 
 	defer slog.SetDefault(prevLog)
 
 	settleGC()
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 
 	h, err := gusset.Open(
 		gusset.WithPoolSize(8),
@@ -650,8 +622,8 @@ func TestPrecisionZeroLeak_RapidContextCancellationBufferZeroLeak(t *testing.T) 
 	_ = h.Close()
 
 	settleGC()
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("Rapid cancellation buffer leak detected: baseline LiveBytes=%d, final LiveBytes=%d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -665,7 +637,7 @@ func TestPrecisionZeroLeak_BufferBudgetThrashingZeroLeak(t *testing.T) {
 	defer slog.SetDefault(prevLog)
 
 	settleGC()
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 
 	const budget = 64 * 1024 // 64 KiB tight budget
 	h, err := gusset.Open(
@@ -708,8 +680,8 @@ func TestPrecisionZeroLeak_BufferBudgetThrashingZeroLeak(t *testing.T) {
 	_ = h.Close()
 
 	settleGC()
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("Buffer budget thrashing leak: baseline LiveBytes=%d, final LiveBytes=%d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}

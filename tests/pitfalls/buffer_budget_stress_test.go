@@ -13,6 +13,7 @@ import (
 	"unsafe"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // isAligned64 tests whether the underlying backing array of a slice is 64-byte aligned.
@@ -31,7 +32,7 @@ func TestBufferBudget_ConcurrentSaturationAndZeroDrift(t *testing.T) {
 		t.Skip("skipping buffer budget saturation in short mode")
 	}
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	const budget = 512 * 1024
 	h, err := gusset.Open(
 		gusset.WithBufferBudget(budget),
@@ -120,8 +121,8 @@ func TestBufferBudget_ConcurrentSaturationAndZeroDrift(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes leak detected: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -134,7 +135,7 @@ func TestBufferBudget_ConcurrentSaturationAndZeroDrift(t *testing.T) {
 // >1GiB, odd sizes, alignment edges, and 16 MiB multi-megabyte payloads), validating
 // 64-byte alignment, 0x00 zero-initialization, read/write integrity, and post-Free zeroing.
 func TestBufferBudget_ExtremeBoundaryPayloadSweep(t *testing.T) {
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	h, err := gusset.Open(gusset.WithPoolSize(2), gusset.WithDiagnosticEngine())
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
@@ -237,8 +238,8 @@ func TestBufferBudget_ExtremeBoundaryPayloadSweep(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes leak detected: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -253,7 +254,7 @@ func TestBufferBudget_MultiMegabyteConcurrentSaturation(t *testing.T) {
 		t.Skip("skipping multi-megabyte saturation in short mode")
 	}
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	const budget = 32 * 1024 * 1024  // 32 MiB
 	const bufSize = 16 * 1024 * 1024 // 16 MiB
 
@@ -352,8 +353,8 @@ func TestBufferBudget_MultiMegabyteConcurrentSaturation(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes leak detected: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -362,7 +363,7 @@ func TestBufferBudget_MultiMegabyteConcurrentSaturation(t *testing.T) {
 // TestBufferBudget_ConcurrentDoubleFreeIdempotency tests 50 buffers with 8 concurrent
 // goroutines calling Free() per buffer, asserting zero races, zero panics, and zero budget underflow.
 func TestBufferBudget_ConcurrentDoubleFreeIdempotency(t *testing.T) {
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	const budget = 1024 * 1024 // 1 MiB
 	h, err := gusset.Open(
 		gusset.WithBufferBudget(budget),
@@ -420,8 +421,8 @@ func TestBufferBudget_ConcurrentDoubleFreeIdempotency(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes leak detected: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -430,7 +431,7 @@ func TestBufferBudget_ConcurrentDoubleFreeIdempotency(t *testing.T) {
 // TestBufferBudget_ConcurrentCloseReclamation tests buffers allocated and held while
 // a concurrent Close() runs, asserting that Free() after Close succeeds without leak or panic.
 func TestBufferBudget_ConcurrentCloseReclamation(t *testing.T) {
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	const budget = 1024 * 1024
 	h, err := gusset.Open(
 		gusset.WithBufferBudget(budget),
@@ -483,8 +484,8 @@ func TestBufferBudget_ConcurrentCloseReclamation(t *testing.T) {
 		}
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes leak detected: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -507,7 +508,7 @@ func allocateAndForget(h *gusset.Handle, size int) error {
 // TestBufferBudget_GCFinalizerReclaimStress allocates buffers to exhaust budget without Free(),
 // verifying that runtime.GC() invokes releaseForgottenBuffer to reclaim budget.
 func TestBufferBudget_GCFinalizerReclaimStress(t *testing.T) {
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	const budget = 64 * 1024 // 64 KiB
 	h, err := gusset.Open(
 		gusset.WithBufferBudget(budget),
@@ -563,8 +564,8 @@ func TestBufferBudget_GCFinalizerReclaimStress(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes leak detected: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -578,7 +579,7 @@ func TestBufferBudget_ExtremeOversubscriptionAndDrift(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	const budget = 128 * 1024 // 128 KiB tight budget
 
 	h, err := gusset.Open(
@@ -705,8 +706,8 @@ func TestBufferBudget_ExtremeOversubscriptionAndDrift(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes leak: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -716,7 +717,7 @@ func TestBufferBudget_ExtremeOversubscriptionAndDrift(t *testing.T) {
 // simultaneous Free(), Bytes(), and ID() calls from 32 goroutines per buffer, asserting
 // strict idempotency, zero data races, no use-after-free, and exact budget reclamation.
 func TestBufferBudget_ConcurrentFreeBytesRace(t *testing.T) {
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	const budget = 512 * 1024 // 512 KiB
 	h, err := gusset.Open(
 		gusset.WithBufferBudget(budget),
@@ -811,8 +812,8 @@ func TestBufferBudget_ConcurrentFreeBytesRace(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes leak detected: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -881,7 +882,7 @@ func TestBufferBudget_ConcurrentChaos_TightBulkhead_Mode18(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 
-	baselineLive := gusset.Stats().LiveBytes
+	baselineLive := livebytes.Quiesce(t)
 	baselineAlloc := gusset.Stats().AllocCount
 
 	const (
@@ -1016,8 +1017,18 @@ func TestBufferBudget_ConcurrentChaos_TightBulkhead_Mode18(t *testing.T) {
 	if peakInRust > poolSize {
 		t.Fatalf("INVARIANT I1 VIOLATION: peak in-engine jobs (%d) exceeded poolSize (%d)", peakInRust, poolSize)
 	}
+	// An upper bound alone passes with a dead gauge (peak 0). Mode 17 must have
+	// run, and the engine must have seen at least two of its jobs at once.
+	if mode17Submits.Load() == 0 {
+		t.Fatalf("no mode 17 job was admitted, so the I1 gauge was never exercised")
+	}
+	if peakInRust < 2 {
+		t.Fatalf("I1 gauge saw a peak of %d after %d mode 17 submits on a %d-worker pool; want at least 2 (dead gauge or no concurrency)",
+			peakInRust, mode17Submits.Load(), poolSize)
+	}
 
 	// Invariant I6 & I3 Assertions: Stats Monotonicity and Zero Leaks
+	finalLive, leakFree := livebytes.Settle(baselineLive)
 	finalStats := gusset.Stats()
 	if finalStats.PeakBytes < finalStats.LiveBytes {
 		t.Errorf("INVARIANT I6: PeakBytes (%d) < LiveBytes (%d)", finalStats.PeakBytes, finalStats.LiveBytes)
@@ -1025,9 +1036,9 @@ func TestBufferBudget_ConcurrentChaos_TightBulkhead_Mode18(t *testing.T) {
 	if finalStats.AllocCount < baselineAlloc {
 		t.Errorf("INVARIANT I6: AllocCount decreased: %d < %d", finalStats.AllocCount, baselineAlloc)
 	}
-	if finalStats.LiveBytes != baselineLive {
+	if !leakFree {
 		t.Fatalf("INVARIANT I3/I6: LiveBytes leak detected! baseline=%d, final=%d (delta=%d)",
-			baselineLive, finalStats.LiveBytes, int64(finalStats.LiveBytes)-int64(baselineLive))
+			baselineLive, finalLive, int64(finalLive)-int64(baselineLive))
 	}
 }
 
@@ -1035,7 +1046,7 @@ func TestBufferBudget_ConcurrentChaos_TightBulkhead_Mode18(t *testing.T) {
 // 32 goroutines are allocating buffers, asserting that surviving buffers can be safely
 // freed or garbage-collected without crashes or memory leaks.
 func TestBufferBudget_ViolentClose_ActiveBufferReclamation(t *testing.T) {
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	const budget = 1024 * 1024 // 1 MiB
 
 	h, err := gusset.Open(
@@ -1103,8 +1114,8 @@ func TestBufferBudget_ViolentClose_ActiveBufferReclamation(t *testing.T) {
 		}
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes leak after violent close: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -1114,7 +1125,7 @@ func TestBufferBudget_ViolentClose_ActiveBufferReclamation(t *testing.T) {
 // caller-allocated buffers under WithBufferBudget, testing concurrent Free() races
 // and boundary clamp verification.
 func TestBufferBudget_CallBuffer_WithBudgetAndConcurrentFree(t *testing.T) {
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	const budget = 256 * 1024 // 256 KiB
 	h, err := gusset.Open(
 		gusset.WithBufferBudget(budget),
@@ -1181,8 +1192,8 @@ func TestBufferBudget_CallBuffer_WithBudgetAndConcurrentFree(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes leak: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -1192,7 +1203,7 @@ func TestBufferBudget_CallBuffer_WithBudgetAndConcurrentFree(t *testing.T) {
 // with distinct buffer budgets, verifying that budget exhaustion and handle closures
 // on one handle have zero side-effects on sibling handles.
 func TestBufferBudget_MultiPoolIsolation(t *testing.T) {
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	const numHandles = 8
 	handles := make([]*gusset.Handle, numHandles)
 	budgets := make([]int64, numHandles)
@@ -1256,8 +1267,8 @@ func TestBufferBudget_MultiPoolIsolation(t *testing.T) {
 		}
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("LiveBytes leak in MultiPoolIsolation: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}

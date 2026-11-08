@@ -216,13 +216,13 @@ flowchart LR
 ## Installation
 
 ### One-Command Install
-Install Gusset's runtime library, C header, pkg-config definition, and `gussetvet` linter from a **release tag**, never from `main`. Fetch the script from the tag you want (the script at tag `T` clones `T` by default), read it, then run it:
+Install Gusset's runtime library, C header, pkg-config definition, and `gussetvet` linter. Fetch `install.sh` from `main` (protected), or from a commit you have reviewed, read it, then run it. It builds the release tag it names (`GUSSET_DEFAULT_REF`) and stops before building anything unless that tag still resolves to the commit baked into the script (`GUSSET_DEFAULT_COMMIT`), so what you build comes from a release tag and never from `main`'s tree:
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/bharathvbcr/gusset/<tag>/install.sh
+curl -fsSLO https://raw.githubusercontent.com/bharathvbcr/gusset/main/install.sh
 less install.sh
 bash install.sh
 ```
-`GUSSET_REF` overrides the ref to clone. To verify what gets built, pin the commit you reviewed: `GUSSET_REF=<tag> GUSSET_COMMIT=<sha> bash install.sh` stops before building if the tag resolves to any other commit (`git ls-remote https://github.com/bharathvbcr/gusset <tag>` prints it). Piped into `bash`, the script never builds the current directory. Scripts from tags up to and including v0.0.2 predate this and clone `main`; use a later tag's script.
+Do not fetch the script from a release tag to get that check: a moved tag brings its own script, and a tag's `install.sh` cannot name that tag's own commit. To install a specific other tag, name its commit yourself: `GUSSET_REF=<tag> GUSSET_COMMIT=<sha> bash install.sh`, where `<sha>` is what `git ls-remote https://github.com/bharathvbcr/gusset '<tag>^{}'` prints (for a lightweight tag, `<tag>`). An explicit `GUSSET_COMMIT` replaces the baked one. A `GUSSET_REF` other than the default is cloned unchecked unless you also set `GUSSET_COMMIT`. Piped into `bash`, the script never builds the current directory. Scripts from tags up to and including v0.0.2 predate this and clone `main`; use a later script.
 
 ### Local / From Source
 ```bash
@@ -488,7 +488,7 @@ We welcome contributions! Please review our community guidelines before submitti
 
 Gusset's design builds upon insights, hard-won lessons, and patterns from prior Go–Rust integration work:
 - **[rust2go](https://github.com/ihciah/rust2go)**: Pioneered parameter ownership and buffer passing across the boundary; informed Gusset's rejection of manual-assembly Go callbacks and `cgocheck=0`.
-- **[uniffi-bindgen-go](https://github.com/NordSecurity/uniffi-bindgen-go)**: The binding generator Gusset is meant to sit under; a worked example combining the two is provided in [`examples/uniffi_bindgen_go`](examples/uniffi_bindgen_go/). Gusset borrows its `RustBuffer` shape (ptr, len, capacity) as a design reference (`AGENTS.md`, Borrow and avoid).
+- **[uniffi-bindgen-go](https://github.com/NordSecurity/uniffi-bindgen-go)**: The binding generator Gusset is meant to sit under; a worked example combining the two is provided in [`examples/uniffi_bindgen_go`](examples/uniffi_bindgen_go/) (a typed Go client and a Rust reference engine, each tested in CI against shared golden wire bytes, and linked into one test binary by `make test-uniffi-link`, which the CI `unit` job runs: the crate builds an umbrella `libgusset.a` and the typed client replays the golden vectors against it through a real handle). Gusset borrows its `RustBuffer` shape (ptr, len, capacity) as a design reference (`AGENTS.md`, Borrow and avoid).
 - **[iceoryx2](https://github.com/eclipse-iceoryx/iceoryx2)**: Inspired Gusset's Phase 4 zero-copy shared memory IPC architecture for GPU hardware crash containment.
 - **[Stoolap](https://stoolap.io/blog/2026/04/08/calling-a-rust-library-from-go-with-cgo-disabled/)**: Established benchmark discipline demonstrating that engine compute, rather than FFI trampolines, dominates real workloads.
 - **[Tokio](https://tokio.rs/)**: Influenced Gusset's cooperative flag-based cancellation model across FFI rather than dropped futures.

@@ -115,7 +115,7 @@ Status against recorded evidence, 2026-10-24 (`AGENTS.md`, Phase status, carries
 - **Phase 0** is evidenced: `TestGuardedNUL` in `bench/seed/go` reproduces the abort the hardened guard survives.
 - **Phase 1** shipped, with one exit criterion pending. The thread-cap soak is evidenced (`TestSoak_*`, run on every push). "The Go service in front of tessl/sparsl runs on it" has no record in this repository.
 - **Phase 2** shipped for the one second app that is evidenced, DevCouncil's `dc-glob` (`docs/adoption.md`, `docs/integrations.md`). Pending, with no record here: both apps green on Linux and macOS, and tessl/sparsl showing no thread growth under the soak test.
-- **Phase 3** is in progress. The uniffi-bindgen-go interop example in its row above is implemented in `examples/uniffi_bindgen_go/` and verified by its test suite.
+- **Phase 3** is in progress. The uniffi-bindgen-go interop example in its row above is implemented in `examples/uniffi_bindgen_go/`. Its Go client and its Rust reference engine are each built and tested in CI (`matrix.yml` `unit`), and shared golden wire bytes in `testdata/golden.txt` fail a test on whichever side stops matching. `make test-uniffi-link`, run by the same job, links the typed client to the compiled Rust engine: the crate is built as an umbrella `libgusset.a` (Gusset plus the engine, R14), its exported `init_uniffi_engine` registers the engine under a nonzero opcode, and `TestCompiledEngine_TypedClientMatchesGolden` (`-tags gusset_uniffi_engine`) replays the golden vectors through a real handle. The untagged `go test ./...` still runs the client against the Go reference engine and links Gusset's own archive unchanged.
 
 The Phase 1 layout and architecture are in `AGENTS.md` (Repo layout and architecture).
 

@@ -187,21 +187,30 @@ impl Drop for SigAltStackGuard {
     fn drop(&mut self) {
         if !self.map_base.is_null() {
             unsafe {
-                // Unmap only if the kernel no longer points at this mapping.
+                // Read before touching anything: disabling first would clobber
+                // an alternate stack something else installed over ours (an
+                // adopter engine's stack-overflow handler), and a late signal
+                // on this thread would then run on the normal stack. Disable
+                // and unmap only a stack that is ours and still installed.
                 // SS_DISABLE fails with EPERM while running on the alternate
-                // stack, and something else may have installed its own since;
-                // unmapping in either case would leave the next signal on this
-                // thread running on unmapped memory. Leaking is the safe side.
-                let mut ss: libc::stack_t = std::mem::zeroed();
-                ss.ss_flags = libc::SS_DISABLE;
-                let disabled = libc::sigaltstack(&ss, std::ptr::null_mut()) == 0;
+                // stack, and unmapping then would leave the next signal on
+                // unmapped memory. In every other case leaking is the safe side.
                 let mut cur: libc::stack_t = std::mem::zeroed();
-                let read = libc::sigaltstack(std::ptr::null(), &mut cur) == 0;
+                if libc::sigaltstack(std::ptr::null(), &mut cur) != 0 {
+                    return;
+                }
                 let base = self.map_base as usize;
-                let ours =
-                    (cur.ss_sp as usize) >= base && (cur.ss_sp as usize) < base + self.map_len;
-                let still_installed = read && (cur.ss_flags & libc::SS_DISABLE) == 0 && ours;
-                if disabled && read && !still_installed {
+                let sp = cur.ss_sp as usize;
+                let ours = sp >= base && sp < base + self.map_len;
+                if !ours || (cur.ss_flags & libc::SS_DISABLE) != 0 {
+                    return;
+                }
+                // Keep ss_size: Darwin refuses SS_DISABLE (ENOMEM) when the
+                // size is below MINSIGSTKSZ, even though it is unused.
+                let mut off: libc::stack_t = std::mem::zeroed();
+                off.ss_flags = libc::SS_DISABLE;
+                off.ss_size = cur.ss_size;
+                if libc::sigaltstack(&off, std::ptr::null_mut()) == 0 {
                     libc::munmap(self.map_base, self.map_len);
                 }
             }
@@ -605,6 +614,86 @@ pub(crate) fn close_fd_with(fd: i32, close: impl FnOnce(i32) -> i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn install_or_panic() -> SigAltStackGuard {
+        match install_sigaltstack() {
+            Some(g) => g,
+            None => panic!("could not install our sigaltstack"),
+        }
+    }
+
+    fn current_altstack() -> libc::stack_t {
+        // SAFETY: a null new stack only reads the thread's current one.
+        unsafe {
+            let mut cur: libc::stack_t = std::mem::zeroed();
+            assert_eq!(libc::sigaltstack(std::ptr::null(), &mut cur), 0);
+            cur
+        }
+    }
+
+    /// An alternate stack someone else installed over ours must survive our
+    /// guard's drop: disabling it would send a late signal on this thread back
+    /// to the normal stack. Dedicated thread, so no other test's stack is read.
+    #[test]
+    #[cfg_attr(miri, ignore)] // sigaltstack(2) and mmap: not Miri-runnable
+    fn guard_drop_leaves_a_foreign_sigaltstack_installed() {
+        let outcome = std::thread::spawn(|| {
+            let guard = install_or_panic();
+            let mut foreign_mem = vec![0u8; SIGALTSTACK_MIN].into_boxed_slice();
+            // SAFETY: `foreign_mem` outlives its installation, removed below.
+            unsafe {
+                let ss = libc::stack_t {
+                    ss_sp: foreign_mem.as_mut_ptr().cast(),
+                    ss_flags: 0,
+                    ss_size: foreign_mem.len(),
+                };
+                assert_eq!(libc::sigaltstack(&ss, std::ptr::null_mut()), 0);
+            }
+            drop(guard);
+            let cur = current_altstack();
+            let kept = std::ptr::eq(cur.ss_sp.cast::<u8>(), foreign_mem.as_ptr())
+                && cur.ss_flags & libc::SS_DISABLE == 0;
+            // Remove the foreign stack before its memory goes away. The result
+            // is not asserted: when the guard clobbered it already (the bug
+            // under test) the stack is gone and `kept` carries the verdict.
+            // SAFETY: not running on it.
+            unsafe {
+                let mut off: libc::stack_t = std::mem::zeroed();
+                off.ss_flags = libc::SS_DISABLE;
+                off.ss_size = foreign_mem.len();
+                let _ = libc::sigaltstack(&off, std::ptr::null_mut());
+            }
+            kept
+        })
+        .join();
+        let Ok(outcome) = outcome else {
+            panic!("the sigaltstack thread panicked");
+        };
+        assert!(outcome, "the guard's drop clobbered a foreign sigaltstack");
+    }
+
+    /// The ordinary path still disables and unmaps what it installed.
+    #[test]
+    #[cfg_attr(miri, ignore)] // sigaltstack(2) and mmap: not Miri-runnable
+    fn guard_drop_disables_and_unmaps_its_own_sigaltstack() {
+        let result = std::thread::spawn(|| {
+            let guard = install_or_panic();
+            let (base, len) = (guard.map_base, guard.map_len);
+            drop(guard);
+            let cur = current_altstack();
+            // mprotect fails with ENOMEM on an unmapped range, and on a
+            // mapped one only changes protections of a mapping nobody uses.
+            // SAFETY: the range is never accessed.
+            let probe = unsafe { libc::mprotect(base, len, libc::PROT_NONE) };
+            (cur.ss_flags & libc::SS_DISABLE != 0, probe != 0)
+        })
+        .join();
+        let Ok((disabled, unmapped)) = result else {
+            panic!("the sigaltstack thread panicked");
+        };
+        assert!(disabled, "our stack was left installed");
+        assert!(unmapped, "our mapping was leaked on the normal path");
+    }
 
     #[test]
     fn check_buffer_len_refuses_zero_and_the_ceiling_without_allocating() {

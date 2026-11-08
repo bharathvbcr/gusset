@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // countDir counts entries in a directory, or returns -1 on error.
@@ -117,6 +118,61 @@ func settleResourceSample(base resourceSample, timeout time.Duration) resourceSa
 	}
 }
 
+// rustLiveVerdict is the one Rust-live leak predicate for this file: leaked
+// only when live is above the quiesced baseline. A reading below it is an
+// earlier test's AddCleanup reclaim landing late, not a leak.
+func rustLiveVerdict(baseline, live uint64) (delta int64, leaked bool) {
+	return int64(live) - int64(baseline), !livebytes.NotLeaked(baseline, live)
+}
+
+// takeResourceBaseline is takeResourceSample with rustLive and fds replaced
+// by quiesced readings, so a straggler's cleanup cannot push either under the
+// baseline after it is taken. The fd checks stay exact (!=): a +1 leak that a
+// straggler closing two fds turns into -1 is caught by != and missed by >.
+func takeResourceBaseline(t *testing.T) resourceSample {
+	t.Helper()
+	return takeResourceBaselineWith(t, countFDs)
+}
+
+// takeResourceBaselineWith is takeResourceBaseline with the fd count read by
+// readFDs, so TestResourceBaselineQuiescesFDs can script it.
+func takeResourceBaselineWith(t *testing.T, readFDs func() int) resourceSample {
+	t.Helper()
+	s := takeResourceSample()
+	s.rustLive = livebytes.Quiesce(t)
+	s.fds = quiescedFDs(t, readFDs)
+	return s
+}
+
+// quiescedFDs returns the open-fd count once it has stopped moving (an
+// *os.File dropped without Close is closed later by a GC finalizer), or -1
+// when the platform has no fd directory to count, as countFDs does.
+func quiescedFDs(t *testing.T, readFDs func() int) int {
+	t.Helper()
+	if readFDs() < 0 {
+		return -1
+	}
+	return int(livebytes.QuiesceCount(t, "open fds", func() uint64 {
+		n := readFDs()
+		if n < 0 {
+			t.Fatalf("open fds became uncountable while quiescing")
+		}
+		return uint64(n)
+	}))
+}
+
+// settleResourceSampleAfterFree waits for the explicit frees to land, then
+// settles the other resources. Rust live bytes are polled first and without
+// a GC (livebytes.Settle): every test here frees its buffers explicitly, and
+// settleResourceSample's runtime.GC loop would let the AddCleanup backstop
+// hide a missing free. The settled reading replaces final.rustLive.
+func settleResourceSampleAfterFree(base resourceSample, timeout time.Duration) resourceSample {
+	live, _ := livebytes.Settle(base.rustLive)
+	final := settleResourceSample(base, timeout)
+	final.rustLive = live
+	return final
+}
+
 // dumpGoroutineStacks logs active goroutines if an unexpected goroutine count is found.
 func dumpGoroutineStacks(t *testing.T) {
 	t.Helper()
@@ -162,7 +218,7 @@ func TestResourceLeak_GoroutinesAndPipesZeroLeakUnderSoak(t *testing.T) {
 	runtime.GC()
 	time.Sleep(30 * time.Millisecond)
 	runtime.GC()
-	base := takeResourceSample()
+	base := takeResourceBaseline(t)
 	t.Logf("Baseline resources: goroutines=%d, goThreads=%d, totalTasks=%d (rustThreads=%d), fds=%d, rustLive=%d, leakProfCnt=%d",
 		base.goroutines, base.goThreads, base.totalTasks, base.rustThreads(), base.fds, base.rustLive, base.leakProfCnt)
 
@@ -258,7 +314,7 @@ func TestResourceLeak_GoroutinesAndPipesZeroLeakUnderSoak(t *testing.T) {
 		t.Fatalf("Close soak handle failed: %v", err)
 	}
 
-	final := settleResourceSample(base, 15*time.Second)
+	final := settleResourceSampleAfterFree(base, 15*time.Second)
 
 	goroutineDelta := final.goroutines - base.goroutines
 	fdDelta := final.fds - base.fds
@@ -266,7 +322,7 @@ func TestResourceLeak_GoroutinesAndPipesZeroLeakUnderSoak(t *testing.T) {
 	if base.totalTasks >= 0 && final.totalTasks >= 0 {
 		rustThreadDelta = final.rustThreads() - base.rustThreads()
 	}
-	rustLiveDelta := int64(final.rustLive) - int64(base.rustLive)
+	rustLiveDelta, rustLiveLeaked := rustLiveVerdict(base.rustLive, final.rustLive)
 
 	t.Logf("Final resources: goroutines=%d (delta %d), goThreads=%d, totalTasks=%d (rustThreads=%d, delta %d), fds=%d (delta %d), rustLive=%d (delta %d)",
 		final.goroutines, goroutineDelta, final.goThreads, final.totalTasks, final.rustThreads(), rustThreadDelta, final.fds, fdDelta, final.rustLive, rustLiveDelta)
@@ -310,7 +366,7 @@ func TestResourceLeak_GoroutinesAndPipesZeroLeakUnderSoak(t *testing.T) {
 	}
 
 	// Assertion 5: finalRustLive - baseRustLive == 0
-	if rustLiveDelta != 0 {
+	if rustLiveLeaked {
 		t.Errorf("Rust live bytes leak detected: base=%d, final=%d (delta=%d)", base.rustLive, final.rustLive, rustLiveDelta)
 		failed = true
 	}
@@ -356,7 +412,7 @@ func TestResourceLeak_MultiHandleChurnAndTeardownZeroLeak(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	runtime.GC()
 
-	base := takeResourceSample()
+	base := takeResourceBaseline(t)
 	t.Logf("Multi-handle churn baseline: goroutines=%d, goThreads=%d, totalTasks=%d (rustThreads=%d), fds=%d, rustLive=%d",
 		base.goroutines, base.goThreads, base.totalTasks, base.rustThreads(), base.fds, base.rustLive)
 
@@ -421,7 +477,7 @@ func TestResourceLeak_MultiHandleChurnAndTeardownZeroLeak(t *testing.T) {
 	elapsed := time.Since(start)
 	t.Logf("Completed %d handle churn cycles in %v", totalHandles, elapsed)
 
-	final := settleResourceSample(base, 15*time.Second)
+	final := settleResourceSampleAfterFree(base, 15*time.Second)
 
 	goroutineDelta := final.goroutines - base.goroutines
 	fdDelta := final.fds - base.fds
@@ -429,7 +485,7 @@ func TestResourceLeak_MultiHandleChurnAndTeardownZeroLeak(t *testing.T) {
 	if base.totalTasks >= 0 && final.totalTasks >= 0 {
 		rustThreadDelta = final.rustThreads() - base.rustThreads()
 	}
-	rustLiveDelta := int64(final.rustLive) - int64(base.rustLive)
+	rustLiveDelta, rustLiveLeaked := rustLiveVerdict(base.rustLive, final.rustLive)
 
 	t.Logf("Churn final resources: goroutines=%d (delta %d), goThreads=%d, totalTasks=%d (rustThreads=%d, delta %d), fds=%d (delta %d), rustLive=%d (delta %d)",
 		final.goroutines, goroutineDelta, final.goThreads, final.totalTasks, final.rustThreads(), rustThreadDelta, final.fds, fdDelta, final.rustLive, rustLiveDelta)
@@ -466,7 +522,7 @@ func TestResourceLeak_MultiHandleChurnAndTeardownZeroLeak(t *testing.T) {
 	}
 
 	// Assertion 4: Zero Rust live bytes leak
-	if rustLiveDelta != 0 {
+	if rustLiveLeaked {
 		t.Errorf("Rust live bytes leaked after %d handle cycles: base=%d, final=%d (delta=%d)",
 			totalHandles, base.rustLive, final.rustLive, rustLiveDelta)
 		failed = true
@@ -526,7 +582,7 @@ func TestResourceLeak_ThreadCountingFidelityAndActiveStackVerification(t *testin
 	time.Sleep(30 * time.Millisecond)
 	runtime.GC()
 
-	base := takeResourceSample()
+	base := takeResourceBaseline(t)
 	baseRSS := getProcessRSS()
 	t.Logf("Thread fidelity baseline: totalTasks=%d, goThreads=%d, rustThreads=%d, fds=%d, rss=%d KiB",
 		base.totalTasks, base.goThreads, base.rustThreads(), base.fds, baseRSS)
@@ -643,7 +699,7 @@ func TestResourceLeak_ViolentCloseRace_CancellationAndFDZeroLeak(t *testing.T) {
 	runtime.GC()
 	time.Sleep(30 * time.Millisecond)
 	runtime.GC()
-	base := takeResourceSample()
+	base := takeResourceBaseline(t)
 
 	const iterations = 25
 	for iter := 0; iter < iterations; iter++ {
@@ -727,7 +783,7 @@ func TestResourceLeak_ViolentCloseRace_CancellationAndFDZeroLeak(t *testing.T) {
 	}
 
 	// Settle and verify resource invariance
-	final := settleResourceSample(base, 15*time.Second)
+	final := settleResourceSampleAfterFree(base, 15*time.Second)
 	t.Logf("Violent close race final: goroutines=%d (delta %d), fds=%d (delta %d), rustThreads=%d (delta %d), rustLive=%d (delta %d)",
 		final.goroutines, final.goroutines-base.goroutines,
 		final.fds, final.fds-base.fds,
@@ -750,9 +806,8 @@ func TestResourceLeak_ViolentCloseRace_CancellationAndFDZeroLeak(t *testing.T) {
 			dumpGoroutineStacks(t)
 		}
 	}
-	if int64(final.rustLive)-int64(base.rustLive) != 0 {
-		t.Errorf("Rust live bytes leaked after violent close races: delta=%d",
-			int64(final.rustLive)-int64(base.rustLive))
+	if delta, leaked := rustLiveVerdict(base.rustLive, final.rustLive); leaked {
+		t.Errorf("Rust live bytes leaked after violent close races: delta=%d", delta)
 	}
 }
 
@@ -767,7 +822,7 @@ func TestResourceLeak_KqueueNetpollerRapidChurnStress(t *testing.T) {
 	runtime.GC()
 	time.Sleep(30 * time.Millisecond)
 	runtime.GC()
-	base := takeResourceSample()
+	base := takeResourceBaseline(t)
 
 	const churnCycles = 100
 	ctx := context.Background()
@@ -831,7 +886,7 @@ func TestResourceLeak_ProlongedSoakWithGoroutineLeakProfileAudit(t *testing.T) {
 	runtime.GC()
 	time.Sleep(30 * time.Millisecond)
 	runtime.GC()
-	base := takeResourceSample()
+	base := takeResourceBaseline(t)
 
 	h, err := gusset.Open(
 		gusset.WithPoolSize(16),
@@ -923,7 +978,7 @@ func TestResourceLeak_ProlongedSoakWithGoroutineLeakProfileAudit(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	final := settleResourceSample(base, 15*time.Second)
+	final := settleResourceSampleAfterFree(base, 15*time.Second)
 	t.Logf("100k Soak Final: goroutines=%d (delta %d), totalTasks=%d, goThreads=%d, rustThreads=%d (delta %d), fds=%d (delta %d), rustLive=%d, leakProfCnt=%d",
 		final.goroutines, final.goroutines-base.goroutines,
 		final.totalTasks, final.goThreads, final.rustThreads(), final.rustThreads()-base.rustThreads(),
@@ -959,8 +1014,7 @@ func TestResourceLeak_ProlongedSoakWithGoroutineLeakProfileAudit(t *testing.T) {
 	}
 
 	// Check 5: zero Rust live bytes
-	if int64(final.rustLive)-int64(base.rustLive) != 0 {
-		t.Errorf("Rust live bytes leaked after 100k soak: delta=%d",
-			int64(final.rustLive)-int64(base.rustLive))
+	if delta, leaked := rustLiveVerdict(base.rustLive, final.rustLive); leaked {
+		t.Errorf("Rust live bytes leaked after 100k soak: delta=%d", delta)
 	}
 }

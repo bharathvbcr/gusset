@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // TestHardening_NilReceiverSafety tests that calling methods on nil *Handle or
@@ -427,7 +428,7 @@ func TestConcurrentChaos_Invariants_I1_to_I6(t *testing.T) {
 		t.Skip("skipping concurrent chaos in short mode")
 	}
 
-	baselineLive := gusset.Stats().LiveBytes
+	baselineLive := livebytes.Quiesce(t)
 	baselineAlloc := gusset.Stats().AllocCount
 
 	const (
@@ -476,6 +477,7 @@ func TestConcurrentChaos_Invariants_I1_to_I6(t *testing.T) {
 		opClosedHandled    atomic.Int64
 		opPanicsCaught     atomic.Int64
 		handleChurnCount   atomic.Int64
+		mode17Submits      atomic.Int64
 	)
 
 	// Mode 16 payload: [16, len_le_u32, seed]
@@ -587,7 +589,14 @@ func TestConcurrentChaos_Invariants_I1_to_I6(t *testing.T) {
 					// Mode 17 holds in engine for 3 ms
 					tk, err := curH.Submit(ctx, []byte{17, 3})
 					cancel()
-					if err == nil {
+					if err != nil {
+						// The handle may be mid-rotation or the pool full; anything else is a bug.
+						if !errors.Is(err, gusset.ErrClosed) && !errors.Is(err, context.DeadlineExceeded) &&
+							!errors.Is(err, context.Canceled) && !errors.Is(err, gusset.ErrTooManyUncollected) {
+							t.Errorf("mode 17 Submit: unexpected error: %v", err)
+						}
+					} else {
+						mode17Submits.Add(1)
 						wCtx, wCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 						_, werr := curH.Wait(wCtx, tk)
 						wCancel()
@@ -705,6 +714,15 @@ func TestConcurrentChaos_Invariants_I1_to_I6(t *testing.T) {
 	if peakInRust > poolSize {
 		t.Fatalf("INVARIANT I1 VIOLATION: peak concurrent jobs in Rust (%d) exceeded poolSize (%d)", peakInRust, poolSize)
 	}
+	// An upper bound alone passes with a dead gauge (peak 0). Mode 17 must have
+	// run, and the engine must have seen at least two of its jobs at once.
+	if mode17Submits.Load() == 0 {
+		t.Fatalf("no mode 17 job was admitted, so the I1 gauge was never exercised")
+	}
+	if peakInRust < 2 {
+		t.Fatalf("I1 gauge saw a peak of %d after %d mode 17 submits on a %d-worker pool; want at least 2 (dead gauge or no concurrency)",
+			peakInRust, mode17Submits.Load(), poolSize)
+	}
 
 	// Invariant I2: Assert panics were caught
 	t.Logf("Invariant I2: Caught panics on ephemeral handles = %d", opPanicsCaught.Load())
@@ -713,6 +731,7 @@ func TestConcurrentChaos_Invariants_I1_to_I6(t *testing.T) {
 	}
 
 	// Invariant I6 & I3: Assert Stats monotonicity and zero leak
+	finalLive, leakFree := livebytes.Settle(baselineLive)
 	finalStats := gusset.Stats()
 	t.Logf("Chaos Stats Summary: Calls=%d, Submits=%d, Cancelled=%d, Discards=%d, Closed=%d, Churns=%d",
 		opCallsCompleted.Load(), opSubmitsCompleted.Load(), opCancelled.Load(),
@@ -727,9 +746,9 @@ func TestConcurrentChaos_Invariants_I1_to_I6(t *testing.T) {
 	if finalStats.AllocCount < baselineAlloc {
 		t.Errorf("INVARIANT I6 VIOLATION: AllocCount decreased: baseline %d, final %d", baselineAlloc, finalStats.AllocCount)
 	}
-	if finalStats.LiveBytes != baselineLive {
+	if !leakFree {
 		t.Fatalf("INVARIANT I3/I6 VIOLATION: Memory leak detected! baseline LiveBytes=%d, final LiveBytes=%d (leaked %d bytes)",
-			baselineLive, finalStats.LiveBytes, int64(finalStats.LiveBytes)-int64(baselineLive))
+			baselineLive, finalLive, int64(finalLive)-int64(baselineLive))
 	}
 }
 
@@ -792,7 +811,7 @@ func TestConcurrentChaos_ConcurrentCloseRaces(t *testing.T) {
 // TestConcurrentChaos_CooperativeCancellationStorm tests a storm of rapid context
 // cancellations, verifying permit conservation and zero memory leak.
 func TestConcurrentChaos_CooperativeCancellationStorm(t *testing.T) {
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	const poolSize = 8
 	h, err := gusset.Open(
 		gusset.WithPoolSize(poolSize),
@@ -842,8 +861,8 @@ func TestConcurrentChaos_CooperativeCancellationStorm(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Fatalf("Cancellation storm leaked memory: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -880,7 +899,7 @@ func TestStress_ContainmentUnderLoad(t *testing.T) {
 
 	runtime.GC()
 	baseGoroutines := runtime.NumGoroutine()
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 
 	// Continuous fork/exec for the whole run.
 	stopForks := make(chan struct{})
@@ -983,7 +1002,7 @@ func TestStress_ContainmentUnderLoad(t *testing.T) {
 		runtime.GC()
 		g := runtime.NumGoroutine()
 		live := gusset.Stats().LiveBytes
-		if g <= baseGoroutines+2 && live <= baseLive {
+		if g <= baseGoroutines+2 && livebytes.NotLeaked(baseLive, live) {
 			break
 		}
 		if time.Now().After(deadline) {

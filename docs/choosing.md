@@ -463,7 +463,11 @@ arithmetic on those medians, or come from the write-up beside the raw files
 - **Rust still wins on throughput once the kernel vectorizes.** The same kernel
   in Rust ran at about 7 GB/s against Go SIMD's 4 GB/s, and won at 1 MiB. It only got there after
   a fix: the original version called `ctx.check()` inside the hot loop, and
-  that branch stopped LLVM from vectorizing it (about 1.4 GB/s). See
+  that branch stopped LLVM from vectorizing it. An earlier hand-recorded run put
+  that version at about 1.4 GB/s, but no raw file for it is committed, so treat
+  that figure as historical and unbacked. The 7 GB/s and 4 GB/s figures are
+  1 MiB over the medians in `bench/results/linux-amd64-vm/simd.txt` (151 µs and
+  242 µs). See
   [adoption](adoption.md#4-use-the-handle) for the chunked pattern.
 
 The table above was measured before the completion ring and before the Rust

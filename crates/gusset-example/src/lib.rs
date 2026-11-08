@@ -28,9 +28,11 @@ pub fn init_example_engine() {
                 10 => {
                     // Check cancellation once per chunk, not inside the inner
                     // loop (I3, R9). A branch on `i % 1024` in the hot loop
-                    // keeps LLVM from vectorizing it; this shape runs the same
-                    // kernel about 2x faster and still observes a cancel
-                    // within one 4 KiB chunk.
+                    // keeps LLVM from vectorizing it; this shape lets LLVM
+                    // vectorize and still observes a cancel within one 4 KiB
+                    // chunk. No committed benchmark measures the in-loop
+                    // check, so no speedup is claimed here; see
+                    // docs/adoption.md#4-use-the-handle.
                     //
                     // `?` converts the CancelReason into the runtime's canonical
                     // message, the one Go maps to context.DeadlineExceeded and

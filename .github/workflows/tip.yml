@@ -22,6 +22,7 @@ jobs:
   gotip:
     name: Go Tip Compatibility
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -109,6 +110,7 @@ jobs:
     needs: [gotip]
     if: failure()
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       issues: write
     steps:
@@ -116,7 +118,9 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const title = `Go tip breaks Gusset (run ${context.runId})`;
+            // One fixed title: the lookup below matches it exactly, so the run id
+            // lives in the body and not here.
+            const title = 'Go tip breaks Gusset';
             const body = [
               'The weekly Go tip job failed.',
               '',
@@ -125,22 +129,33 @@ jobs:
               '',
               'This is an upstream-compatibility signal, not necessarily a defect in',
               'this revision: Gusset pins cgo behaviour (`#cgo noescape`/`nocallback`),',
-              'the `/sched/threads:threads` metric and the `goroutineleak` profile, and',
+              'the `/sched/threads/total:threads` metric and the `goroutineleak` profile, and',
               'any of those can move at tip.',
             ].join('\n');
 
-            // Reuse an open issue rather than filing one per week.
-            const existing = await github.rest.issues.listForRepo({
+            // Reuse the open tracking issue rather than filing one per week. The
+            // issues API lists pull requests too, so skip those, and match the
+            // title exactly: another open issue labelled `toolchain` is not this
+            // one. The listing is bounded to MAX_PAGES pages of 100.
+            const MAX_PAGES = 5;
+            let tracking;
+            let pages = 0;
+            for await (const page of github.paginate.iterator(github.rest.issues.listForRepo, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
               labels: 'toolchain',
-            });
-            if (existing.data.length > 0) {
+              per_page: 100,
+            })) {
+              tracking = page.data.find((i) => !i.pull_request && i.title === title);
+              pages += 1;
+              if (tracking || pages >= MAX_PAGES) break;
+            }
+            if (tracking) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: existing.data[0].number,
+                issue_number: tracking.number,
                 body,
               });
               return;

@@ -1,7 +1,7 @@
 // Command benchgate holds the two CI benchmark gates that used to be a grep.
 //
 //	benchgate allocs -max Name=N [-max Name=N ...] results.txt
-//	benchgate regress -threshold PCT [-allow-one-sided Name]... benchstat.csv
+//	benchgate regress -threshold PCT [-min-samples N] [-allow-one-sided Name]... benchstat.csv
 //
 // allocs reads raw `go test -bench` output and fails when any sample of a named
 // benchmark reports more allocs/op than its bound, or when a named benchmark has
@@ -23,10 +23,17 @@
 // benchmark the change adds, which the base cannot have: it is reported as a
 // ::notice and not compared. Failing it turned every push that added a
 // benchmark red, with no allow path a push could use (Matrix 39270656716). A
-// rename is a base-only row plus a new-only one, so it still fails. Allow-list
+// rename is a base-only row plus a new-only one, so it still fails. A package
+// only one file has rows for gets a table of its own that names just that
+// file, and its rows have 3 fields on either side; the table's header says the
+// side, placed against the first header that names both files. A table that
+// cannot be placed fails as base-only. Allow-list
 // names match with or without the runner's -N GOMAXPROCS suffix. A one-sided
 // row does not end the sec/op table: a later comparison is still gated. A
 // renamed benchmark used to clear the table and a later regression passed.
+// -min-samples (default 6, the least benchstat can give an interval for) fails
+// any compared row whose smaller side has fewer samples: at n=1 every row is
+// "~" and the gate used to print "no regression" having compared nothing.
 package main
 
 import (
@@ -174,20 +181,24 @@ func (s nameSet) Set(v string) error {
 func runRegress(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("regress", flag.ContinueOnError)
 	threshold := fs.Float64("threshold", 10, "percent slower, beyond which a significant row fails")
+	minSamples := fs.Int("min-samples", 6, "fewest samples either side of a compared row may have; below it the gate fails (benchstat cannot give a confidence interval under 6)")
 	allow := nameSet{}
 	fs.Var(allow, "allow-one-sided", "benchmark present on only one side; repeatable, default none (a renamed benchmark fails)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: benchgate regress -threshold PCT [-allow-one-sided Name]... benchstat.csv")
+		return errors.New("usage: benchgate regress -threshold PCT [-min-samples N] [-allow-one-sided Name]... benchstat.csv")
+	}
+	if *minSamples < 1 {
+		return fmt.Errorf("-min-samples %d: must be at least 1", *minSamples)
 	}
 	f, err := os.Open(fs.Arg(0))
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	return checkRegress(f, *threshold, allow, stdout)
+	return checkRegress(f, *threshold, *minSamples, allow, stdout)
 }
 
 func parsePercent(s string) (float64, bool) {
@@ -196,7 +207,7 @@ func parsePercent(s string) (float64, bool) {
 	return v, err == nil
 }
 
-func checkRegress(r io.Reader, threshold float64, allowOneSided map[string]struct{}, stdout io.Writer) error {
+func checkRegress(r io.Reader, threshold float64, minSamples int, allowOneSided map[string]struct{}, stdout io.Writer) error {
 	cr := csv.NewReader(r)
 	cr.FieldsPerRecord = -1
 	cr.LazyQuotes = true
@@ -204,7 +215,12 @@ func checkRegress(r io.Reader, threshold float64, allowOneSided map[string]struc
 	if err != nil {
 		return fmt.Errorf("benchstat csv: %w", err)
 	}
+	base, head, placed := fileSides(records)
 	inTable := false
+	// tableSide is set by a table header that names one file: benchstat prints
+	// a package that only one file has rows for as a table of its own, whose
+	// rows have 3 fields on either side. It says which side that table is on.
+	tableSide := sideUnknown
 	rows := 0
 	var failures []string
 	for _, rec := range records {
@@ -215,7 +231,26 @@ func checkRegress(r io.Reader, threshold float64, allowOneSided map[string]struc
 			// A header row: the first column is blank. Only the sec/op table
 			// is gated; B/op and allocs/op follow it in the same file. A short
 			// header is still a header, not a one-sided benchmark.
+			if names, ok := fileHeader(rec); ok {
+				tableSide = sideUnknown
+				if len(names) == 1 && placed {
+					switch names[0] {
+					case head:
+						tableSide = sideHead
+					case base:
+						tableSide = sideBase
+					}
+				}
+			}
 			inTable = len(rec) > 1 && rec[1] == "sec/op"
+			continue
+		}
+		if len(rec) == 1 && strings.Contains(rec[0], ": ") {
+			// A configuration line between tables (pkg:, goos:, cpu:). It is
+			// not a benchmark row: one of those has at least 3 fields. Without
+			// -benchmem the next package's pkg: line follows a sec/op table
+			// directly and was read as a base-only benchmark.
+			inTable = false
 			continue
 		}
 		if !inTable || rec[0] == "geomean" {
@@ -227,7 +262,7 @@ func checkRegress(r io.Reader, threshold float64, allowOneSided map[string]struc
 		if len(rec) < 7 {
 			switch {
 			case allowed(allowOneSided, rec[0]):
-			case newOnly(rec):
+			case tableSide == sideHead || (tableSide != sideBase && newOnly(rec)):
 				fmt.Fprintf(stdout, "::notice title=New benchmark::%s has no base sample, so it was not compared\n", rec[0])
 			default:
 				failures = append(failures, fmt.Sprintf("%s: base-only sec/op row (%d fields); a renamed or dropped benchmark is not a pass (allow it with -allow-one-sided)", rec[0], len(rec)))
@@ -235,6 +270,15 @@ func checkRegress(r io.Reader, threshold float64, allowOneSided map[string]struc
 			continue
 		}
 		rows++
+		// Checked before the "~" skip: with one sample per side benchstat
+		// calls every row "~", which is exactly the case this guards.
+		if lo, ok := minSampleCount(rec[6]); !ok {
+			failures = append(failures, fmt.Sprintf("%s: no sample count in %q; cannot show the comparison had %d samples per side", rec[0], rec[6], minSamples))
+			continue
+		} else if lo < minSamples {
+			failures = append(failures, fmt.Sprintf("%s: %d sample(s) on the smaller side, fewer than -min-samples %d; a comparison that thin reports \"~\" for everything and is not a pass", rec[0], lo, minSamples))
+			continue
+		}
 		delta := strings.TrimSpace(rec[5])
 		if delta == "~" || delta == "" {
 			continue
@@ -274,8 +318,73 @@ func checkRegress(r io.Reader, threshold float64, allowOneSided map[string]struc
 	return nil
 }
 
+// sampleCount matches benchstat's "n=10" (equal sides) or "n=8+7" (unequal).
+var sampleCount = regexp.MustCompile(`\bn=(\d+)(?:\+(\d+))?`)
+
+// minSampleCount returns the smaller side's sample count from a P column such
+// as "p=0.001 n=8+7".
+func minSampleCount(p string) (int, bool) {
+	m := sampleCount.FindStringSubmatch(p)
+	if m == nil {
+		return 0, false
+	}
+	lo, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	if m[2] != "" {
+		hi, err := strconv.Atoi(m[2])
+		if err != nil {
+			return 0, false
+		}
+		lo = min(lo, hi)
+	}
+	return lo, true
+}
+
 // newOnly reports a one-sided row whose base columns are empty: benchstat's
 // shape for a benchmark the new side has and the base does not.
+// Which file a single-file benchstat table belongs to.
+const (
+	sideUnknown = iota
+	sideBase
+	sideHead
+)
+
+// fileHeader reports whether rec is the row of a benchstat table that names its
+// files, and returns those names. It is the header row above the unit row: a
+// blank first column and file names, where the unit row carries "CI" cells.
+func fileHeader(rec []string) ([]string, bool) {
+	if len(rec) < 2 || rec[0] != "" {
+		return nil, false
+	}
+	var names []string
+	for _, c := range rec[1:] {
+		c = strings.TrimSpace(c)
+		if c == "CI" {
+			return nil, false
+		}
+		if c != "" {
+			names = append(names, c)
+		}
+	}
+	return names, len(names) > 0
+}
+
+// fileSides takes the base and head file names from the first table header
+// that names two files, wherever it is: benchstat's table order is not the
+// order the files were written in, so a single-file table can come first.
+// With no such header nothing places a single-file table, and its rows are
+// judged by their shape alone, which fails closed.
+func fileSides(records [][]string) (base, head string, ok bool) {
+	for _, rec := range records {
+		if names, isHeader := fileHeader(rec); isHeader && len(names) == 2 {
+			return names[0], names[1], true
+		}
+	}
+	return "", "", false
+}
+
 func newOnly(rec []string) bool {
 	return len(rec) >= 4 && strings.TrimSpace(rec[1]) == "" && strings.TrimSpace(rec[2]) == "" &&
 		strings.TrimSpace(rec[3]) != ""

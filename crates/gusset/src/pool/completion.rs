@@ -4,6 +4,17 @@ use super::{lock_recover, ring, sys, Handle, JobResult};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Why [`write_completion`] stopped without delivering a record.
+#[derive(Debug)]
+pub(super) enum WriteEnd {
+    /// The handle is closing (its descriptor is released, or `closed` is set
+    /// while the pipe is full). Not a fault: Go tells the waiter "closed".
+    Closed,
+    /// The descriptor reported an error of its own, whatever its kind. An OS
+    /// `ENOTCONN` lands here: only [`WriteEnd::Closed`] means closing.
+    Failed(std::io::Error),
+}
+
 /// Writes a completion ticket, sleeping on a full pipe outside the exclusivity lock.
 ///
 /// Retries until the write lands, the handle closes, or the pipe reports a hard
@@ -25,7 +36,7 @@ pub(super) fn write_completion(
     closed: &AtomicBool,
     ticket: u64,
     record: &[u8],
-) -> std::io::Result<()> {
+) -> Result<(), WriteEnd> {
     let started = std::time::Instant::now();
     let mut warned = false;
     let mut backoff = std::time::Duration::from_micros(50);
@@ -33,10 +44,7 @@ pub(super) fn write_completion(
         let attempt = {
             let _guard = lock_recover(lock);
             match fd.load(Ordering::Acquire) {
-                -1 => Err(std::io::Error::new(
-                    std::io::ErrorKind::NotConnected,
-                    "handle closed before the completion was written",
-                )),
+                -1 => return Err(WriteEnd::Closed),
                 raw => sys::write_record_attempt(raw, record),
             }
         };
@@ -44,10 +52,7 @@ pub(super) fn write_completion(
             Ok(()) => return Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                 if closed.load(Ordering::Acquire) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::NotConnected,
-                        "handle closed while the completion pipe was full",
-                    ));
+                    return Err(WriteEnd::Closed);
                 }
                 if !warned && started.elapsed() >= sys::WRITE_TICKET_TIMEOUT {
                     warned = true;
@@ -61,7 +66,7 @@ pub(super) fn write_completion(
                 std::thread::sleep(backoff);
                 backoff = (backoff * 2).min(sys::WRITE_TICKET_MAX_BACKOFF);
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(WriteEnd::Failed(err)),
         }
     }
 }
@@ -188,25 +193,26 @@ impl Handle {
     ///
     /// Returns whether the record reached the pipe.
     fn publish_completion(&self, ticket: u64, record: &[u8]) -> bool {
-        if let Err(e) = write_completion(
+        match write_completion(
             &self.pipe_write_lock,
             &self.pipe_write_fd,
             &self.closed,
             ticket,
             record,
         ) {
-            if e.kind() == std::io::ErrorKind::NotConnected {
-                return false; // closing: the waiter is told "closed" by Go
+            Ok(()) => true,
+            // Closing: the waiter is told "closed" by Go.
+            Err(WriteEnd::Closed) => false,
+            Err(WriteEnd::Failed(e)) => {
+                crate::ffi::log_event(&format!(
+                    "gusset: completion write failed for ticket {}: {}",
+                    ticket, e
+                ));
+                // EPIPE/EBADF: the reader is gone for good. Refuse new work
+                // instead of accepting jobs whose completions cannot be delivered.
+                self.poisoned.store(true, Ordering::Release);
+                false
             }
-            crate::ffi::log_event(&format!(
-                "gusset: completion write failed for ticket {}: {}",
-                ticket, e
-            ));
-            // EPIPE/EBADF: the reader is gone for good. Refuse new work
-            // instead of accepting jobs whose completions cannot be delivered.
-            self.poisoned.store(true, Ordering::Release);
-            return false;
         }
-        true
     }
 }

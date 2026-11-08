@@ -1,4 +1,4 @@
-.PHONY: all linked-target-dir build test bench bench-crossover bench-scaling bench-dispatch bench-alloc-counters lint alloc-gate ci-local docs docs-check cross fuzz clean install install-build uninstall
+.PHONY: all linked-target-dir build test test-uniffi-link bench bench-crossover bench-scaling bench-dispatch bench-alloc-counters lint alloc-gate ci-local docs docs-check cross fuzz clean install install-build uninstall
 
 export PATH := $(PATH):$(shell go env GOPATH)/bin
 
@@ -102,7 +102,23 @@ uninstall:
 
 test: linked-target-dir
 	cargo test --locked --workspace
+	cargo test --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml --target-dir examples/uniffi_bindgen_go/rust/target
 	go test -v ./...
+
+# The typed Go client of examples/uniffi_bindgen_go against its compiled Rust
+# engine, through a real handle. The example crate is the umbrella of
+# docs/adoption.md step 1: its libgusset.a holds Gusset and the engine, the one
+# unsealed staticlib R14 allows. CGO_LDFLAGS comes before internal/ffi's own -L,
+# so -lgusset resolves to the umbrella and target/'s archive is never opened;
+# if it were, the shim's init_uniffi_engine would be undefined and the link
+# would fail. --target-dir pins the umbrella's output, so a global
+# CARGO_TARGET_DIR cannot land it on top of Gusset's own libgusset.a. Nothing
+# here builds target/ or regenerates internal/ffi's archive hash. -count=1: the
+# test registers the engine and replays the golden counters, both process-wide.
+test-uniffi-link:
+	cargo build --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml --target-dir examples/uniffi_bindgen_go/rust/target
+	go run ./tools/gussetvet -tags gusset_uniffi_engine examples/uniffi_bindgen_go
+	CGO_LDFLAGS="-L$(CURDIR)/examples/uniffi_bindgen_go/rust/target/debug" go test -count=1 -tags gusset_uniffi_engine -v ./examples/uniffi_bindgen_go/...
 
 # -count=10: benchstat refuses to quote a confidence interval below 6 samples, and
 # the committed data used to have 5 — so every README figure was a point estimate
@@ -291,15 +307,22 @@ lint:
 # The zero-allocation gate (R5), shared with the CI bench job. Reads raw
 # `go test -bench -benchmem` output. ChannelHop is the pure-Go control and must
 # stay at 0; the cgo call path measures 1 alloc/op (1 B/op) today, so
-# CallNoop and SubmitWait are bounded at 1. A benchmark missing from the file
-# fails the gate rather than passing it.
+# CallNoop and SubmitWait are bounded at 1. The root package's CallNoopBare and
+# CallNoopTraced are the same call path without the bench package's pool, and
+# measure 1 as well (1-2 B/op); a registry or tracing change that allocates per
+# call shows there. Their bound is tested in the root package, not ./bench, so
+# both producers of ALLOC_FILE (the CI bench job and ci-local) run it too.
+# CompletionTransport is not bounded: its parallel rows allocate 40-60 per op
+# from RunParallel's goroutines and the count varies with scheduling. A
+# benchmark missing from the file fails the gate rather than passing it.
 ALLOC_FILE ?= bench/results/allocs.tmp
-ALLOC_BOUNDS ?= -max ChannelHop=0 -max GussetCallNoop=1 -max GussetSubmitWait=1
+ALLOC_BOUNDS ?= -max ChannelHop=0 -max GussetCallNoop=1 -max GussetSubmitWait=1 -max CallNoopBare=1 -max CallNoopTraced=1
 alloc-gate:
 	go run ./tools/ci/benchgate allocs $(ALLOC_BOUNDS) $(ALLOC_FILE)
 
 ci-local: build test lint docs-check
 	go test -run '^$$' -bench . -benchtime=100ms -benchmem ./bench/... > $(ALLOC_FILE) || { cat $(ALLOC_FILE); exit 1; }
+	go test -run '^$$' -bench '^(BenchmarkCallNoopBare|BenchmarkCallNoopTraced)$$' -benchtime=100ms -benchmem . >> $(ALLOC_FILE) || { cat $(ALLOC_FILE); exit 1; }
 	@cat $(ALLOC_FILE)
 	$(MAKE) alloc-gate
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/bharathvbcr/gusset"
 	"github.com/bharathvbcr/gusset/internal/ffi"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // Pitfall 1: ABI Drift Check (Invariant I6, R12)
@@ -300,7 +301,7 @@ func TestPitfall_AllocatorStatsAndLimit(t *testing.T) {
 	}
 	defer h.Close()
 
-	initialStats := gusset.Stats()
+	initialLive := livebytes.Quiesce(t)
 
 	// Allocate a 1 MiB buffer
 	const allocSize = 1024 * 1024
@@ -310,9 +311,9 @@ func TestPitfall_AllocatorStatsAndLimit(t *testing.T) {
 	}
 
 	postAllocStats := gusset.Stats()
-	if postAllocStats.LiveBytes < initialStats.LiveBytes+allocSize {
+	if postAllocStats.LiveBytes < initialLive+allocSize {
 		t.Fatalf("expected LiveBytes to increase by at least %d, initial: %d, post: %d",
-			allocSize, initialStats.LiveBytes, postAllocStats.LiveBytes)
+			allocSize, initialLive, postAllocStats.LiveBytes)
 	}
 
 	// Test AdviseMemoryLimit
@@ -323,10 +324,11 @@ func TestPitfall_AllocatorStatsAndLimit(t *testing.T) {
 	// Free buffer
 	_ = buf.Free()
 
-	postFreeStats := gusset.Stats()
-	if postFreeStats.LiveBytes > postAllocStats.LiveBytes-allocSize {
+	if postFree, ok := livebytes.WaitUntil(func(live uint64) bool {
+		return live <= postAllocStats.LiveBytes-allocSize
+	}); !ok {
 		t.Fatalf("expected LiveBytes to decrease after free, post-alloc: %d, post-free: %d",
-			postAllocStats.LiveBytes, postFreeStats.LiveBytes)
+			postAllocStats.LiveBytes, postFree)
 	}
 }
 

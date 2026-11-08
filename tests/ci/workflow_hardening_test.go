@@ -52,12 +52,19 @@ func workflows(t *testing.T) map[string][]string {
 }
 
 func TestEveryActionIsPinnedToACommitWithAVersionComment(t *testing.T) {
+	uses := 0
+	defer func() {
+		if uses == 0 {
+			t.Error("no third-party `uses:` in any workflow: the rule matched nothing, so it proves nothing")
+		}
+	}()
 	for name, lines := range workflows(t) {
 		for i, l := range lines {
 			m := usesLine.FindStringSubmatch(l)
 			if m == nil || strings.HasPrefix(m[1], "./") {
 				continue
 			}
+			uses++
 			if !pinnedUses.MatchString(m[1]) {
 				t.Errorf("%s:%d: %s is not pinned to a full commit SHA", name, i+1, m[1])
 			}
@@ -71,11 +78,18 @@ func TestEveryActionIsPinnedToACommitWithAVersionComment(t *testing.T) {
 // dtolnay/rust-toolchain reads the toolchain from the ref name when none is
 // given, and a SHA has no such name, so a pinned use must say which one.
 func TestRustToolchainNamesItsToolchain(t *testing.T) {
+	toolchains := 0
+	defer func() {
+		if toolchains == 0 {
+			t.Error("no dtolnay/rust-toolchain use in any workflow: the rule matched nothing, so it proves nothing")
+		}
+	}()
 	for name, lines := range workflows(t) {
 		for i, l := range lines {
 			if m := usesLine.FindStringSubmatch(l); m == nil || !strings.HasPrefix(m[1], "dtolnay/rust-toolchain@") {
 				continue
 			}
+			toolchains++
 			end := i + 1
 			for end < len(lines) && (strings.TrimSpace(lines[end]) == "" || strings.HasPrefix(lines[end], "          ") || strings.HasSuffix(strings.TrimSpace(lines[end]), "with:")) {
 				end++
@@ -87,22 +101,9 @@ func TestRustToolchainNamesItsToolchain(t *testing.T) {
 	}
 }
 
-func TestNoUnpinnedToolInstalls(t *testing.T) {
-	for name, lines := range workflows(t) {
-		for i, l := range lines {
-			s := strings.TrimSpace(l)
-			if strings.HasPrefix(s, "#") {
-				continue
-			}
-			if strings.Contains(s, "@latest") {
-				t.Errorf("%s:%d: @latest in a CI step: %s", name, i+1, s)
-			}
-			if strings.Contains(s, "cargo install") && !strings.Contains(s, "--locked") {
-				t.Errorf("%s:%d: cargo install without --locked: %s", name, i+1, s)
-			}
-		}
-	}
-}
+// The unpinned-install rule (@latest, cargo install without --locked and
+// --version) lives once, in toolInstallViolations, run over the workflows and
+// the build scripts by TestToolInstallsArePinnedEverywhere.
 
 // A job that checks out and builds code must not hold a token that can write
 // issues, and must not persist the token into .git/config.

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // TestConcurrency_Saturation_HighFanOutScaling scales concurrency to 256, 512, and 1,024 goroutines
@@ -35,7 +36,7 @@ func TestConcurrency_Saturation_HighFanOutScaling(t *testing.T) {
 	for _, tc := range testCases {
 		name := fmt.Sprintf("Pool_%d_Goroutines_%d", tc.poolSize, tc.goroutines)
 		t.Run(name, func(t *testing.T) {
-			baseLive := gusset.Stats().LiveBytes
+			baseLive := livebytes.Quiesce(t)
 			initialThreads := gusset.Threads()
 
 			h, err := gusset.Open(
@@ -197,8 +198,8 @@ func TestConcurrency_Saturation_HighFanOutScaling(t *testing.T) {
 			}
 
 			// Invariant I1: LiveBytes must return exactly to baseline
-			finalLive := gusset.Stats().LiveBytes
-			if finalLive != baseLive {
+			finalLive, leakFree := livebytes.Settle(baseLive)
+			if !leakFree {
 				t.Errorf("I1: Rust LiveBytes leak detected: baseline %d, final %d (delta %d)",
 					baseLive, finalLive, int64(finalLive)-int64(baseLive))
 			}
@@ -238,7 +239,7 @@ func TestConcurrency_Saturation_MultiPoolContention(t *testing.T) {
 		handles[i] = h
 	}
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	initialThreads := gusset.Threads()
 
 	var wg sync.WaitGroup
@@ -299,8 +300,8 @@ func TestConcurrency_Saturation_MultiPoolContention(t *testing.T) {
 	}
 
 	// Verify live bytes return to baseline
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Errorf("I1: Multi-pool test leaked memory: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -316,7 +317,7 @@ func TestConcurrency_Saturation_ViolentHandleTeardown(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 
@@ -354,8 +355,8 @@ func TestConcurrency_Saturation_ViolentHandleTeardown(t *testing.T) {
 	wg.Wait()
 
 	// Verify memory ownership I1: zero live byte leak
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Errorf("I1: Violent close leaked memory: baseline %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -416,7 +417,7 @@ func TestConcurrency_Saturation_ExtremeGoroutineSingleWorker(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	initialThreads := gusset.Threads()
 
 	const poolSize = 1
@@ -604,8 +605,8 @@ func TestConcurrency_Saturation_ExtremeGoroutineSingleWorker(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Errorf("I1: LiveBytes leak detected: base %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -629,7 +630,7 @@ func TestConcurrency_Saturation_ViolentCloseContinuousHammer(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 
 	const poolSize = 32
 	const numGoroutines = 512
@@ -787,8 +788,8 @@ func TestConcurrency_Saturation_ViolentCloseContinuousHammer(t *testing.T) {
 	}
 
 	// Invariant I1: LiveBytes must return exactly to baseline
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Errorf("I1: Violent close continuous hammer leaked Rust memory: base %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -805,7 +806,7 @@ func TestConcurrency_Saturation_MultiPoolMassiveChurnAndPoisonStorm(t *testing.T
 		t.Skip("skipping in short mode")
 	}
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 	initialThreads := gusset.Threads()
 
 	const numPools = 32
@@ -939,8 +940,8 @@ func TestConcurrency_Saturation_MultiPoolMassiveChurnAndPoisonStorm(t *testing.T
 	}
 
 	// Verify zero live byte leak
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Errorf("I1: 32-pool churn storm leaked Rust memory: base %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -958,7 +959,7 @@ func TestConcurrency_Saturation_PermitLeakAudit_CancellationStorm(t *testing.T) 
 		t.Skip("skipping in short mode")
 	}
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 
 	const poolSize = 8
 	const numGoroutines = 256
@@ -1046,8 +1047,8 @@ func TestConcurrency_Saturation_PermitLeakAudit_CancellationStorm(t *testing.T) 
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Errorf("I1: Cancellation storm leaked Rust memory: base %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}
@@ -1074,7 +1075,7 @@ func TestConcurrency_Saturation_WidePoolScaling(t *testing.T) {
 	for _, tc := range testCases {
 		name := fmt.Sprintf("Pool_%d_Goroutines_%d", tc.poolSize, tc.goroutines)
 		t.Run(name, func(t *testing.T) {
-			baseLive := gusset.Stats().LiveBytes
+			baseLive := livebytes.Quiesce(t)
 			initialThreads := gusset.Threads()
 
 			h, err := gusset.Open(
@@ -1119,8 +1120,8 @@ func TestConcurrency_Saturation_WidePoolScaling(t *testing.T) {
 				t.Fatalf("Close failed: %v", err)
 			}
 
-			finalLive := gusset.Stats().LiveBytes
-			if finalLive != baseLive {
+			finalLive, leakFree := livebytes.Settle(baseLive)
+			if !leakFree {
 				t.Errorf("I1: Wide pool leaked memory: base %d, final %d (delta %d)",
 					baseLive, finalLive, int64(finalLive)-int64(baseLive))
 			}
@@ -1147,7 +1148,7 @@ func TestConcurrency_Saturation_MaxPoolBoundaryAndRejection(t *testing.T) {
 		t.Skip("skipping in short mode")
 	}
 
-	baseLive := gusset.Stats().LiveBytes
+	baseLive := livebytes.Quiesce(t)
 
 	// 1. Boundary Refusals
 	for _, badSize := range []int{0, -1, -100, 1025, 2048, 65536} {
@@ -1209,8 +1210,8 @@ func TestConcurrency_Saturation_MaxPoolBoundaryAndRejection(t *testing.T) {
 		t.Fatalf("Close poolSize 1024 failed: %v", err)
 	}
 
-	finalLive := gusset.Stats().LiveBytes
-	if finalLive != baseLive {
+	finalLive, leakFree := livebytes.Settle(baseLive)
+	if !leakFree {
 		t.Errorf("I1: MaxPoolSize 1024 test leaked memory: base %d, final %d (delta %d)",
 			baseLive, finalLive, int64(finalLive)-int64(baseLive))
 	}

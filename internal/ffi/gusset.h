@@ -78,7 +78,9 @@ extern "C" {
 #define GUSSET_MAX_BUFFER_BYTES 1073741824ull
 /* Set on gusset_take's out_buf_id when the id is the result's own buffer,
  * which the caller frees (gusset_buf_free) once it has consumed the bytes.
- * Clear the bit before using the id. Ids are always below this bit. */
+ * Clear the bit before using the id. Ids are always below this bit. The bit
+ * only says where the buffer came from: an id without it is a buffer too, and
+ * is freed the same way (see gusset_take). */
 #define GUSSET_TAKE_OWNED_FLAG (1ull << 63)
 
 /* CallHeader. The field is named `reserved` but it is the engine dispatch opcode (0 = global handler).
@@ -164,6 +166,13 @@ int32_t gusset_shutdown(uint32_t drain_ms);
 int32_t gusset_handle_open(uint32_t pool_size, int32_t pipe_write_fd, GussetHandle** out_handle, FfiStatus* status);
 int32_t gusset_handle_close(GussetHandle* handle, FfiStatus* status);
 int32_t gusset_submit(GussetHandle* handle, const CallHeader* header, const uint8_t* input_ptr, size_t input_len, uint64_t buffer_id, uint64_t* out_ticket, FfiStatus* status);
+/* Takes the result of a completed ticket. On FFI_OK, *out_buf_id is 0 or the id
+ * of a Rust-owned result buffer.
+ * Every nonzero out_buf_id, flagged or not, is released with gusset_buf_free(id & ~GUSSET_TAKE_OWNED_FLAG).
+ * A result of 4096 bytes or less comes back without the flag, in a registry buffer
+ * that stays until that free or gusset_handle_close.
+ * An out_buf_id of 0 with a NULL out_ptr means an empty result.
+ * The out_ptr stays valid until that free. */
 int32_t gusset_take(GussetHandle* handle, uint64_t ticket, uint64_t* out_buf_id, uint8_t** out_ptr, size_t* out_len, FfiStatus* status);
 /* FFI_OK whether or not the ticket still had a live job: whether it was
  * found is not reported. */

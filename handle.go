@@ -129,6 +129,10 @@ func backstopClose(s *handleState) {
 	_ = s.close()
 }
 
+// setNonblock is syscall.SetNonblock, replaceable so a test can fail the call
+// Open makes on the duplicated completion-pipe write end.
+var setNonblock = syscall.SetNonblock
+
 // Open opens a new Gusset handle with bounded concurrency (I4).
 //
 // A nil Option, a [WithPoolSize] outside 1 to [MaxPoolSize] and a negative
@@ -175,7 +179,13 @@ func Open(opts ...Option) (*Handle, error) {
 		return nil, err
 	}
 	_ = w.Close()
-	_ = syscall.SetNonblock(writeFD, true)
+	if err := setNonblock(writeFD, true); err != nil {
+		// Rust would get a blocking write end, and a full pipe would block a
+		// worker inside write. Nothing else exists yet to unwind.
+		_ = r.Close()
+		_ = syscall.Close(writeFD)
+		return nil, fmt.Errorf("gusset: set completion pipe non-blocking: %w", err)
+	}
 
 	hPtr, err := ffi.HandleOpen(cfg.poolSize, writeFD)
 	if err != nil {

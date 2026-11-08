@@ -74,7 +74,12 @@ func oracleParse(b []byte) ([]fuzzRecord, oracleEnd) {
 			return out, endEOF
 		}
 		w := binary.NativeEndian.Uint64(b)
+		// Ticket 0 is not a completion without a ring (tickets start at 1); the
+		// reader refuses it once the whole record is buffered.
 		if w&ffi.InlineRecordFlag == 0 {
+			if w == 0 {
+				return out, endCorrupt
+			}
 			out = append(out, fuzzRecord{ticket: w})
 			b = b[8:]
 			continue
@@ -89,6 +94,9 @@ func oracleParse(b []byte) ([]fuzzRecord, oracleEnd) {
 		size := 16 + (int(n)+7)/8*8
 		if len(b) < size {
 			return out, endEOF
+		}
+		if w&^ffi.InlineRecordFlag == 0 {
+			return out, endCorrupt
 		}
 		out = append(out, fuzzRecord{
 			ticket: w &^ ffi.InlineRecordFlag,
@@ -324,7 +332,8 @@ func recordsFromFuzz(b []byte) []fuzzRecord {
 		var tb [8]byte
 		copy(tb[:7], b[1:8])
 		b = b[8:]
-		rec := fuzzRecord{ticket: binary.LittleEndian.Uint64(tb[:]) &^ ffi.InlineRecordFlag}
+		// A ticket is never 0: tickets start at 1 and the reader refuses 0.
+		rec := fuzzRecord{ticket: max(1, binary.LittleEndian.Uint64(tb[:])&^ffi.InlineRecordFlag)}
 		if kind&1 == 1 {
 			rec.inline = true
 			n := 0
@@ -522,6 +531,39 @@ func FuzzTicketReaderFakeRing(f *testing.F) {
 	})
 }
 
+// ringStallState describes a reader the watchdog gave up on: the ring's shared
+// words and every slot's sequence word, read atomically, then the reader's own
+// cursors and the tickets still owed. Nightly 41442688300 failed with only
+// "reader stalled with 1 completions outstanding" and its input does not
+// replay, so the next occurrence has to carry its own evidence: a published
+// slot at the reader's position with the reader parked is a lost wake-up, a
+// waiting flag still set with no slot published is a lost completion, and an
+// overflow count ahead of overflowSeen is a pipe record never read.
+//
+// The reader goroutine is still blocked inside next, so its fields are read
+// without synchronisation. This runs only on the failure path, where a race
+// report is more evidence, not a second defect.
+func ringStallState(tr *ticketReader, want map[uint64][]byte) string {
+	var b strings.Builder
+	waiting := atomic.LoadUint32((*uint32)(unsafe.Add(tr.ring.Shared, ffi.RingOffWaiting)))
+	overflow := atomic.LoadUint64((*uint64)(unsafe.Add(tr.ring.Shared, ffi.RingOffOverflow)))
+	fmt.Fprintf(&b, "ring: capacity %d, waiting %d, overflow %d\n", tr.ring.Capacity, waiting, overflow)
+	for i := uint64(0); i < tr.ring.Capacity; i++ {
+		seq := atomic.LoadUint64((*uint64)(unsafe.Add(tr.ring.Slots, uintptr(i)*ffi.RingSlotBytes)))
+		fmt.Fprintf(&b, "  slot %d: sequence %d\n", i, seq)
+	}
+	headSeq := atomic.LoadUint64((*uint64)(tr.ringSlot()))
+	fmt.Fprintf(&b, "reader: head %d (slot %d, sequence %d, published %t), overflowSeen %d, tokensOwed %d, buffered %d bytes\n",
+		tr.head, tr.head&tr.mask, headSeq, headSeq == tr.head+1, tr.overflowSeen, tr.tokensOwed, tr.end-tr.start)
+	owed := make([]uint64, 0, len(want))
+	for tk := range want {
+		owed = append(owed, tk)
+	}
+	slices.Sort(owed)
+	fmt.Fprintf(&b, "outstanding tickets: %v", owed)
+	return b.String()
+}
+
 // FuzzTicketReaderRustRing: the real Rust encoder (pool::inline_record) and
 // ring against this parser. Pool 1, ring capacity 2: completions beyond two
 // unread spill to the pipe, so both paths carry Rust-built records. Payloads
@@ -556,8 +598,11 @@ func FuzzTicketReaderRustRing(f *testing.F) {
 			select {
 			case got = <-ch:
 			case <-time.After(readerWatchdog):
+				state := ringStallState(tr, want)
 				_ = r.SetReadDeadline(time.Now())
-				t.Fatalf("reader stalled with %d completions outstanding", len(want))
+				buf := make([]byte, 1<<20)
+				t.Fatalf("reader stalled with %d completions outstanding\n%s\n%s",
+					len(want), state, buf[:runtime.Stack(buf, true)])
 			}
 			if got.err != nil {
 				t.Fatalf("next: %v", got.err)
@@ -712,6 +757,13 @@ func FuzzRingSlotDecode(f *testing.F) {
 		if isInline && n > uint64(ffi.InlineResultMax) {
 			if err == nil {
 				t.Fatalf("length %d accepted", n)
+			}
+			return
+		}
+		if w0&^ffi.InlineRecordFlag == 0 {
+			// Tickets start at 1 and a ring slot never carries a wake token.
+			if err == nil {
+				t.Fatalf("ticket 0 accepted from word %#x", w0)
 			}
 			return
 		}

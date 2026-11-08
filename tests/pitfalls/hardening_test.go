@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 // TestHardening_UntrustedInputCannotSelectPanic is the headline regression.
@@ -482,22 +483,6 @@ func TestPitfall_ThreadsMetricIsLive(t *testing.T) {
 	}
 }
 
-// waitLiveBytes polls Stats().LiveBytes until ok accepts it or 30s pass, and
-// returns the last reading with whether ok accepted it.
-func waitLiveBytes(ok func(uint64) bool) (uint64, bool) {
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		live := gusset.Stats().LiveBytes
-		if ok(live) {
-			return live, true
-		}
-		if time.Now().After(deadline) {
-			return live, false
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 // TestPitfall_DiscardReleasesUncollectedResults pins the bound on results
 // nobody Waits for.
 //
@@ -550,14 +535,14 @@ func TestPitfall_DiscardReleasesUncollectedResults(t *testing.T) {
 	if _, err := h.Wait(ctx, submit([]byte{0})); err != nil {
 		t.Fatalf("warm-up Wait failed: %v", err)
 	}
-	baseline := gusset.Stats().LiveBytes
+	baseline := livebytes.Quiesce(t)
 
 	tickets := make([]uint64, 0, rounds)
 	for i := 0; i < rounds; i++ {
 		tickets = append(tickets, submit([]byte{0}))
 	}
 	retained := baseline + rounds*payload
-	if live, ok := waitLiveBytes(func(v uint64) bool { return v >= retained }); !ok {
+	if live, ok := livebytes.WaitUntil(func(v uint64) bool { return v >= retained }); !ok {
 		t.Fatalf("%d uncollected %d-byte results should be held until Wait, Discard or Close: "+
 			"live %d, baseline %d", rounds, payload, live, baseline)
 	}
@@ -567,7 +552,7 @@ func TestPitfall_DiscardReleasesUncollectedResults(t *testing.T) {
 			t.Fatalf("Discard of stored result %d: %v", i, err)
 		}
 	}
-	if live, ok := waitLiveBytes(func(v uint64) bool { return v < baseline+payload }); !ok {
+	if live, ok := livebytes.WaitUntil(func(v uint64) bool { return v < baseline+payload }); !ok {
 		t.Fatalf("Discard did not release the take buffers: live %d, baseline %d, %d results of %d bytes",
 			live, baseline, rounds, payload)
 	}
@@ -589,7 +574,7 @@ func TestPitfall_DiscardReleasesUncollectedResults(t *testing.T) {
 	if err := h.Discard(running); err != nil {
 		t.Fatalf("Discard of a running ticket: %v", err)
 	}
-	if live, ok := waitLiveBytes(func(v uint64) bool { return v < baseline+payload }); !ok {
+	if live, ok := livebytes.WaitUntil(func(v uint64) bool { return v < baseline+payload }); !ok {
 		t.Fatalf("a result discarded while running was kept when it landed: live %d, baseline %d", live, baseline)
 	}
 

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/bharathvbcr/gusset"
+	"github.com/bharathvbcr/gusset/tests/internal/livebytes"
 )
 
 type discardHandler struct{}
@@ -202,7 +203,7 @@ func TestDifferentialHeap_SteadyStateFlatnessUnderProlongedStress(t *testing.T) 
 	// 2. Baseline capture
 	var baseMS runtime.MemStats
 	runtime.ReadMemStats(&baseMS)
-	baseRust := gusset.Stats().LiveBytes
+	baseRust := livebytes.Quiesce(t)
 	t.Logf("Baseline captured: HeapAlloc=%d KiB, HeapInuse=%d KiB, HeapObjects=%d, RustLive=%d",
 		baseMS.HeapAlloc>>10, baseMS.HeapInuse>>10, baseMS.HeapObjects, baseRust)
 
@@ -216,7 +217,7 @@ func TestDifferentialHeap_SteadyStateFlatnessUnderProlongedStress(t *testing.T) 
 	settleGC()
 	var finalMS runtime.MemStats
 	runtime.ReadMemStats(&finalMS)
-	finalRust := gusset.Stats().LiveBytes
+	finalRust, leakFree := livebytes.Settle(baseRust)
 
 	allocDelta := int64(finalMS.HeapAlloc) - int64(baseMS.HeapAlloc)
 	inuseDelta := int64(finalMS.HeapInuse) - int64(baseMS.HeapInuse)
@@ -236,7 +237,7 @@ func TestDifferentialHeap_SteadyStateFlatnessUnderProlongedStress(t *testing.T) 
 	failed := false
 
 	// Assert Rust LiveBytes delta == 0
-	if rustDelta != 0 {
+	if !leakFree {
 		t.Errorf("Rust live bytes leaked: baseline %d, final %d (delta %d)", baseRust, finalRust, rustDelta)
 		failed = true
 	}
@@ -318,7 +319,7 @@ func TestDifferentialHeap_WrapperCleanupQueueVerification(t *testing.T) {
 
 	var baseMS runtime.MemStats
 	runtime.ReadMemStats(&baseMS)
-	baseRust := gusset.Stats().LiveBytes
+	baseRust := livebytes.Quiesce(t)
 	t.Logf("Cleanup queue baseline: HeapAlloc=%d KiB, RustLive=%d", baseMS.HeapAlloc>>10, baseRust)
 
 	// Execute cycles: drop 1 out of every 8 handles/buffers to exercise AddCleanup
@@ -334,20 +335,9 @@ func TestDifferentialHeap_WrapperCleanupQueueVerification(t *testing.T) {
 		}
 	}
 
-	// Settle protocol: poll up to 10 seconds for runtime.AddCleanup callbacks to finish
-	deadline := time.Now().Add(10 * time.Second)
-	var finalRust uint64
-	for {
-		runtime.GC()
-		time.Sleep(20 * time.Millisecond)
-		runtime.GC()
-		runtime.GC()
-
-		finalRust = gusset.Stats().LiveBytes
-		if finalRust == baseRust || time.Now().After(deadline) {
-			break
-		}
-	}
+	// The dropped handles and buffers are reclaimed by runtime.AddCleanup, so
+	// this wait forces a GC on every poll.
+	finalRust, leakFree := livebytes.SettleGC(baseRust)
 
 	var finalMS runtime.MemStats
 	runtime.ReadMemStats(&finalMS)
@@ -358,7 +348,7 @@ func TestDifferentialHeap_WrapperCleanupQueueVerification(t *testing.T) {
 	t.Logf("Cleanup verification done: totalCycles=%d, HeapAlloc delta=%d bytes (%.1f KiB), RustLive delta=%d",
 		totalCycles, allocDelta, float64(allocDelta)/1024, rustDelta)
 
-	if rustDelta != 0 {
+	if !leakFree {
 		t.Errorf("Rust live bytes leaked after cleanup queue verification: delta=%d", rustDelta)
 		dumpHeapProfile(t)
 	}
