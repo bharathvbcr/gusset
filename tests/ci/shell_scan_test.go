@@ -60,6 +60,7 @@ func TestTeeRuleFlagsWhatARegexMissed(t *testing.T) {
 		{"echo with escaped quotes, then a pipe into tee", runStep("", `echo "say \"hi\" now" | tee out`)},
 		{"a quoted << is not a heredoc", runStep("", `echo "use cat <<EOF"`, "go test | tee out")},
 		{"an arithmetic << is not a heredoc", runStep("", "x=$((x<<y))", "go test | tee out")},
+		{"an uncalled one-line function sets pipefail (f is never called)", runStep("", "f() { set -o pipefail; }", "go test | tee out")},
 		{"set -- -o pipefail sets positional parameters", runStep("", "set -- -o pipefail", "go test | tee out")},
 		{"set +o pipefail last on a line", runStep("", "set -o pipefail; set +o pipefail", "go test | tee out")},
 	}
@@ -81,7 +82,7 @@ func TestTeeRuleKnownOverFlagging(t *testing.T) {
 		step []string
 	}{
 		{"a heredoc body is read as commands", runStep("", "cat <<EOF", "a | tee b", "EOF")},
-		{"set -o pipefail inside a one-line function", runStep("", "f() { set -o pipefail; }", "go test | tee out")},
+		{"a one-line function that sets pipefail is then called", runStep("", "f() { set -o pipefail; }; f", "go test | tee out")},
 		{"set -o pipefail inside a subshell paren", runStep("", "( set -o pipefail; go test | tee out )")},
 		{"a multi-line string is read line by line", runStep("", "printf '", "a | tee b", "'")},
 	}

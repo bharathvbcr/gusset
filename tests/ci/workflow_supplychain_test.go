@@ -193,51 +193,22 @@ func blankQuotes(l string) string {
 	return b.String()
 }
 
-// splitCommands cuts a logical line at `;`, `&&`, `||` and `)`, and at a single
-// `|` when pipes is set, but never inside a quoted string or after a backslash:
-// `-skip '^(BenchmarkX)$'` holds a `)` that ends nothing.
-func splitCommands(s string, pipes bool) []string {
-	var out []string
-	start := 0
-	cut := func(i, n int) {
-		out = append(out, s[start:i])
-		start = i + n
-	}
-	var quote byte
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case quote != 0:
-			if c == '\\' && quote == '"' {
-				i++
-			} else if c == quote {
-				quote = 0
-			}
-		case c == '\'' || c == '"':
-			quote = c
-		case c == '\\':
-			i++
-		case c == ';' || c == ')':
-			cut(i, 1)
-		case c == '&' && i+1 < len(s) && s[i+1] == '&':
-			cut(i, 2)
-			i++
-		case c == '|' && i+1 < len(s) && s[i+1] == '|':
-			cut(i, 2)
-			i++
-		case c == '|' && pipes:
-			cut(i, 1)
-		}
-	}
-	return append(out, s[start:])
-}
+var (
+	commandSplit  = regexp.MustCompile(`;|&&|\|\||\||\)`)
+	pipelineSplit = regexp.MustCompile(`;|&&|\|\||\)`)
+)
 
 // commandSegments splits a logical line at shell command separators, so
-// --locked has to appear in the same command as the cargo it governs.
+// --locked has to appear in the same command as the cargo it governs. It is
+// deliberately NOT quote-aware: the cargo rules must see each command inside a
+// quoted `sh -c "cargo build --locked && cargo test"`, which a quote-aware
+// split would keep as one string and so hide from them. The whole-package bench
+// rule needs the opposite and has its own segmenter (benchSegments in
+// benchmark_lists_test.go).
 // pipelineSegments does the same but keeps a pipeline (`a | b`, `a |& b`) whole,
 // for the rule that asks what a pipe feeds.
-func commandSegments(s string) []string  { return splitCommands(s, true) }
-func pipelineSegments(s string) []string { return splitCommands(s, false) }
+func commandSegments(s string) []string  { return commandSplit.Split(s, -1) }
+func pipelineSegments(s string) []string { return pipelineSplit.Split(s, -1) }
 
 // toolInstallViolations reports an unpinned tool install: @latest, or a cargo
 // install that is not both --locked and --version.

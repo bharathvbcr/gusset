@@ -371,6 +371,44 @@ func contains(list []string, s string) bool {
 // package, with no name pattern to leave one out.
 var wholeBenchRun = regexp.MustCompile(`(?:^|\s)-(?:test\.)?bench[= ]'?\.'?(?:\s|\)|$)`)
 
+// benchSegments cuts a logical line at `;`, `&&`, `||`, a single `|` and `)`,
+// but never inside a quoted string or after a backslash. The bench rule needs
+// this and the cargo rules need the opposite (see commandSegments, which is not
+// quote-aware so that it sees the commands inside `sh -c "..."`): the skip
+// pattern `-skip '^(BenchmarkHandleChurn)$'` holds a `)` that ends no command
+// and must stay whole. Two readers because the two rules ask different
+// questions of a quoted string.
+func benchSegments(s string) []string {
+	var out []string
+	start := 0
+	cut := func(i, n int) {
+		out = append(out, s[start:i])
+		start = i + n
+	}
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == '\\' && quote == '"' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '\\':
+			i++
+		case c == ';' || c == ')' || c == '|' && !(i+1 < len(s) && s[i+1] == '|'):
+			cut(i, 1)
+		case (c == '&' || c == '|') && i+1 < len(s) && s[i+1] == c:
+			cut(i, 2)
+			i++
+		}
+	}
+	return append(out, s[start:])
+}
+
 // wholePackageBenchViolations reports each whole-package benchmark run in lines
 // that does not name every manual-only benchmark of package bench in a
 // -skip/-test.skip argument. Package bench runs whole in the bench job and in
@@ -383,7 +421,7 @@ func wholePackageBenchViolations(name string, lines []string, manual []string) [
 	// must not let b's skip cover a. The split is quote-aware, because the skip
 	// pattern itself holds a `)`.
 	for _, ll := range logicalLines(lines) {
-		for _, seg := range commandSegments(ll.text) {
+		for _, seg := range benchSegments(ll.text) {
 			if !wholeBenchRun.MatchString(seg + " ") {
 				continue
 			}
