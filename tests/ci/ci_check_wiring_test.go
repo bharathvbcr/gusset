@@ -25,11 +25,14 @@ type runBlock struct {
 }
 
 var (
-	runKey      = regexp.MustCompile(`^(\s*)(- )?run:\s*(.*)$`)
-	shellKey    = regexp.MustCompile(`^\s*shell:\s*(.*)$`)
-	teePipe     = regexp.MustCompile(`(?:^|[^|])\|\s*(?:sudo\s+)?tee\b`)
+	runKey   = regexp.MustCompile(`^(\s*)(- )?run:\s*(.*)$`)
+	shellKey = regexp.MustCompile(`^\s*shell:\s*(.*)$`)
+	// `cmd | tee` and `cmd |& tee` (stderr into the pipe); `||` is not a pipe.
+	teePipe     = regexp.MustCompile(`(?:^|[^|])\|&?\s*(?:sudo\s+)?tee\b`)
 	setPipefail = regexp.MustCompile(`\bset\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*o\s+pipefail\b`)
-	shellOpt    = regexp.MustCompile(`-[A-Za-z]*o\s+pipefail\b`)
+	// `set +o pipefail` (or `set +eo pipefail`) turns it off again.
+	unsetPipefail = regexp.MustCompile(`\bset\s+(?:[-+][A-Za-z]+\s+)*\+[A-Za-z]*o\s+pipefail\b`)
+	shellOpt      = regexp.MustCompile(`-[A-Za-z]*o\s+pipefail\b`)
 )
 
 // runBlocks extracts every `run:` step body together with its step's `shell:`.
@@ -97,12 +100,13 @@ func stepShell(lines []string, i, keyCol int) string {
 func teeWithoutPipefailViolations(name string, lines []string) []string {
 	var out []string
 	for _, b := range runBlocks(lines) {
-		if shellOpt.MatchString(b.shell) {
-			continue
-		}
-		armed := false
+		// A `shell: bash -o pipefail {0}` step starts armed, but a later
+		// `set +o pipefail` in its script disarms it as much as in any other.
+		armed := shellOpt.MatchString(b.shell)
 		for _, ll := range logicalLines(b.body) {
-			if setPipefail.MatchString(ll.text) {
+			if unsetPipefail.MatchString(ll.text) {
+				armed = false
+			} else if setPipefail.MatchString(ll.text) {
 				armed = true
 			}
 			if teePipe.MatchString(ll.text) && !armed {
@@ -429,6 +433,11 @@ func TestPlantedCheckWiringViolationsAreCaught(t *testing.T) {
 		{"tee on a continuation line", teeWithoutPipefailViolations("x", step("", "go test \\", "  ./... | tee out.txt")), teeWithoutPipefailViolations("x", step("", "set -eo pipefail", "go test \\", "  ./... | tee out.txt"))},
 		{"single-line run", teeWithoutPipefailViolations("x", []string{"      - run: go test ./... | tee out.txt"}), teeWithoutPipefailViolations("x", []string{"      - shell: bash -o pipefail {0}", "        run: go test ./... | tee out.txt"})},
 		{"shell without pipefail", teeWithoutPipefailViolations("x", step("bash -e {0}", tee)), teeWithoutPipefailViolations("x", step("bash -o pipefail {0}", tee))},
+		{"stderr-merging pipe into tee", teeWithoutPipefailViolations("x", step("", "go test ./... |& tee out.txt")), teeWithoutPipefailViolations("x", step("", "set -o pipefail", "go test ./... |& tee out.txt"))},
+		{"|& tee on a continuation line", teeWithoutPipefailViolations("x", step("", "go test \\", "  ./... |& tee out.txt")), nil},
+		{"set +o pipefail before the tee", teeWithoutPipefailViolations("x", step("", "set -o pipefail", "set +o pipefail", tee)), teeWithoutPipefailViolations("x", step("", "set +o pipefail", "set -o pipefail", tee))},
+		{"set +eo pipefail before the tee", teeWithoutPipefailViolations("x", step("", "set -eo pipefail", "set +eo pipefail", tee)), nil},
+		{"set +o pipefail disarms a pipefail shell", teeWithoutPipefailViolations("x", step("bash -o pipefail {0}", "set +o pipefail", tee)), teeWithoutPipefailViolations("x", step("bash -o pipefail {0}", tee))},
 		{"an earlier step's pipefail does not carry over", teeWithoutPipefailViolations("x", append(step("", "set -o pipefail", "true"), step("", tee)...)), nil},
 		{"unlisted Fuzz target", fuzzSetViolations(map[string][]string{".": {"FuzzA", "FuzzB"}, "tests/pitfalls": {"FuzzP"}}, map[string][]string{"FUZZ_TARGETS": {"FuzzP"}, "FUZZ_TARGETS_ROOT": {"FuzzA"}}), fuzzSetViolations(map[string][]string{".": {"FuzzA"}, "tests/pitfalls": {"FuzzP"}}, map[string][]string{"FUZZ_TARGETS": {"FuzzP"}, "FUZZ_TARGETS_ROOT": {"FuzzA"}})},
 		{"renamed Fuzz target", fuzzSetViolations(map[string][]string{".": {"FuzzARenamed"}, "tests/pitfalls": {"FuzzP"}}, map[string][]string{"FUZZ_TARGETS": {"FuzzP"}, "FUZZ_TARGETS_ROOT": {"FuzzA"}}), nil},
@@ -448,6 +457,16 @@ func TestPlantedCheckWiringViolationsAreCaught(t *testing.T) {
 		if len(c.good) != 0 {
 			t.Errorf("%s: the compliant form was flagged: %v", c.name, c.good)
 		}
+	}
+}
+
+// `a || tee f` runs tee only when a fails; nothing is piped, so pipefail is moot.
+func TestOrTeeIsNotAPipe(t *testing.T) {
+	if teePipe.MatchString("false || tee out.txt") {
+		t.Error("`||` matched as a pipe into tee")
+	}
+	if !teePipe.MatchString("go test |& tee out.txt") || !teePipe.MatchString("go test | sudo tee out.txt") {
+		t.Error("`|&` or `| sudo tee` was not matched")
 	}
 }
 

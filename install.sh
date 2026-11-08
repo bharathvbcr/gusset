@@ -103,7 +103,7 @@ if [ -z "$SRC" ]; then
 			error "$REF resolves to $head, not the GUSSET_COMMIT $GUSSET_COMMIT; nothing was built"
 		fi
 	elif [ "$REF" = "$GUSSET_DEFAULT_REF" ] && [ "$head" != "$GUSSET_DEFAULT_COMMIT" ]; then
-		error "$REF resolves to $head, not the commit $GUSSET_DEFAULT_COMMIT this script was released with; the tag may have been moved. Nothing was built. Review $head and set GUSSET_COMMIT=$head to install it anyway"
+		error "$REF resolves to $head, not the commit $GUSSET_DEFAULT_COMMIT this script was released with; the tag may have been moved. This script cannot check its own tag, so if you fetched it from a release tag, fetch install.sh from main instead. Nothing was built. Review $head and set GUSSET_COMMIT=$head to install it anyway"
 	fi
 fi
 
