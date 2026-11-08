@@ -306,12 +306,8 @@ func TestGatedBenchmarksAreWhatTheJobRuns(t *testing.T) {
 		".":                {},
 		"internal/isolate": {},
 	}
-	for _, n := range jobEnvPattern(t, bench, "ROOT_BENCH") {
-		run["."] = append(run["."], n)
-	}
-	for _, n := range jobEnvPattern(t, bench, "ISOLATE_BENCH") {
-		run["internal/isolate"] = append(run["internal/isolate"], n)
-	}
+	run["."] = append(run["."], jobEnvPattern(t, bench, "ROOT_BENCH")...)
+	run["internal/isolate"] = append(run["internal/isolate"], jobEnvPattern(t, bench, "ISOLATE_BENCH")...)
 
 	gated := map[string]bool{}
 	for _, g := range gatedBenchmarks {
