@@ -328,18 +328,22 @@ func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 						record(cid, "waitbuffer", err)
 						return
 					}
-					// A successful WaitBuffer must hand back the 8192-byte echo. A nil
-					// or short result is recorded as an error outcome, which the test
-					// goroutine reports with t.Errorf; t.Fatal is not safe here and
-					// the message never indexes into the slice.
+					// A successful WaitBuffer hands back the 8192-byte echo, or a
+					// Buffer whose Bytes() is nil because Close ran first (Bytes
+					// documents that). Anything else is an error outcome, which the
+					// test goroutine reports with t.Errorf; t.Fatal is not safe
+					// here and the message never indexes the slice.
 					if outBuf == nil {
 						record(cid, "waitbuffer-nil", errors.New("WaitBuffer returned a nil Buffer and a nil error"))
 						return
 					}
-					got := outBuf.Bytes()
-					if err := closeRaceEchoError(got); err != nil {
-						record(cid, "waitbuffer-bad-echo", err)
-					} else {
+					closed, echoErr := closeRaceEchoVerdict(outBuf.Bytes())
+					switch {
+					case echoErr != nil:
+						record(cid, "waitbuffer-bad-echo", echoErr)
+					case closed:
+						record(cid, "waitbuffer-closed", nil)
+					default:
 						record(cid, "waitbuffer", nil)
 					}
 					record(cid, "outbuf-free", outBuf.Free())
@@ -819,7 +823,11 @@ func TestTier5_Adversarial_ConcurrentGarbageCollectionStress(t *testing.T) {
 				if i%10 == 0 {
 					res, err := h.Call(ctx, []byte{0, byte(gid), byte(i)})
 					if err == nil {
-						assertBytesEqual(t, res, []byte{0, byte(gid), byte(i)}, "gc stress echo")
+						// A goroutine must not t.Fatal (assertBytesEqual does).
+						if want := []byte{0, byte(gid), byte(i)}; !bytes.Equal(res, want) {
+							t.Errorf("goroutine %d: gc stress echo mismatch: len(got)=%d, len(want)=%d", gid, len(res), len(want))
+							return
+						}
 					}
 				}
 			}
@@ -917,45 +925,50 @@ func TestTier5_Adversarial_MassiveConcurrentWorkersAndOpcodeRouting(t *testing.T
 	assertBytesEqual(t, res, []byte{0, 0x42}, "settle echo")
 }
 
-// closeRaceEchoError reports why got is not the 8192-byte zero-led echo that
-// mode 0 returns for an 8192-byte input buffer, or nil when it is. A nil slice
-// is a failure like any other wrong result.
-func closeRaceEchoError(got []byte) error {
+// closeRaceEchoVerdict judges the bytes of a Buffer that WaitBuffer returned
+// successfully, for an 8192-byte mode 0 echo. A nil slice is the legitimate
+// closed outcome (Buffer.Bytes is nil once the handle is closed), reported as
+// closed with no error. A non-nil slice must be the full zero-led echo: an
+// empty, short, long or wrong-first-byte slice is an error.
+func closeRaceEchoVerdict(got []byte) (closed bool, err error) {
 	switch {
 	case got == nil:
-		return errors.New("WaitBuffer succeeded with a nil buffer, want the 8192-byte echo")
+		return true, nil
 	case len(got) != 8192:
-		return fmt.Errorf("buffer echo has len %d, want 8192", len(got))
+		return false, fmt.Errorf("buffer echo has len %d, want 8192", len(got))
 	case got[0] != 0:
-		return fmt.Errorf("buffer echo first byte is %d, want 0", got[0])
+		return false, fmt.Errorf("buffer echo first byte is %d, want 0", got[0])
 	}
-	return nil
+	return false, nil
 }
 
-// TestCloseRaceEchoError pins the verdicts the in-goroutine echo check gives,
-// including the two that used to slip through: a nil buffer was accepted as an
-// echo, and a non-nil empty one made the failure message index got[0] and
-// panic inside a goroutine.
-func TestCloseRaceEchoError(t *testing.T) {
+// TestCloseRaceEchoVerdict pins the verdicts the in-goroutine echo check
+// gives: the closed outcome (nil Bytes) is valid, and a non-nil empty slice
+// must fail instead of panicking on an index in a goroutine, as the old
+// message did.
+func TestCloseRaceEchoVerdict(t *testing.T) {
 	good := make([]byte, 8192)
 	badFirst := make([]byte, 8192)
 	badFirst[0] = 7
 	cases := []struct {
-		name string
-		got  []byte
-		ok   bool
+		name       string
+		got        []byte
+		wantClosed bool
+		wantErr    bool
 	}{
-		{"the full zero-led echo", good, true},
-		{"nil is not an echo", nil, false},
-		{"empty non-nil must fail, not panic", []byte{}, false},
-		{"short", make([]byte, 100), false},
-		{"long", make([]byte, 8193), false},
-		{"wrong first byte", badFirst, false},
+		{"the full zero-led echo", good, false, false},
+		{"nil Bytes is the closed outcome", nil, true, false},
+		{"empty non-nil must fail, not panic", []byte{}, false, true},
+		{"short", make([]byte, 100), false, true},
+		{"long", make([]byte, 8193), false, true},
+		{"wrong first byte", badFirst, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := closeRaceEchoError(tc.got); (err == nil) != tc.ok {
-				t.Fatalf("closeRaceEchoError(len %d, nil=%v) = %v, want ok=%v", len(tc.got), tc.got == nil, err, tc.ok)
+			closed, err := closeRaceEchoVerdict(tc.got)
+			if closed != tc.wantClosed || (err != nil) != tc.wantErr {
+				t.Fatalf("closeRaceEchoVerdict(len %d, nil=%v) = (%v, %v), want closed=%v err=%v",
+					len(tc.got), tc.got == nil, closed, err, tc.wantClosed, tc.wantErr)
 			}
 		})
 	}
