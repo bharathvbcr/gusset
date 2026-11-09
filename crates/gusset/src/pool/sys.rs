@@ -672,6 +672,42 @@ mod tests {
         assert!(outcome, "the guard's drop clobbered a foreign sigaltstack");
     }
 
+    /// How many pages of `[base, base + len)` are mapped, asked one page at a
+    /// time with `msync(MS_ASYNC)`, which fails with ENOMEM for an unmapped
+    /// page and otherwise schedules nothing for private anonymous memory. One
+    /// call over the whole range would answer ENOMEM if ANY page were
+    /// unmapped, so a drop that unmapped only part of the range would pass.
+    ///
+    /// The test used to ask `mprotect(PROT_NONE)`, which on a range another
+    /// test's `mmap` had reused in the meantime (tests run in parallel and map
+    /// alt stacks of this very size) disabled that worker's live signal stack.
+    /// `mincore(2)` was the first candidate, but on macOS it returns 0 for an
+    /// unmapped range, so it cannot answer this. The check stays a snapshot,
+    /// and it has the old probe's race: if a parallel test's `mmap` reuses a
+    /// page of the hole between the drop and the probe, that page reads as
+    /// mapped and the test fails falsely. The window is microseconds wide, and
+    /// unlike the `mprotect` probe the check itself damages nothing.
+    fn mapped_pages(base: *mut libc::c_void, len: usize) -> usize {
+        // SAFETY: sysconf has no preconditions.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        assert!(
+            page > 0 && len.is_multiple_of(page),
+            "range is not whole pages"
+        );
+        (0..len / page)
+            .filter(|&i| {
+                // SAFETY: msync(MS_ASYNC) does not access the page.
+                let rc = unsafe { libc::msync(base.byte_add(i * page), page, libc::MS_ASYNC) };
+                if rc == 0 {
+                    return true;
+                }
+                let errno = std::io::Error::last_os_error().raw_os_error();
+                assert_eq!(errno, Some(libc::ENOMEM), "msync failed for another reason");
+                false
+            })
+            .count()
+    }
+
     /// The ordinary path still disables and unmaps what it installed.
     #[test]
     #[cfg_attr(miri, ignore)] // sigaltstack(2) and mmap: not Miri-runnable
@@ -679,20 +715,27 @@ mod tests {
         let result = std::thread::spawn(|| {
             let guard = install_or_panic();
             let (base, len) = (guard.map_base, guard.map_len);
+            // The probe must see every page of the live mapping, or "unmapped"
+            // below proves nothing.
+            let live_pages = mapped_pages(base, len);
             drop(guard);
             let cur = current_altstack();
-            // mprotect fails with ENOMEM on an unmapped range, and on a
-            // mapped one only changes protections of a mapping nobody uses.
-            // SAFETY: the range is never accessed.
-            let probe = unsafe { libc::mprotect(base, len, libc::PROT_NONE) };
-            (cur.ss_flags & libc::SS_DISABLE != 0, probe != 0)
+            (
+                live_pages,
+                cur.ss_flags & libc::SS_DISABLE != 0,
+                mapped_pages(base, len),
+            )
         })
         .join();
-        let Ok((disabled, unmapped)) = result else {
+        let Ok((live_pages, disabled, pages_left)) = result else {
             panic!("the sigaltstack thread panicked");
         };
+        assert!(live_pages > 0, "the probe cannot see a live mapping");
         assert!(disabled, "our stack was left installed");
-        assert!(unmapped, "our mapping was leaked on the normal path");
+        assert_eq!(
+            pages_left, 0,
+            "{pages_left} of {live_pages} pages of our mapping were leaked on the normal path"
+        );
     }
 
     #[test]

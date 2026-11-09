@@ -166,6 +166,13 @@ func quiescedFDs(t *testing.T, readFDs func() int) int {
 // a GC (livebytes.Settle): every test here frees its buffers explicitly, and
 // settleResourceSample's runtime.GC loop would let the AddCleanup backstop
 // hide a missing free. The settled reading replaces final.rustLive.
+//
+// A real Rust-bytes leak is slow to report: Settle polls the full 30 s
+// without a GC, then settleResourceSample runs its GC loop for up to timeout
+// (15 s in the callers; it stops early if the AddCleanup backstop reclaims the
+// bytes, but the Settle reading is what the test compares). A failure here can
+// therefore arrive about 45 s after the test body finished. That wait is the
+// deadline of a gauge that never reached the baseline, not a hang.
 func settleResourceSampleAfterFree(base resourceSample, timeout time.Duration) resourceSample {
 	live, _ := livebytes.Settle(base.rustLive)
 	final := settleResourceSample(base, timeout)

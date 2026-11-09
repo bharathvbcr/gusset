@@ -1128,6 +1128,11 @@ mod log_reentry_tests {
 
     #[test]
     fn logging_while_holding_the_ring_drops_instead_of_deadlocking() {
+        // The dropped-lines counter is process-wide and the overflow test below
+        // moves it too, so the exact `before + 1` needs the same lock.
+        let _serial = super::LOG_RING_DRAIN_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let held = match lock_log_ring() {
             Some(g) => g,
             None => panic!("the ring was already held by this thread"),
@@ -1147,7 +1152,14 @@ mod log_reentry_tests {
     /// stays inside its budget with the note and the line both present.
     #[test]
     fn dropped_lines_are_reported_by_a_note_after_the_ring_overflows() {
-        use super::{LOG_BUFFER, LOG_RING_CAPACITY};
+        use super::{LOG_BUFFER, LOG_RING_CAPACITY, LOG_RING_DRAIN_LOCK};
+
+        // Writes about twice the ring and then reads it back whole: a drain in
+        // another test (they take this lock) would empty it in between, and
+        // the filler would overflow the ring under that test's own line.
+        let _serial = LOG_RING_DRAIN_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         for i in 0..(2 * LOG_RING_CAPACITY / 32) {
             log_event(&format!("overflow filler line number {i:08}"));
@@ -1660,9 +1672,11 @@ mod argument_refusal_tests {
 }
 
 /// Held by every unit test that logs a line and then drains the process-wide
-/// log ring to find it. Draining consumes, and tests in this binary run in
-/// parallel, so without it one test's drain can take another's line between
-/// that test's log and its own drain.
+/// log ring to find it, and by every one that reads or overflows the ring or
+/// the dropped-lines counter (`log_reentry_tests`). Draining consumes, and
+/// tests in this binary run in parallel, so without it one test's drain can
+/// take another's line between that test's log and its own drain, and the
+/// overflow test's filler can evict it.
 #[cfg(test)]
 pub(crate) static LOG_RING_DRAIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

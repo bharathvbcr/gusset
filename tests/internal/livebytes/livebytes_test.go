@@ -47,6 +47,18 @@ func TestQuiesceWaitsForTheGaugeToStopMoving(t *testing.T) {
 	}
 }
 
+// TestQuiesceNeedsMoreThanTwoMatchingReadings is the strengthening's proof: a
+// gauge that pauses at 700 for one gap and then drops to 650 was accepted at
+// 700 by the old two-reading rule, and a baseline of 700 would have let a
+// 50-byte leak hide under the late reclaim.
+func TestQuiesceNeedsMoreThanTwoMatchingReadings(t *testing.T) {
+	g, _ := scripted(900, 700, 700, 650, 650, 650)
+	live, ok := g.quiesce()
+	if !ok || live != 650 {
+		t.Fatalf("quiesce = (%d, %v), want (650, true): a pause of one gap is not quiescence", live, ok)
+	}
+}
+
 func TestQuiesceGivesUpOnAGaugeThatNeverSettles(t *testing.T) {
 	var n uint64
 	g := gauge{

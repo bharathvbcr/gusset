@@ -267,6 +267,11 @@ func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 		const numCallers = 16
 		var wg sync.WaitGroup
 		startGate := make(chan struct{})
+		// closeStarted is set before any Close call begins. Buffer.Bytes is nil
+		// because the handle closed only after Close has started, so a caller
+		// that sees nil Bytes with this still false has a zero-length or lost
+		// buffer, not a closed handle.
+		var closeStarted atomic.Bool
 		var mu sync.Mutex
 		var outcomes []closeRaceOutcome
 		record := func(cid int, op string, err error) {
@@ -315,7 +320,7 @@ func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 						return
 					}
 					defer func() { record(cid, "buffer-free", buf.Free()) }()
-					if data := buf.Bytes(); data != nil {
+					if data := buf.Bytes(); len(data) > 0 {
 						data[0] = 0
 					}
 					ticket, err := h.Submit(ctx, buf)
@@ -328,9 +333,28 @@ func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 						record(cid, "waitbuffer", err)
 						return
 					}
-					if got := outBuf.Bytes(); got != nil && (len(got) != 8192 || got[0] != 0) {
-						record(cid, "waitbuffer-bad-echo", fmt.Errorf("buffer echo has len %d first byte %d, want 8192 and 0", len(got), got[0]))
-					} else {
+					// A successful WaitBuffer hands back the 8192-byte echo, or a
+					// Buffer whose Bytes() is nil because Close ran first (Bytes
+					// documents that). Anything else is an error outcome, which the
+					// test goroutine reports with t.Errorf; t.Fatal is not safe
+					// here and the message never indexes the slice.
+					if outBuf == nil {
+						record(cid, "waitbuffer-nil", errors.New("WaitBuffer returned a nil Buffer and a nil error"))
+						return
+					}
+					// Read Bytes before the flag: a nil from a closed handle
+					// means Close had already started, so the flag is then
+					// true. Read the other way round, a Close starting
+					// between the two would turn a closed result into an error.
+					got := outBuf.Bytes()
+					started := closeStarted.Load()
+					closed, echoErr := closeRaceEchoVerdict(got, started)
+					switch {
+					case echoErr != nil:
+						record(cid, "waitbuffer-bad-echo", echoErr)
+					case closed:
+						record(cid, "waitbuffer-closed", nil)
+					default:
 						record(cid, "waitbuffer", nil)
 					}
 					record(cid, "outbuf-free", outBuf.Free())
@@ -357,6 +381,7 @@ func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 		for i := range closeErrs {
 			go func() {
 				defer closeWg.Done()
+				closeStarted.Store(true)
 				closeErrs[i] = h.Close()
 			}()
 		}
@@ -545,6 +570,10 @@ func TestTier5_Adversarial_PanicFirewall_DeepStressAndDropBombs(t *testing.T) {
 						return
 					}
 					t.Errorf("sibling lane %d failed: %v", sid, err)
+					return
+				}
+				if len(res) != 8 {
+					t.Errorf("sibling lane %d: sum-of-squares result has %d bytes, want 8", sid, len(res))
 					return
 				}
 				got := binary.LittleEndian.Uint64(res)
@@ -793,7 +822,7 @@ func TestTier5_Adversarial_ConcurrentGarbageCollectionStress(t *testing.T) {
 					return
 				}
 				data := buf.Bytes()
-				if data != nil {
+				if len(data) > 0 {
 					data[0] = 0
 					data[len(data)-1] = byte(gid + i)
 				}
@@ -810,7 +839,11 @@ func TestTier5_Adversarial_ConcurrentGarbageCollectionStress(t *testing.T) {
 				if i%10 == 0 {
 					res, err := h.Call(ctx, []byte{0, byte(gid), byte(i)})
 					if err == nil {
-						assertBytesEqual(t, res, []byte{0, byte(gid), byte(i)}, "gc stress echo")
+						// A goroutine must not t.Fatal (assertBytesEqual does).
+						if want := []byte{0, byte(gid), byte(i)}; !bytes.Equal(res, want) {
+							t.Errorf("goroutine %d: gc stress echo mismatch: len(got)=%d, len(want)=%d", gid, len(res), len(want))
+							return
+						}
 					}
 				}
 			}
@@ -886,6 +919,10 @@ func TestTier5_Adversarial_MassiveConcurrentWorkersAndOpcodeRouting(t *testing.T
 						t.Errorf("worker %d: valid call failed: %v", wid, err)
 						return
 					}
+					if len(res) != 8 {
+						t.Errorf("worker %d: sum-of-squares result has %d bytes, want 8", wid, len(res))
+						return
+					}
 					got := binary.LittleEndian.Uint64(res)
 					want := computeVectorSumSquaresOracle(data)
 					if got != want {
@@ -906,4 +943,61 @@ func TestTier5_Adversarial_MassiveConcurrentWorkersAndOpcodeRouting(t *testing.T
 	res, err := h.Call(ctx, []byte{0, 0x42})
 	requireNoError(t, err, "settle call")
 	assertBytesEqual(t, res, []byte{0, 0x42}, "settle echo")
+}
+
+// closeRaceEchoVerdict judges the bytes of a Buffer that WaitBuffer returned
+// successfully, for an 8192-byte mode 0 echo. closeStarted says whether a Close
+// call had begun before Bytes was read (the test sets it before calling Close).
+// Buffer.Bytes is nil once the handle is closed, so a nil slice is the
+// legitimate closed outcome only when closeStarted is true, and is reported as
+// closed with no error; with the handle still open a nil slice is a zero-length
+// or lost result and an error. A non-nil slice must be the full zero-led echo:
+// an empty, short, long or wrong-first-byte slice is an error.
+func closeRaceEchoVerdict(got []byte, closeStarted bool) (closed bool, err error) {
+	switch {
+	case got == nil && closeStarted:
+		return true, nil
+	case got == nil:
+		return false, errors.New("WaitBuffer succeeded with nil Bytes while the handle was still open, want the 8192-byte echo")
+	case len(got) != 8192:
+		return false, fmt.Errorf("buffer echo has len %d, want 8192", len(got))
+	case got[0] != 0:
+		return false, fmt.Errorf("buffer echo first byte is %d, want 0", got[0])
+	}
+	return false, nil
+}
+
+// TestCloseRaceEchoVerdict pins the verdicts the in-goroutine echo check
+// gives: nil Bytes is the closed outcome only once Close has started, and a
+// non-nil empty slice must fail instead of panicking on an index in a
+// goroutine, as the old message did.
+func TestCloseRaceEchoVerdict(t *testing.T) {
+	good := make([]byte, 8192)
+	badFirst := make([]byte, 8192)
+	badFirst[0] = 7
+	cases := []struct {
+		name         string
+		got          []byte
+		closeStarted bool
+		wantClosed   bool
+		wantErr      bool
+	}{
+		{"the full zero-led echo", good, false, false, false},
+		{"the full echo after Close started", good, true, false, false},
+		{"nil Bytes after Close started is the closed outcome", nil, true, true, false},
+		{"nil Bytes while the handle is open fails", nil, false, false, true},
+		{"empty non-nil must fail, not panic", []byte{}, true, false, true},
+		{"short", make([]byte, 100), false, false, true},
+		{"long", make([]byte, 8193), false, false, true},
+		{"wrong first byte", badFirst, false, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			closed, err := closeRaceEchoVerdict(tc.got, tc.closeStarted)
+			if closed != tc.wantClosed || (err != nil) != tc.wantErr {
+				t.Fatalf("closeRaceEchoVerdict(len %d, nil=%v, started=%v) = (%v, %v), want closed=%v err=%v",
+					len(tc.got), tc.got == nil, tc.closeStarted, closed, err, tc.wantClosed, tc.wantErr)
+			}
+		})
+	}
 }
