@@ -98,6 +98,9 @@ type Supervisor struct {
 	cancel  context.CancelFunc
 	factory Factory
 	policy  Policy
+	// now is the restart window's clock: time.Now, except in a test that must
+	// slide the window without sleeping. Set before first use, never after.
+	now func() time.Time
 
 	mu            sync.Mutex
 	live          *generation
@@ -177,6 +180,7 @@ func Supervise(ctx context.Context, factory Factory, policy Policy) (*Supervisor
 		cancel:  cancel,
 		factory: factory,
 		policy:  policy,
+		now:     time.Now,
 		next:    1,
 		tickets: make(map[uint64]supTicket),
 		kept:    make(map[*generation]struct{}),
@@ -494,7 +498,7 @@ func (s *Supervisor) ensure(ctx context.Context) (*generation, error) {
 				return nil, ctx.Err()
 			}
 		}
-		now := time.Now()
+		now := s.now()
 		if s.everAttempted && !s.prepaid && s.inWindowLocked(now) >= s.policy.MaxRestarts {
 			err := budgetExhausted(s.policy)
 			s.mu.Unlock()
@@ -593,7 +597,7 @@ func (s *Supervisor) finishStart(att *startAttempt, g *generation, err error, sp
 		s.attempt = nil
 	}
 	if spend && !att.prepaid && err != nil && !s.stop && s.ctx.Err() == nil {
-		s.noteRestartLocked(time.Now())
+		s.noteRestartLocked(s.now())
 	}
 	if g != nil {
 		att.g = g
@@ -686,7 +690,7 @@ func (s *Supervisor) retire(g *generation, cause string) {
 	if s.live == g {
 		s.live = nil
 	}
-	now := time.Now()
+	now := s.now()
 	projected := s.inWindowLocked(now) + 1
 	s.noteRestartLocked(now)
 	left := s.policy.MaxRestarts - projected
@@ -723,7 +727,7 @@ func (s *Supervisor) retire(g *generation, cause string) {
 	s.mu.Unlock()
 }
 
-// inWindowLocked counts restart events whose time.Now values are still inside
+// inWindowLocked counts restart events whose s.now values are still inside
 // the policy window. Subtraction uses the monotonic clock both timestamps
 // carry.
 func (s *Supervisor) inWindowLocked(now time.Time) int {

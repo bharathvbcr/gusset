@@ -39,6 +39,17 @@ const countFileEnv = "GUSSET_ISOLATE_COUNT_FILE"
 // it; the retirement and Close tests read the pid and poll for its exit.
 const forkSleepEnv = "GUSSET_ISOLATE_FORK_SLEEP"
 
+// gateFileEnv, when set on a worker, is a file whose existence releases every
+// opSlow job: faulty.Submit holds such a job until the file appears. A test
+// that needs a worker to be slow, and then to answer, writes the file at the
+// moment it wants the answers, so nothing depends on how long its own steps
+// took.
+const gateFileEnv = "GUSSET_ISOLATE_GATE_FILE"
+
+// opSlow is the diagnostic engine's opcode that works for payload[1]*10 ms
+// without polling its deadline.
+const opSlow = 9
+
 const workerPool = 2
 
 // Fault bytes: the worker's own process dies the way an uncatchable fault
@@ -305,6 +316,17 @@ func (f faulty) Submit(ctx context.Context, in any) (uint64, error) {
 	}
 	if b, ok := in.([]byte); ok {
 		noteSubmit(b)
+		if path := os.Getenv(gateFileEnv); path != "" && len(b) > 0 && b[0] == opSlow {
+			// Each job runs on its own goroutine in Serve, so holding this one
+			// stops nothing else. It does not poll ctx: a cancelled job still
+			// waits, like a worker that is slow rather than gone.
+			for {
+				if _, err := os.Stat(path); err == nil {
+					break
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+		}
 	}
 	if b, ok := in.([]byte); ok && len(b) > 0 {
 		switch b[0] {

@@ -158,6 +158,20 @@ type Proc struct {
 	// close. A second Close on an *os.File errors and does not close the
 	// descriptor twice; Once also keeps those two paths from racing.
 	stdinOnce sync.Once
+
+	// killGate is a test seam: when set, killIfAlive runs it before it looks at
+	// whether the worker has exited. It lets a test hold the reader until
+	// waitProc has reaped the leader, the order in which killIfAlive skips the
+	// kill and the group is left to whoever else kills it. Nil outside tests;
+	// atomic because the reader is already running when a test sets it.
+	killGate atomic.Pointer[func()]
+
+	// sendFailGate is a test seam: submitCounted runs it after a failed send
+	// has released its ticket and permit, before it decides what to return. It
+	// lets a test make the reader finish at that point, the order in which the
+	// caller's deadline and the worker's exit are both ready. Nil outside
+	// tests; atomic for the same reason as killGate.
+	sendFailGate atomic.Pointer[func()]
 }
 
 // Start runs cmd as a worker. cmd must run Serve reading its stdin and
@@ -384,6 +398,9 @@ func (p *Proc) exited() bool {
 // failed. A worker that has already exited is reaped by waitProc; Kill here
 // would only race that Wait.
 func (p *Proc) killIfAlive() {
+	if gate := p.killGate.Load(); gate != nil {
+		(*gate)()
+	}
 	if !p.exited() {
 		p.killTree()
 	}
@@ -438,9 +455,13 @@ func killTree(cmd *exec.Cmd, pgid int) {
 	}
 }
 
-// killTree is the supervisor's and Close's kill. It is safe after the leader
-// has exited: the group may still hold descendants, and a group with members
-// keeps its id from being reused.
+// killTree is the supervisor's and Close's kill. After the leader has exited
+// the group may still hold descendants, and that is what the group signal is
+// for. A group keeps its id from being reused only while it has members: once
+// the leader is reaped and the group is empty, the number is free, and a signal
+// sent then could reach an unrelated group given the same id (DECISIONS
+// 2026-11-07 and 2026-11-08). Callers therefore signal soon after the exit and
+// never hold a group id for later.
 func (p *Proc) killTree() {
 	killTree(p.cmd, p.pgid)
 }
@@ -621,12 +642,24 @@ func (p *Proc) submitCounted(ctx context.Context, in []byte) (id uint64, unsent 
 			<-p.sem
 		}
 		p.mu.Unlock()
+		if gate := p.sendFailGate.Load(); gate != nil {
+			(*gate)()
+		}
 		// The caller's deadline is the answer when the write itself could not
 		// finish in time, whether or not the reader has latched the worker.
 		// A write that did not fail that way still waits for the reader: the
 		// refusal carries the worker's exit, which is the caller's error.
-		if ctx.Err() != nil {
-			return 0, false, ctx.Err()
+		// writeLocked reports the first case as context.DeadlineExceeded
+		// even when the context's own timer has not run yet (ctx.Err() is
+		// still nil): the write deadline is the context's deadline, and the
+		// two fire together. That is honoured here, not left to the select
+		// below, which would pick the reader's exit about as often as the
+		// deadline when both are ready.
+		if cerr := ctx.Err(); cerr != nil {
+			return 0, false, cerr
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return 0, false, err
 		}
 		select {
 		case <-p.readerDone:
@@ -984,7 +1017,10 @@ func (p *Proc) close(budget time.Duration) error {
 	select {
 	case <-p.readerDone:
 	case <-timer.C:
-		_ = p.cmd.Process.Kill()
+		// The group, not only the worker: the reader's killIfAlive skips a
+		// worker that waitProc has already reaped, so a helper the worker
+		// spawned would outlive this Close if the kill here left it alone.
+		p.killTree()
 		_ = p.rd.Close()
 		<-p.readerDone
 		p.closeErr = fmt.Errorf("isolate: worker did not exit within %v of Close and was killed", budget)
