@@ -192,6 +192,49 @@ func newFuzzTicketReader(r *os.File, rawConn bool) *ticketReader {
 
 const readerWatchdog = 10 * time.Second
 
+const (
+	// stackDumpStart is the first buffer size for a stall's goroutine dump.
+	stackDumpStart = 1 << 20
+	// stackDumpMax bounds how far the buffer grows before the dump is cut.
+	stackDumpMax = 16 << 20
+)
+
+// stacksThenUnblock returns every goroutine's stack, then calls unblock with
+// the captured dump so the abandoned reader goroutine can exit. The order
+// matters: a reader parked in a pipe read leaves the dump the moment its
+// deadline lands, and the report then shows no reader at all. The arm64 stall
+// of run 42536723333 printed no reader goroutine, which fits this order
+// (inferred; the run predates the fix). unblock receives the dump so a test
+// can check, deterministically, that the reader was captured before it ran.
+//
+// The buffer grows from stackDumpStart up to maxBytes; a dump still cut at
+// maxBytes ends with a marker saying so, never silently.
+func stacksThenUnblock(maxBytes int, unblock func(dump []byte)) []byte {
+	size := min(stackDumpStart, maxBytes)
+	var stacks []byte
+	for {
+		buf := make([]byte, size)
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			stacks = buf[:n]
+			break
+		}
+		if size >= maxBytes {
+			stacks = append(buf[:n:n], fmt.Sprintf("\n[stack dump truncated at %d bytes]\n", maxBytes)...)
+			break
+		}
+		size = min(size*2, maxBytes)
+	}
+	unblock(stacks)
+	return stacks
+}
+
+// unblockReader returns the unblock step for stacksThenUnblock: a read
+// deadline that releases a reader parked on r.
+func unblockReader(r *os.File) func([]byte) {
+	return func([]byte) { _ = r.SetReadDeadline(time.Now()) }
+}
+
 // drainReader calls next until it errors, copying each result out (the data
 // aliases the reader's buffer). It fails the test if next stops making
 // progress for readerWatchdog.
@@ -246,10 +289,8 @@ func drainReader(t *testing.T, tr *ticketReader, r *os.File, between func(int)) 
 			}
 			got = append(got, s.rec)
 		case <-time.After(readerWatchdog):
-			_ = r.SetReadDeadline(time.Now())
-			buf := make([]byte, 1<<20)
 			t.Fatalf("ticketReader made no progress for %v after %d records (livelock or lost wake-up)\n%s",
-				readerWatchdog, len(got), buf[:runtime.Stack(buf, true)])
+				readerWatchdog, len(got), stacksThenUnblock(stackDumpMax, unblockReader(r)))
 			return nil, nil
 		}
 	}
@@ -553,13 +594,24 @@ func ringStallState(tr *ticketReader, want map[uint64][]byte) string {
 		fmt.Fprintf(&b, "  slot %d: sequence %d\n", i, seq)
 	}
 	headSeq := atomic.LoadUint64((*uint64)(tr.ringSlot()))
-	fmt.Fprintf(&b, "reader: head %d (slot %d, sequence %d, published %t), overflowSeen %d, tokensOwed %d, buffered %d bytes\n",
-		tr.head, tr.head&tr.mask, headSeq, headSeq == tr.head+1, tr.overflowSeen, tr.tokensOwed, tr.end-tr.start)
+	// start and end are written by a reader that may still be running (fillMode
+	// does end -= start, then start = 0), so read each once and never slice
+	// with a pair that cannot be a window of buf: a panic here would replace
+	// the whole report in the one case, a spinning reader, it exists for.
+	start, end := tr.start, tr.end
+	buffered, bufferedHex := "inconsistent", fmt.Sprintf("<inconsistent start=%d end=%d len=%d: reader not parked>", start, end, len(tr.buf))
+	if 0 <= start && start <= end && end <= len(tr.buf) {
+		buffered, bufferedHex = fmt.Sprintf("%d", end-start), fmt.Sprintf("%x", tr.buf[start:end])
+	}
+	fmt.Fprintf(&b, "reader: head %d (slot %d, sequence %d, published %t), overflowSeen %d, tokensOwed %d, buffered %s bytes\n",
+		tr.head, tr.head&tr.mask, headSeq, headSeq == tr.head+1, tr.overflowSeen, tr.tokensOwed, buffered)
 	owed := make([]uint64, 0, len(want))
 	for tk := range want {
 		owed = append(owed, tk)
 	}
 	slices.Sort(owed)
+	fmt.Fprintf(&b, "buffered bytes: %s\n", bufferedHex)
+	fmt.Fprintf(&b, "pipe: %s\n", pipeQueued(tr.f))
 	fmt.Fprintf(&b, "outstanding tickets: %v", owed)
 	return b.String()
 }
@@ -568,6 +620,12 @@ func ringStallState(tr *ticketReader, want map[uint64][]byte) string {
 // ring against this parser. Pool 1, ring capacity 2: completions beyond two
 // unread spill to the pipe, so both paths carry Rust-built records. Payloads
 // above InlineResultMax come back as bare tickets and are collected with Take.
+//
+// testdata/fuzz/FuzzTicketReaderRustRing/f8d18aa69ece7551 is the input the
+// ubuntu-24.04-arm stall of run 42536723333 was saved under. It passes in
+// about 0.00 s and is NOT a regression pin: it is kept as a fuzz seed and as
+// evidence of the arm stall's input, nothing more (b768b3b084485aa8, from the
+// 11-02 nightly, is the same kind of file).
 func FuzzTicketReaderRustRing(f *testing.F) {
 	f.Add([]byte{0, 1, 47, 48, 49, 200})
 	f.Add([]byte{48, 48, 48, 48, 48})
@@ -599,10 +657,8 @@ func FuzzTicketReaderRustRing(f *testing.F) {
 			case got = <-ch:
 			case <-time.After(readerWatchdog):
 				state := ringStallState(tr, want)
-				_ = r.SetReadDeadline(time.Now())
-				buf := make([]byte, 1<<20)
 				t.Fatalf("reader stalled with %d completions outstanding\n%s\n%s",
-					len(want), state, buf[:runtime.Stack(buf, true)])
+					len(want), state, stacksThenUnblock(stackDumpMax, unblockReader(r)))
 			}
 			if got.err != nil {
 				t.Fatalf("next: %v", got.err)
