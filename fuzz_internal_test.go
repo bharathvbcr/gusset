@@ -192,6 +192,19 @@ func newFuzzTicketReader(r *os.File, rawConn bool) *ticketReader {
 
 const readerWatchdog = 10 * time.Second
 
+// stacksThenUnblock returns every goroutine's stack and only then sets a read
+// deadline on r so the abandoned reader goroutine can exit. The order matters:
+// a reader parked in a pipe read leaves the dump the moment the deadline
+// lands, and the report then shows no reader at all. The arm64 stall of run
+// 42536723333 printed no reader goroutine, which fits this order (inferred;
+// the run predates the fix).
+func stacksThenUnblock(r *os.File) []byte {
+	buf := make([]byte, 1<<20)
+	stacks := buf[:runtime.Stack(buf, true)]
+	_ = r.SetReadDeadline(time.Now())
+	return stacks
+}
+
 // drainReader calls next until it errors, copying each result out (the data
 // aliases the reader's buffer). It fails the test if next stops making
 // progress for readerWatchdog.
@@ -246,10 +259,8 @@ func drainReader(t *testing.T, tr *ticketReader, r *os.File, between func(int)) 
 			}
 			got = append(got, s.rec)
 		case <-time.After(readerWatchdog):
-			_ = r.SetReadDeadline(time.Now())
-			buf := make([]byte, 1<<20)
 			t.Fatalf("ticketReader made no progress for %v after %d records (livelock or lost wake-up)\n%s",
-				readerWatchdog, len(got), buf[:runtime.Stack(buf, true)])
+				readerWatchdog, len(got), stacksThenUnblock(r))
 			return nil, nil
 		}
 	}
@@ -560,6 +571,8 @@ func ringStallState(tr *ticketReader, want map[uint64][]byte) string {
 		owed = append(owed, tk)
 	}
 	slices.Sort(owed)
+	fmt.Fprintf(&b, "buffered bytes: %x\n", tr.buf[tr.start:tr.end])
+	fmt.Fprintf(&b, "pipe: %s\n", pipeQueued(tr.f))
 	fmt.Fprintf(&b, "outstanding tickets: %v", owed)
 	return b.String()
 }
@@ -599,10 +612,8 @@ func FuzzTicketReaderRustRing(f *testing.F) {
 			case got = <-ch:
 			case <-time.After(readerWatchdog):
 				state := ringStallState(tr, want)
-				_ = r.SetReadDeadline(time.Now())
-				buf := make([]byte, 1<<20)
 				t.Fatalf("reader stalled with %d completions outstanding\n%s\n%s",
-					len(want), state, buf[:runtime.Stack(buf, true)])
+					len(want), state, stacksThenUnblock(r))
 			}
 			if got.err != nil {
 				t.Fatalf("next: %v", got.err)
