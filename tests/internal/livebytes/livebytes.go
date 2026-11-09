@@ -16,6 +16,16 @@
 //     purpose; a test about an explicit free must use Settle, because a GC
 //     would let the AddCleanup backstop hide a missing free.
 //
+// Quiescence is a judgement about a gauge that other goroutines move, so it has
+// a limit: Quiesce accepts quiesceStable equal readings in a row, each taken a
+// GC and 10 ms after the last, which is about 20 ms of stillness. A straggler
+// whose cleanup is delayed longer than that (a finalizer queue backed up behind
+// a slow one, a worker parked for longer than the window) can still land after
+// the baseline is taken and show up as a drop. A drop is never a failure
+// (NotLeaked accepts it), so this can only make a leak check more lenient by
+// that straggler's bytes, never report a false leak. Raise quiesceStable to
+// widen the window at 10 ms plus a GC per step, on every Quiesce.
+//
 // "Not leaked" is live <= baseline. A reading under the quiesced baseline is
 // a reclaim, not a leak; a reading that stays above it after settling is.
 //
@@ -36,6 +46,10 @@ import (
 const (
 	pollEvery     = 10 * time.Millisecond
 	settleTimeout = 30 * time.Second
+	// quiesceStable is how many equal readings in a row end a quiesce. Two
+	// matched across a single 10 ms gap, which a straggler's burst of cleanups
+	// can sit still through.
+	quiesceStable = 3
 )
 
 // gauge is the process-wide counter plus the clock that polls it. Production
@@ -60,8 +74,8 @@ func NotLeaked(baseline, live uint64) bool {
 	return live <= baseline
 }
 
-// Quiesce GCs until two consecutive LiveBytes readings match and returns that
-// reading, to be used as the baseline for NotLeaked and Settle. It fails the
+// Quiesce GCs until quiesceStable consecutive LiveBytes readings match and
+// returns that reading, to be used as the baseline for NotLeaked and Settle. It fails the
 // test if the gauge has not stopped moving after 30 seconds.
 func Quiesce(tb testing.TB) uint64 {
 	tb.Helper()
@@ -73,7 +87,7 @@ func Quiesce(tb testing.TB) uint64 {
 }
 
 // QuiesceCount is Quiesce for another process-wide count, read by read: it
-// GCs until two consecutive readings match and returns that reading. It fails
+// GCs until quiesceStable consecutive readings match and returns that reading. It fails
 // the test, naming the count, if it has not stopped moving after 30 seconds.
 func QuiesceCount(tb testing.TB, name string, read func() uint64) uint64 {
 	tb.Helper()
@@ -110,17 +124,22 @@ func WaitUntil(ok func(live uint64) bool) (uint64, bool) {
 func (g gauge) quiesce() (uint64, bool) {
 	deadline := time.Now().Add(g.timeout)
 	prev := g.read()
+	stable := 1
 	for {
 		g.collect()
 		time.Sleep(g.every)
 		live := g.read()
 		if live == prev {
-			return live, true
+			stable++
+			if stable >= quiesceStable {
+				return live, true
+			}
+			continue
 		}
 		if time.Now().After(deadline) {
 			return live, false
 		}
-		prev = live
+		prev, stable = live, 1
 	}
 }
 

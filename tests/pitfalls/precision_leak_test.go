@@ -446,8 +446,20 @@ func TestPrecisionZeroLeak_HeapPlateauVsLeak(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
+	// Every operation above frees explicitly, so each batch is judged with
+	// Settle before the settleGC that the heap-object log lines need: a GC
+	// first would let the AddCleanup backstop reclaim a forgotten Free and
+	// hide it (see livebytes).
+	verdict := func(stage string) {
+		t.Helper()
+		if live, ok := livebytes.Settle(baseLive); !ok {
+			t.Fatalf("Rust LiveBytes leaked after %s: %d over a quiesced baseline of %d", stage, live, baseLive)
+		}
+	}
+
 	// Warmup 5k ops
 	runBatch(5000, 0x1111)
+	verdict("warmup")
 	settleGC()
 
 	var m0 runtime.MemStats
@@ -457,6 +469,7 @@ func TestPrecisionZeroLeak_HeapPlateauVsLeak(t *testing.T) {
 
 	// Batch 1: 50,000 ops
 	runBatch(batchOps, 0x2222)
+	verdict("batch 1")
 	settleGC()
 
 	var m1 runtime.MemStats
@@ -468,6 +481,7 @@ func TestPrecisionZeroLeak_HeapPlateauVsLeak(t *testing.T) {
 
 	// Batch 2: another 50,000 ops
 	runBatch(batchOps, 0x3333)
+	verdict("batch 2")
 	settleGC()
 
 	var m2 runtime.MemStats
@@ -479,6 +493,7 @@ func TestPrecisionZeroLeak_HeapPlateauVsLeak(t *testing.T) {
 
 	// Batch 3: another 50,000 ops
 	runBatch(batchOps, 0x4444)
+	verdict("batch 3")
 	settleGC()
 
 	var m3 runtime.MemStats
@@ -487,10 +502,6 @@ func TestPrecisionZeroLeak_HeapPlateauVsLeak(t *testing.T) {
 		m3.HeapObjects, int64(m3.HeapObjects)-int64(m2.HeapObjects),
 		int64(m3.HeapObjects)-int64(m0.HeapObjects),
 		m3.HeapAlloc>>10, gusset.Stats().LiveBytes)
-
-	if finalLive, leakFree := livebytes.Settle(baseLive); !leakFree {
-		t.Fatalf("Rust LiveBytes leaked: %d over a quiesced baseline of %d", finalLive, baseLive)
-	}
 }
 
 // TestPrecisionZeroLeak_UnconsumedLargeTicketsTeardownZeroLeak attacks the take buffer
@@ -541,7 +552,8 @@ func TestPrecisionZeroLeak_UnconsumedLargeTicketsTeardownZeroLeak(t *testing.T) 
 		}
 	}
 
-	settleGC()
+	// Explicit-free check: no GC before the verdict (see livebytes), or the
+	// AddCleanup backstop would hide a missing Free.
 	finalLive, leakFree := livebytes.Settle(baseLive)
 	if !leakFree {
 		t.Fatalf("Unconsumed tickets leak detected: baseline LiveBytes=%d, final LiveBytes=%d (delta %d)",
@@ -619,9 +631,17 @@ func TestPrecisionZeroLeak_RapidContextCancellationBufferZeroLeak(t *testing.T) 
 	}
 
 	wg.Wait()
+
+	// Judge with the handle still open. Close frees every buffer the handle
+	// holds, so after it a Free forgotten on a cancel path is invisible; here
+	// it is still live. Settle forces no GC (see livebytes), or the AddCleanup
+	// backstop would reclaim it first.
+	if live, ok := livebytes.Settle(baseLive); !ok {
+		t.Fatalf("Rapid cancellation left buffers live before Close: baseline LiveBytes=%d, live=%d (delta %d)",
+			baseLive, live, int64(live)-int64(baseLive))
+	}
 	_ = h.Close()
 
-	settleGC()
 	finalLive, leakFree := livebytes.Settle(baseLive)
 	if !leakFree {
 		t.Fatalf("Rapid cancellation buffer leak detected: baseline LiveBytes=%d, final LiveBytes=%d (delta %d)",
@@ -677,9 +697,16 @@ func TestPrecisionZeroLeak_BufferBudgetThrashingZeroLeak(t *testing.T) {
 	}
 
 	wg.Wait()
+
+	// Judged with the handle open first: Close frees every buffer it holds, so
+	// afterwards a forgotten Free is invisible. No GC, so the AddCleanup
+	// backstop cannot reclaim it either (see livebytes).
+	if live, ok := livebytes.Settle(baseLive); !ok {
+		t.Fatalf("Buffer budget thrashing left buffers live before Close: baseline LiveBytes=%d, live=%d (delta %d)",
+			baseLive, live, int64(live)-int64(baseLive))
+	}
 	_ = h.Close()
 
-	settleGC()
 	finalLive, leakFree := livebytes.Settle(baseLive)
 	if !leakFree {
 		t.Fatalf("Buffer budget thrashing leak: baseline LiveBytes=%d, final LiveBytes=%d (delta %d)",
