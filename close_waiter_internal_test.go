@@ -5,6 +5,7 @@ import (
 	"errors"
 	"runtime"
 	"testing"
+	"time"
 )
 
 // waiterParked reports whether a Wait has registered as the waiter for ticket.
@@ -62,7 +63,22 @@ func TestClose_ReleasesALiveContextWaiterWithErrClosed(t *testing.T) {
 			_, err := h.Wait(live, ticket)
 			got <- err
 		}()
+		// The spin ends when the waiter parks, when the Wait has already
+		// returned (it errored before parking and never will), or after 10s,
+		// which only bounds a hang. Without those, a Wait that fails early
+		// spins until the go test timeout.
+		parkDeadline := time.Now().Add(10 * time.Second)
 		for !waiterParked(h.state, ticket) {
+			select {
+			case err := <-got:
+				_ = h.Close()
+				t.Fatalf("rep %d: Wait returned %v before it parked", i, err)
+			default:
+			}
+			if time.Now().After(parkDeadline) {
+				_ = h.Close()
+				t.Fatalf("rep %d: the waiter was not parked 10s after Wait began", i)
+			}
 			runtime.Gosched()
 		}
 		if err := h.Close(); err != nil {

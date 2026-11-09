@@ -296,6 +296,7 @@ var asanExcluded = map[string]string{
 	"header_match":       "parses gusset.h and the Rust sources as text; executes no gusset code under test",
 	"constants_match":    "compares #define and const lines as text; executes no gusset code under test",
 	"header_field_types": "compares field types in gusset.h and the Rust sources as text; executes no gusset code under test",
+	"resource_hygiene":   "it counts glibc malloc arenas and /proc/self/maps lines, and pins one arena with mallopt(M_ARENA_MAX, 1); under ASan the allocator is ASan's, so mallopt returns 0 and the maps count would measure ASan's own mappings and quarantine; it runs un-sanitized on the Linux matrix rows (Rust 1.97 floor, Allocator API on ubuntu-latest, Unit & Pitfalls on ubuntu-24.04-arm), and hygiene_baseline and handle_fd_reuse are the procfs checks the ASan job keeps",
 	"ffi_exports_bound":  "its own header says it commits up to 1 GiB per gusset_buf_alloc call; under ASan's shadow and quarantine that exceeds the runner, and the nightly cargo-fuzz job (ffi_exports, -rss_limit_mb=2048) is its sanitizer coverage",
 }
 
