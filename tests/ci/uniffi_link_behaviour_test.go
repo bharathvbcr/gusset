@@ -137,10 +137,14 @@ func TestDigestInLdflagsRelinksOnAChangedArchive(t *testing.T) {
 	if d1 == d2 {
 		t.Fatal("the two toy archives hash alike; the fixture does not change the archive")
 	}
+	// The control documents why the digest exists; it is not the contract. A
+	// toolchain that relinks here is correct, not broken, so this logs rather
+	// than fails: failing would turn a Go fix into a red build while the
+	// recipe assertions below still hold.
 	if got := build(outCtl, ctl); got != "1" {
-		t.Errorf("control did not reproduce: without the digest, a rebuild onto an existing output printed %q, not the stale 1. "+
+		t.Logf("control did not reproduce: without the digest, a rebuild onto an existing output printed %q, not the stale 1. "+
 			"The measured go1.27.3 behaviour (the linker is skipped) does not hold on this toolchain (%s); "+
-			"the recipe's digest is then not needed here, but the assertion below still holds",
+			"the recipe's digest is then not needed here, but the assertions below still hold",
 			got, runBounded(t, prog, nil, "go", "version"))
 	}
 
