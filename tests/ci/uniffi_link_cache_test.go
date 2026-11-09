@@ -9,12 +9,12 @@ import (
 // `make test-uniffi-link` links the umbrella archive that CGO_LDFLAGS points
 // at, and the Go build cache does not hash that archive: internal/ffi/gen.go
 // hashes only target/{release,debug}/libgusset.a. Linked to a fixed output
-// (`go test -c -o` onto an existing file), a rebuilt umbrella was reused
-// unchanged, because nothing the cache keys on had moved (demonstrated in the
-// card's evidence: the linker did not run after a byte of the archive
-// changed). -ldflags is part of the
-// link's cache key, so the recipe hashes the archive and passes the digest
-// there. The rule is a pure function over the recipe's lines.
+// (`go test -c -o` onto an existing file), a rebuilt umbrella can be reused
+// unchanged, because nothing the cache keys on moved (the Makefile comment on
+// test-uniffi-link records the measurement, and
+// TestDigestInLdflagsRelinksOnAChangedArchive reproduces it). -ldflags is part
+// of the link's cache key, so the recipe hashes the archive and passes the
+// digest there. The recipe rule below is a pure function over its lines.
 
 const (
 	uniffiRecipeTarget = "test-uniffi-link:"

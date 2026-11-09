@@ -910,11 +910,12 @@ jobs:
       # threads; both swing far past 10% between runs on a shared runner, so
       # gating them would fail on noise. Package bench runs whole, so
       # BenchmarkHandleChurn is excluded with -test.skip on every whole-package
-      # run below (tests/ci/benchmark_lists_test.go checks each one). The Rust pair (cargo bench -p gusset --bench dispatch and
-      # alloc_counters) compares its own arms inside one process and has no
-      # base-versus-head mode; `make bench-dispatch` and `make
-      # bench-alloc-counters` record it through bench/record.sh. The reasons
-      # are kept beside the lists in the test.
+      # run below (tests/ci/benchmark_lists_test.go checks each one). The
+      # Rust pair (cargo bench -p gusset --bench dispatch and alloc_counters)
+      # compares its own arms inside one process and has no base-versus-head
+      # mode; `make bench-dispatch` and `make bench-alloc-counters` record it
+      # through bench/record.sh. The reasons are kept beside the lists in the
+      # test.
       - name: Benchmark both, interleaved
         if: env.BENCH_BASE != ''
         env:

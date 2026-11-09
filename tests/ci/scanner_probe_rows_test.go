@@ -14,6 +14,10 @@ import (
 // the audit and ASan rules (which count things) and "at least one violation"
 // for the rest.
 //
+// Cases that are compliant but flagged anyway are not rows: they live in the
+// known-limits tables (TestTeeRuleKnownOverFlagging,
+// TestKnownOverFlaggingOfOtherRules).
+//
 // Not rows, by decision: a single `&` between two bench runs, `bash -c "...
 // unskipped && ...skipped"` for the bench rule, and a bench line after an
 // unbalanced `don't` (gaps that were already there), and `cargo test --test a

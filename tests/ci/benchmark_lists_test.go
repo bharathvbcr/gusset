@@ -375,9 +375,10 @@ var wholeBenchRun = regexp.MustCompile(`(?:^|\s)-(?:test\.)?bench[= ]'?\.'?(?:\s
 // but never inside a quoted string or after a backslash. The bench rule needs
 // this and the cargo rules need the opposite (see commandSegments, which is not
 // quote-aware so that it sees the commands inside `sh -c "..."`): the skip
-// pattern `-skip '^(BenchmarkHandleChurn)$'` holds a `)` that ends no command
-// and must stay whole. Two readers because the two rules ask different
-// questions of a quoted string.
+// pattern may hold an alternation, `-skip '^(BenchmarkA|BenchmarkHandleChurn)$'`,
+// and a split that cut at the `|` inside the quotes would take the pattern
+// apart and flag a run that does skip the benchmark. Two readers because the
+// two rules ask different questions of a quoted string.
 func benchSegments(s string) []string {
 	var out []string
 	start := 0
@@ -508,6 +509,8 @@ func TestPlantedWholePackageBenchWithoutSkipIsCaught(t *testing.T) {
 		"go test -bench . \\\n  -skip '^(BenchmarkHandleChurn)$' ./bench/...",
 		// The real matrix.yml shape: both sides run whole, each with its own skip.
 		`(cd "$dir/bench" && "$RUNNER_TEMP/$tag.test" "${common[@]}" -test.bench . -test.skip '^(BenchmarkHandleChurn)$') && (cd "$dir/x" && "$RUNNER_TEMP/y.test" -test.bench . -test.skip '^(BenchmarkHandleChurn)$')`,
+		// An alternation inside the quoted pattern must not split the command.
+		`go test -run '^$' -bench . -skip '^(BenchmarkA|BenchmarkHandleChurn)$' ./bench/...`,
 		`go test -bench '^(BenchmarkCallNoopBare)$' .`,
 		`# go test -bench . ./bench/...`,
 	}

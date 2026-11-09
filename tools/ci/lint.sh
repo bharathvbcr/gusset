@@ -263,8 +263,8 @@ step_version_parity() {
 # has no such tag, this is the release window (the release PR bumps the version
 # before the tag exists): a ::warning:: and set vp_release_window, which the
 # step turns into the NOT VERIFIED (release window) summary line without failing
-# the run. Release order: bump the
-# version and GUSSET_DEFAULT_REF, tag, then bake the tag's commit (DECISIONS.md).
+# the run. Release order: bump the version and GUSSET_DEFAULT_REF, tag, then
+# bake the tag's commit (DECISIONS.md).
 vp_baked_commit() {
 	vp_ref=$(sed -n 's/^GUSSET_DEFAULT_REF="\([^"]*\)"$/\1/p' install.sh)
 	vp_sha=$(sed -n 's/^GUSSET_DEFAULT_COMMIT="\([^"]*\)"$/\1/p' install.sh)
