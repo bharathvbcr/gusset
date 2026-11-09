@@ -125,6 +125,12 @@ func TestInstallRefusesAMovedDefaultTag(t *testing.T) {
 		if !strings.Contains(out, "Nothing was built") || !strings.Contains(out, f.tagged) || !strings.Contains(out, f.moved) {
 			t.Errorf("%s: the refusal does not name both commits and say nothing was built:\n%s", name, out)
 		}
+		// A tag-fetched script refuses for a reason that is not a moved tag, and
+		// the message must say how to get out of it (DECISIONS.md 2026-11-06:
+		// the refusal itself is the decided design; only the remedy is text).
+		if !strings.Contains(out, "cannot check its own tag") || !strings.Contains(out, "fetch install.sh from main") {
+			t.Errorf("%s: the refusal does not tell a tag-fetched script's user to fetch install.sh from main:\n%s", name, out)
+		}
 	}
 }
 

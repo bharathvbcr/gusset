@@ -25,11 +25,12 @@ type runBlock struct {
 }
 
 var (
-	runKey      = regexp.MustCompile(`^(\s*)(- )?run:\s*(.*)$`)
-	shellKey    = regexp.MustCompile(`^\s*shell:\s*(.*)$`)
-	teePipe     = regexp.MustCompile(`(?:^|[^|])\|\s*(?:sudo\s+)?tee\b`)
-	setPipefail = regexp.MustCompile(`\bset\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*o\s+pipefail\b`)
-	shellOpt    = regexp.MustCompile(`-[A-Za-z]*o\s+pipefail\b`)
+	runKey   = regexp.MustCompile(`^(\s*)(- )?run:\s*(.*)$`)
+	shellKey = regexp.MustCompile(`^\s*shell:\s*(.*)$`)
+	// `cmd | tee`, `cmd |& tee`, `| sudo tee`, `| command tee`, `| /usr/bin/tee`;
+	// `||` is not a pipe.
+	teePipe  = regexp.MustCompile(`(?:^|[^|])\|&?\s*(?:(?:sudo|command|exec|time)\s+)*(?:\S*/)?tee\b`)
+	shellOpt = regexp.MustCompile(`-[A-Za-z]*o\s+pipefail\b`)
 )
 
 // runBlocks extracts every `run:` step body together with its step's `shell:`.
@@ -74,6 +75,9 @@ func stepShell(lines []string, i, keyCol int) string {
 			}
 		}
 	}
+	if lo < 0 {
+		lo = 0 // a run key with no step header above it (a one-step fragment)
+	}
 	for j := lo; j < len(lines); j++ {
 		if j > lo && j != i && strings.TrimSpace(lines[j]) != "" && indentOf(lines[j]) <= dash {
 			break
@@ -90,23 +94,60 @@ func stepShell(lines []string, i, keyCol int) string {
 	return ""
 }
 
+// pipefailAfter applies one `set ...` command to the armed state: `-o pipefail`
+// (also `-eo pipefail`, `-euo pipefail`, after any other options such as
+// `set -o errexit -o pipefail` or `set +e -o pipefail`) arms it, `+o pipefail`
+// (also `+eo pipefail`) disarms it. Anything else leaves it alone.
+func pipefailAfter(seg string, armed bool) bool {
+	f := strings.Fields(seg)
+	if len(f) == 0 || f[0] != "set" {
+		return armed
+	}
+	for i := 1; i+1 < len(f); i++ {
+		if f[i] == "--" {
+			break // what follows is positional parameters, not options
+		}
+		if f[i+1] != "pipefail" || len(f[i]) < 2 || !strings.HasSuffix(f[i], "o") {
+			continue
+		}
+		switch f[i][0] {
+		case '-':
+			armed = true
+		case '+':
+			armed = false
+		}
+	}
+	return armed
+}
+
 // teeWithoutPipefailViolations reports a `cmd | tee f` whose step neither sets
 // pipefail before it nor runs under `shell: bash -o pipefail {0}`. Without it
 // the pipeline's status is tee's, so a failing command is green; the unset
-// `shell:` default is `bash -e {0}`, which has no pipefail.
+// `shell:` default is `bash -e {0}`, which has no pipefail. Commands are read
+// by logicalLines (continuations, comments), quoted strings are blanked
+// (printf '| tee' is not a pipe), and a `set` and a tee on one line are judged
+// in order, each in its own segment.
+//
+// Limits of a line scanner, accepted: `xargs tee` and `find -exec tee` (tee is
+// run by another program, not piped to); `bash -c '... | tee'` (the pipeline is
+// inside a string); a heredoc body is read as commands, so a `| tee` inside one
+// is flagged; a `set -o pipefail` on its own line inside a function or an `if`
+// arms the whole script, so it errs toward accepting, while `f() { set -o
+// pipefail; }` on one line, and `( set -o pipefail; go test | tee out )` in a
+// subshell paren, err toward flagging; and a string spanning physical lines is
+// read line by line. TestTeeRuleKnownOverFlagging pins the over-flagging cases.
 func teeWithoutPipefailViolations(name string, lines []string) []string {
 	var out []string
 	for _, b := range runBlocks(lines) {
-		if shellOpt.MatchString(b.shell) {
-			continue
-		}
-		armed := false
+		// A `shell: bash -o pipefail {0}` step starts armed, but a later
+		// `set +o pipefail` in its script disarms it as much as in any other.
+		armed := shellOpt.MatchString(b.shell)
 		for _, ll := range logicalLines(b.body) {
-			if setPipefail.MatchString(ll.text) {
-				armed = true
-			}
-			if teePipe.MatchString(ll.text) && !armed {
-				out = append(out, name+":"+strconv.Itoa(b.n)+": a pipe into tee with no `set -o pipefail` before it and no `shell: bash -o pipefail {0}`: "+strings.TrimSpace(ll.text))
+			for _, seg := range pipelineSegments(blankQuotes(ll.text)) {
+				armed = pipefailAfter(strings.TrimSpace(seg), armed)
+				if teePipe.MatchString(seg) && !armed {
+					out = append(out, name+":"+strconv.Itoa(b.n)+": a pipe into tee with no `set -o pipefail` before it and no `shell: bash -o pipefail {0}`: "+strings.TrimSpace(ll.text))
+				}
 			}
 		}
 	}
@@ -118,7 +159,7 @@ func TestEveryTeePipeRunsUnderPipefail(t *testing.T) {
 	for name, lines := range workflows(t) {
 		for _, b := range runBlocks(lines) {
 			for _, ll := range logicalLines(b.body) {
-				if teePipe.MatchString(ll.text) {
+				if teePipe.MatchString(blankQuotes(ll.text)) {
 					teeLines++
 				}
 			}
@@ -429,6 +470,11 @@ func TestPlantedCheckWiringViolationsAreCaught(t *testing.T) {
 		{"tee on a continuation line", teeWithoutPipefailViolations("x", step("", "go test \\", "  ./... | tee out.txt")), teeWithoutPipefailViolations("x", step("", "set -eo pipefail", "go test \\", "  ./... | tee out.txt"))},
 		{"single-line run", teeWithoutPipefailViolations("x", []string{"      - run: go test ./... | tee out.txt"}), teeWithoutPipefailViolations("x", []string{"      - shell: bash -o pipefail {0}", "        run: go test ./... | tee out.txt"})},
 		{"shell without pipefail", teeWithoutPipefailViolations("x", step("bash -e {0}", tee)), teeWithoutPipefailViolations("x", step("bash -o pipefail {0}", tee))},
+		{"stderr-merging pipe into tee", teeWithoutPipefailViolations("x", step("", "go test ./... |& tee out.txt")), teeWithoutPipefailViolations("x", step("", "set -o pipefail", "go test ./... |& tee out.txt"))},
+		{"|& tee on a continuation line", teeWithoutPipefailViolations("x", step("", "go test \\", "  ./... |& tee out.txt")), nil},
+		{"set +o pipefail before the tee", teeWithoutPipefailViolations("x", step("", "set -o pipefail", "set +o pipefail", tee)), teeWithoutPipefailViolations("x", step("", "set +o pipefail", "set -o pipefail", tee))},
+		{"set +eo pipefail before the tee", teeWithoutPipefailViolations("x", step("", "set -eo pipefail", "set +eo pipefail", tee)), nil},
+		{"set +o pipefail disarms a pipefail shell", teeWithoutPipefailViolations("x", step("bash -o pipefail {0}", "set +o pipefail", tee)), teeWithoutPipefailViolations("x", step("bash -o pipefail {0}", tee))},
 		{"an earlier step's pipefail does not carry over", teeWithoutPipefailViolations("x", append(step("", "set -o pipefail", "true"), step("", tee)...)), nil},
 		{"unlisted Fuzz target", fuzzSetViolations(map[string][]string{".": {"FuzzA", "FuzzB"}, "tests/pitfalls": {"FuzzP"}}, map[string][]string{"FUZZ_TARGETS": {"FuzzP"}, "FUZZ_TARGETS_ROOT": {"FuzzA"}}), fuzzSetViolations(map[string][]string{".": {"FuzzA"}, "tests/pitfalls": {"FuzzP"}}, map[string][]string{"FUZZ_TARGETS": {"FuzzP"}, "FUZZ_TARGETS_ROOT": {"FuzzA"}})},
 		{"renamed Fuzz target", fuzzSetViolations(map[string][]string{".": {"FuzzARenamed"}, "tests/pitfalls": {"FuzzP"}}, map[string][]string{"FUZZ_TARGETS": {"FuzzP"}, "FUZZ_TARGETS_ROOT": {"FuzzA"}}), nil},
@@ -448,6 +494,16 @@ func TestPlantedCheckWiringViolationsAreCaught(t *testing.T) {
 		if len(c.good) != 0 {
 			t.Errorf("%s: the compliant form was flagged: %v", c.name, c.good)
 		}
+	}
+}
+
+// `a || tee f` runs tee only when a fails; nothing is piped, so pipefail is moot.
+func TestOrTeeIsNotAPipe(t *testing.T) {
+	if teePipe.MatchString("false || tee out.txt") {
+		t.Error("`||` matched as a pipe into tee")
+	}
+	if !teePipe.MatchString("go test |& tee out.txt") || !teePipe.MatchString("go test | sudo tee out.txt") {
+		t.Error("`|&` or `| sudo tee` was not matched")
 	}
 }
 

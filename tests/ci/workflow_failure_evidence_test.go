@@ -60,7 +60,7 @@ func fuzzArtifactViolations(name string, lines []string) []string {
 		var uploads []string
 		for _, st := range workflowSteps(jl) {
 			for _, l := range strings.Split(stepRunBody(st), "\n") {
-				l = stripShellComment(l)
+				l = stripComment(l)
 				cargo = cargo || cargoFuzzRun.MatchString(l)
 				gofuzz = gofuzz || goFuzzRun.MatchString(l)
 			}

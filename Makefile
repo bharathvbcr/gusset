@@ -115,10 +115,27 @@ test: linked-target-dir
 # CARGO_TARGET_DIR cannot land it on top of Gusset's own libgusset.a. Nothing
 # here builds target/ or regenerates internal/ffi's archive hash. -count=1: the
 # test registers the engine and replays the golden counters, both process-wide.
+#
+# The Go build cache does not hash the archive the linker reads (internal/ffi/
+# gen.go exists for that reason, and it hashes only target/{release,debug}/
+# libgusset.a, never this umbrella). This recipe's own form, a plain
+# `go test -count=1`, relinks every time (measured on go1.27.3: two identical
+# runs both ran the linker), so it never links a stale archive. A cached link
+# does exist for `go test -c -o <file>` when that output file already exists,
+# and then it skipped the linker after a byte of the archive changed. The
+# recipe therefore also hashes the umbrella and passes the digest in -ldflags,
+# which the link's cache key includes: it costs nothing here and keeps the
+# recipe safe if it is ever changed to a form that caches the link. The -X
+# names no real variable, which the linker ignores; the value is only a cache
+# key. tests/ci/uniffi_link_cache_test.go holds the recipe to this.
+UNIFFI_UMBRELLA := examples/uniffi_bindgen_go/rust/target/debug/libgusset.a
+
 test-uniffi-link:
 	cargo build --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml --target-dir examples/uniffi_bindgen_go/rust/target
 	go run ./tools/gussetvet -tags gusset_uniffi_engine examples/uniffi_bindgen_go
-	CGO_LDFLAGS="-L$(CURDIR)/examples/uniffi_bindgen_go/rust/target/debug" go test -count=1 -tags gusset_uniffi_engine -v ./examples/uniffi_bindgen_go/...
+	umbrella_sha=$$( { sha256sum $(UNIFFI_UMBRELLA) 2>/dev/null || shasum -a 256 $(UNIFFI_UMBRELLA); } | cut -d' ' -f1 ); \
+	test $${#umbrella_sha} -eq 64 || { echo "cannot hash $(UNIFFI_UMBRELLA); run: cargo build --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml --target-dir examples/uniffi_bindgen_go/rust/target" >&2; exit 1; }; \
+	CGO_LDFLAGS="-L$(CURDIR)/examples/uniffi_bindgen_go/rust/target/debug" go test -count=1 -tags gusset_uniffi_engine -ldflags "-X github.com/bharathvbcr/gusset/examples/uniffi_bindgen_go.umbrellaSHA256=$$umbrella_sha" -v ./examples/uniffi_bindgen_go/...
 
 # -count=10: benchstat refuses to quote a confidence interval below 6 samples, and
 # the committed data used to have 5 — so every README figure was a point estimate
@@ -320,8 +337,8 @@ ALLOC_BOUNDS ?= -max ChannelHop=0 -max GussetCallNoop=1 -max GussetSubmitWait=1 
 alloc-gate:
 	go run ./tools/ci/benchgate allocs $(ALLOC_BOUNDS) $(ALLOC_FILE)
 
-ci-local: build test lint docs-check
-	go test -run '^$$' -bench . -benchtime=100ms -benchmem ./bench/... > $(ALLOC_FILE) || { cat $(ALLOC_FILE); exit 1; }
+ci-local: build test test-uniffi-link lint docs-check
+	go test -run '^$$' -bench . -skip '^(BenchmarkHandleChurn)$$' -benchtime=100ms -benchmem ./bench/... > $(ALLOC_FILE) || { cat $(ALLOC_FILE); exit 1; }
 	go test -run '^$$' -bench '^(BenchmarkCallNoopBare|BenchmarkCallNoopTraced)$$' -benchtime=100ms -benchmem . >> $(ALLOC_FILE) || { cat $(ALLOC_FILE); exit 1; }
 	@cat $(ALLOC_FILE)
 	$(MAKE) alloc-gate

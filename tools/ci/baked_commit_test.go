@@ -102,14 +102,37 @@ func TestVersionParityHoldsBakedCommitToTheTag(t *testing.T) {
 }
 
 // Neither here nor on origin: origin answered and has no such tag, which is the
-// release window. It passes, with a warning that says the commit was not checked.
-func TestVersionParityWarnsInTheReleaseWindow(t *testing.T) {
+// release window. The run still exits 0 (DECISIONS.md 2026-11-06), but the
+// summary must not call it a PASS: it says NOT VERIFIED (release window), and
+// the closing line says no step failed yet one is not verified.
+func TestVersionParityReportsNotVerifiedInTheReleaseWindow(t *testing.T) {
 	out, err := lintWith(t, versionTree(), nil, tagFixture(t, tagNowhere, false, "", false), "version-parity")
-	if err != nil || !strings.Contains(out, "version-parity PASS") {
-		t.Fatalf("the release window failed: %v\n%s", err, out)
+	if err != nil {
+		t.Fatalf("the release window must not fail the run: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "::warning::version-parity:") || !strings.Contains(out, "NOT VERIFIED") {
-		t.Errorf("the release window did not warn that the commit was not verified:\n%s", out)
+	if !strings.Contains(out, "version-parity NOT VERIFIED (release window)") {
+		t.Errorf("the summary lacks the NOT VERIFIED status:\n%s", out)
+	}
+	if strings.Contains(out, "version-parity PASS") || strings.Contains(out, "every step passed") {
+		t.Errorf("a step that verified nothing was summarised as a pass:\n%s", out)
+	}
+	if !strings.Contains(out, "::warning::version-parity:") || !strings.Contains(out, "is not a PASS") {
+		t.Errorf("the warning or the closing line is missing:\n%s", out)
+	}
+}
+
+// NOT VERIFIED is an exception to the exit rule for that one case, not a way to
+// hide a real failure: a version that disagrees in the same run is still FAIL
+// and still exits non-zero.
+func TestVersionParityNotVerifiedDoesNotHideAMismatch(t *testing.T) {
+	files := versionTree()
+	files["SECURITY.md"] = strings.ReplaceAll(files["SECURITY.md"], "1.2.3", "1.2.2")
+	out, err := lintWith(t, files, nil, tagFixture(t, tagNowhere, false, "", false), "version-parity")
+	if err == nil || !strings.Contains(out, "version-parity FAIL") {
+		t.Errorf("a mismatch next to an unverified commit did not fail:\n%v\n%s", err, out)
+	}
+	if strings.Contains(out, "version-parity NOT VERIFIED (release window)") {
+		t.Errorf("a failing step was summarised as NOT VERIFIED:\n%s", out)
 	}
 }
 

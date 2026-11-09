@@ -9,7 +9,17 @@
 # Every step runs even when an earlier one failed, because the failure this
 # replaces was a broken staticcheck silently skipping govulncheck, the
 # forbidden-pattern audit and cargo-deny. The summary names each step as
-# PASS, FAIL or SKIPPED, and the exit status is non-zero for anything but PASS.
+# PASS, FAIL or SKIPPED, and the exit status is non-zero for anything but PASS,
+# with one decided exception: version-parity, when the release tag does not
+# exist yet, is reported as `NOT VERIFIED (release window)` and does not fail
+# the run (DECISIONS.md 2026-11-06 chose warn-and-pass so the release PR is not
+# blocked). It is never summarised as PASS, and the closing line says so.
+#
+# That exception is an explicit signal, not an exit code: step_version_parity
+# sets lint_not_verified to its own name, and the loop honours it for the step
+# named version-parity only. Every other step's non-zero status is FAIL, whatever
+# its value: govulncheck exits 3 for "vulnerabilities found", and a code is the
+# tool's to define, not ours.
 # A tool that is missing, or not the pinned version, is a FAIL with the command
 # that fixes it, never a quiet pass. The only way to skip a step is to say so:
 #
@@ -24,6 +34,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 cd "${LINT_ROOT:-$here/../..}" || exit 1
 # shellcheck source=tools/ci/versions.env
 . "$here/versions.env"
+
+lint_not_verified=
 
 STEPS="gofmt go-vet gussetvet staticcheck govulncheck forbidden-patterns version-parity cargo-clippy cargo-fmt cargo-deny"
 
@@ -234,8 +246,13 @@ step_version_parity() {
 		"$(sed -n 's/^GUSSET_DEFAULT_REF="v\([^"]*\)"$/\1/p' install.sh)" || fail=1
 	vp_check "docs/adoption.md gusset_core tag" \
 		"$(sed -n 's/^gusset_core = {.* git = .*tag = "v\([^"]*\)".*/\1/p' docs/adoption.md)" || fail=1
+	vp_release_window=0
 	vp_baked_commit || fail=1
-	return $fail
+	[ $fail -eq 0 ] || return 1
+	# Only a step that otherwise verified everything may ask to be summarised as
+	# not verified; the loop reads this variable for this step's name alone.
+	[ $vp_release_window -eq 0 ] || lint_not_verified=version-parity
+	return 0
 }
 
 # install.sh's GUSSET_DEFAULT_COMMIT is the commit a default install of
@@ -244,8 +261,10 @@ step_version_parity() {
 # read-only `git ls-remote` (a CI checkout has no tags). If origin cannot be
 # asked, the commit was not verified and that is a FAIL. If origin answers and
 # has no such tag, this is the release window (the release PR bumps the version
-# before the tag exists): a ::warning:: and a pass. Release order: bump the
-# version and GUSSET_DEFAULT_REF, tag, then bake the tag's commit (DECISIONS.md).
+# before the tag exists): a ::warning:: and set vp_release_window, which the
+# step turns into the NOT VERIFIED (release window) summary line without failing
+# the run. Release order: bump the version and GUSSET_DEFAULT_REF, tag, then
+# bake the tag's commit (DECISIONS.md).
 vp_baked_commit() {
 	vp_ref=$(sed -n 's/^GUSSET_DEFAULT_REF="\([^"]*\)"$/\1/p' install.sh)
 	vp_sha=$(sed -n 's/^GUSSET_DEFAULT_COMMIT="\([^"]*\)"$/\1/p' install.sh)
@@ -266,6 +285,7 @@ vp_baked_commit() {
 		if [ -z "$vp_tagged" ]; then
 			echo "::warning::version-parity: install.sh GUSSET_DEFAULT_COMMIT $vp_sha NOT VERIFIED: tag $vp_ref exists neither here nor on origin (the release window; bake the tag's commit after tagging)"
 			echo "  install.sh GUSSET_DEFAULT_COMMIT: $vp_sha (NOT VERIFIED: no tag $vp_ref yet)"
+			vp_release_window=1
 			return 0
 		fi
 	fi
@@ -334,6 +354,7 @@ echo "toolchain: $(go version)"
 
 summary=""
 status=0
+not_verified=0
 for s in "$@"; do
 	case " ${LINT_SKIP:-} " in
 	*" $s "*)
@@ -344,8 +365,14 @@ for s in "$@"; do
 		;;
 	esac
 	echo "== $s"
+	lint_not_verified=
 	if run_step "$s"; then
-		summary="$summary$s PASS\n"
+		if [ "$s" = version-parity ] && [ "$lint_not_verified" = version-parity ]; then
+			summary="$summary$s NOT VERIFIED (release window)\n"
+			not_verified=1
+		else
+			summary="$summary$s PASS\n"
+		fi
 	else
 		summary="$summary$s FAIL\n"
 		status=1
@@ -354,5 +381,11 @@ done
 
 printf '\nlint summary\n'
 printf '%b' "$summary"
-[ $status -eq 0 ] && echo "lint: every step passed" || echo "lint: NOT clean; at least one step failed or was skipped" >&2
+if [ $status -ne 0 ]; then
+	echo "lint: NOT clean; at least one step failed or was skipped" >&2
+elif [ $not_verified -ne 0 ]; then
+	echo "lint: no step failed, but at least one is NOT VERIFIED (release window); it is not a PASS" >&2
+else
+	echo "lint: every step passed"
+fi
 exit $status

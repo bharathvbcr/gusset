@@ -105,10 +105,17 @@ jobs:
   # The matrix said failure here opens an issue tagged `toolchain`. It did not:
   # the job just went red on a schedule nobody watches, which is the same as
   # not running. A scheduled job whose failure nobody sees is not a gate.
+  #
+  # A job that hits its 90 minute timeout concludes `cancelled`, and `failure()`
+  # is false for that, so a hung gotip opened no issue. The condition is the
+  # one nightly's report job uses (tests/ci/report_job_cancelled_test.go
+  # requires every failure report to match cancelled too).
   report:
     name: Open a toolchain issue on failure
     needs: [gotip]
-    if: failure()
+    if: >-
+      always() &&
+      (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -122,7 +129,7 @@ jobs:
             // lives in the body and not here.
             const title = 'Go tip breaks Gusset';
             const body = [
-              'The weekly Go tip job failed.',
+              'The weekly Go tip job failed or timed out.',
               '',
               `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               `Commit: ${context.sha}`,
