@@ -205,18 +205,19 @@ jobs:
             --test log_ring_props --test log_ring_contention \
             --test take_ownership
 
-      # These compare /proc/self/{fd,task,maps} with a baseline. ASan maps and
-      # quarantines memory of its own, so this is the step most likely to need
-      # tuning the first time it runs on the runner; it fails loudly, it is
-      # never skipped.
-      - name: Run the resource-hygiene suite under ASan
+      # These two compare /proc/self/{fd,task} with a baseline and hold under
+      # ASan. resource_hygiene is not here: it counts glibc malloc arenas and
+      # /proc/self/maps, and ASan replaces malloc (mallopt returns 0) and maps
+      # and quarantines memory of its own. It runs un-sanitized on the Linux
+      # matrix rows; tests/ci asanExcluded records that reason.
+      - name: Run the fd and thread hygiene tests under ASan
         if: ${{ !cancelled() }}
         env:
           RUSTFLAGS: -Zsanitizer=address
           ASAN_OPTIONS: detect_leaks=1:detect_stack_use_after_return=1
         run: |
           cargo test --locked -p gusset --target x86_64-unknown-linux-gnu \
-            --test resource_hygiene --test hygiene_baseline --test handle_fd_reuse
+            --test hygiene_baseline --test handle_fd_reuse
 
       # Leak detection is off for these two because they leak on purpose, and
       # LeakSanitizer would fail them for it: rust_status_overwrite's control arm
