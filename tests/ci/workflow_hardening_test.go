@@ -37,7 +37,7 @@ func jobID(l string) (string, bool) {
 // splitLines splits workflow text into lines without their `\r`, so a CRLF
 // checkout reads the same as an LF one.
 func splitLines(s string) []string {
-	lines := strings.Split(s, "\n")
+	lines := strings.Split(strings.TrimPrefix(s, "\xef\xbb\xbf"), "\n")
 	for i, l := range lines {
 		lines[i] = strings.TrimSuffix(l, "\r")
 	}

@@ -1,6 +1,7 @@
 package ci_test
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -49,6 +50,10 @@ func scannerProblems(name string, lines []string) []string {
 	if len(jobs) != len(want) {
 		out = append(out, name+": splitJobs found "+itoa(len(jobs))+" jobs, an independent count found "+itoa(len(want)))
 	}
+	if len(jobs) == 0 {
+		out = append(out, name+": no job is visible, so every job rule passes over this file with no verdict")
+	}
+	out = append(out, jobsSectionProblems(name, lines)...)
 	for i, j := range jobs {
 		jl := strings.Split(j, "\n")
 		if i < len(want) && jobName(jl) != want[i] {
@@ -60,6 +65,53 @@ func scannerProblems(name string, lines []string) []string {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// jobsSectionProblems checks the shape the walker and the independent count
+// both assume, so a file that departs from it is reported instead of read as
+// having fewer jobs. In the top-level `jobs:` section: a line indented 1 or 3
+// spaces, a 2-space line that is not a plain job header (a flow map, anchor,
+// tag or alias after the id, or a continuation line), a child of `jobs:` that
+// is not at 2 spaces, and a job whose first body line is not at 4 spaces.
+func jobsSectionProblems(name string, lines []string) []string {
+	var out []string
+	in, seenHeader, wantBody := false, false, false
+	for n, raw := range lines {
+		l := strings.TrimRight(raw, "\r")
+		if t := strings.TrimSpace(l); t == "" || t[0] == '#' {
+			continue
+		}
+		if l[0] != ' ' && l[0] != '\t' {
+			in = strings.HasPrefix(l, "jobs:") || strings.HasPrefix(l, `"jobs":`) || strings.HasPrefix(l, `'jobs':`)
+			seenHeader, wantBody = false, false
+			continue
+		}
+		if !in {
+			continue
+		}
+		at := name + ":" + itoa(n+1) + ": "
+		ind := indentOf(l)
+		switch {
+		case strings.HasPrefix(strings.TrimLeft(l, " "), "\t"):
+			out = append(out, at+"a tab in the jobs section's indentation")
+		case ind == 1 || ind == 3:
+			out = append(out, at+"indented "+itoa(ind)+" spaces in the jobs section, which the scanner does not read")
+		case ind == 2 && !jobHeader.MatchString(l):
+			out = append(out, at+"a 2-space line that is not a plain job header (flow map, anchor, tag, alias or continuation): "+strings.TrimSpace(l))
+		case ind == 2:
+			seenHeader, wantBody = true, true
+		case !seenHeader:
+			out = append(out, at+"a child of jobs: not indented 2 spaces, so no job header is visible: "+strings.TrimSpace(l))
+		case wantBody && ind != 4:
+			out = append(out, at+"a job's first body line is indented "+itoa(ind)+" spaces, not 4, so jobKey cannot see its keys")
+			wantBody = false
+		default:
+			wantBody = false
+		}
+	}
+	return out
+}
+
+var jobKeyLine = regexp.MustCompile(`^    (?:"[^"]*"|'[^']*'|[A-Za-z0-9_.-]+)\s*:(?:\s+(.*))?$`)
 
 // jobKeyProblems reports job-body lines in a form jobKey cannot read: a tab in
 // the indentation (YAML forbids it, and jobKey would skip the key), or a block
@@ -75,6 +127,20 @@ func jobKeyProblems(where string, job []string) []string {
 		}
 		if indentOf(l) != 4 {
 			continue
+		}
+		if m := jobKeyLine.FindStringSubmatch(l); m != nil {
+			v := strings.TrimSpace(stripComment(m[1]))
+			if v != "" && !blockScalarHeader.MatchString(v) {
+				for _, next := range job[n+1:] {
+					if strings.TrimSpace(next) == "" {
+						continue
+					}
+					if indentOf(strings.TrimRight(next, "\r")) > 4 {
+						out = append(out, where+": line "+itoa(n+1)+" has a value that continues on the next line, which jobKey would truncate: "+strings.TrimSpace(l))
+					}
+					break
+				}
+			}
 		}
 		if _, v, ok := strings.Cut(l, ":"); ok {
 			v = strings.TrimSpace(v)
@@ -157,5 +223,39 @@ func TestScannerRefusesFormsItCannotRead(t *testing.T) {
 		if ps := scannerProblems(name, plant(src)); len(ps) == 0 {
 			t.Errorf("%s: the scanner check reported nothing for a form it cannot read", name)
 		}
+	}
+}
+
+// Shapes that move the walker and the independent count together, so a count
+// comparison alone cannot see them. Each must be reported on its own.
+func TestScannerReportsShapesBothCountsMiss(t *testing.T) {
+	base := func(jobsBody string) string {
+		return "name: x\non: push\njobs:\n" + jobsBody
+	}
+	body := "  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"
+	cases := map[string]string{
+		"flow map header":       base(body + "  report: {runs-on: u, if: always(), steps: []}\n"),
+		"anchor header":         base(body + "  report: &a\n    runs-on: u\n"),
+		"tag header":            base(body + "  report: !!map\n    runs-on: u\n"),
+		"alias header":          base(body + "  report: *d\n"),
+		"only flow map headers": base("  report: {runs-on: u}\n"),
+		"jobs children at 4":    base("    build:\n      runs-on: u\n"),
+		"jobs children at 1":    base(" build:\n   runs-on: u\n"),
+		"job key at 3":          base("  build:\n    runs-on: u\n   if: always()\n"),
+		"job keys at 6":         base("  build:\n      runs-on: u\n      if: always()\n"),
+		"multi-line plain if":   base("  build:\n    runs-on: u\n    if: a &&\n        failure()\n"),
+		"multi-line quoted if":  base("  build:\n    runs-on: u\n    if: \"a &&\n  failure()\"\n"),
+	}
+	for name, src := range cases {
+		if ps := scannerProblems(name, plant(src)); len(ps) == 0 {
+			t.Errorf("%s: nothing was reported", name)
+		}
+	}
+	bom := splitLines("\xef\xbb\xbf" + strings.TrimPrefix(plantedBase, "name: x\non: push\n"))
+	if ps := scannerProblems("BOM", bom); len(ps) != 0 || len(splitJobs(bom)) != 2 {
+		t.Errorf("a UTF-8 BOM before jobs: hides the jobs: problems %v, %d jobs", ps, len(splitJobs(bom)))
+	}
+	if ps := scannerProblems("empty", plant("name: x\non: push\n")); len(ps) == 0 {
+		t.Error("a file with no job was not reported")
 	}
 }
