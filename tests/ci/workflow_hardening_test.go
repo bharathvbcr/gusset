@@ -139,7 +139,7 @@ func TestBuildJobsHoldNoWriteTokenAndPersistNoCredentials(t *testing.T) {
 		cur := -1
 		inJobs := false
 		for _, l := range lines {
-			if strings.TrimRight(l, " ") == "jobs:" {
+			if jobsKey.MatchString(strings.TrimSuffix(l, "\r")) {
 				inJobs = true
 				continue
 			}

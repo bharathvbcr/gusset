@@ -233,7 +233,7 @@ func toolInstallViolations(name string, lines []string) []string {
 // repository default, which can be write.
 func topLevelPermissionViolations(name string, lines []string) []string {
 	for i, l := range lines {
-		if strings.TrimRight(l, " ") == "jobs:" {
+		if jobsKey.MatchString(strings.TrimSuffix(l, "\r")) {
 			break
 		}
 		if strings.TrimRight(l, " ") != "permissions:" {
