@@ -39,7 +39,8 @@ func jobRunsRecorderTest(lines []string, job string) (runs bool, guarded bool) {
 	for _, l := range lines {
 		if jobHeader.MatchString(l) {
 			flush()
-			in = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(l), ":")) == job
+			id, _ := jobID(l)
+			in = id == job
 			continue
 		}
 		if !in {

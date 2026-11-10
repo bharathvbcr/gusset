@@ -19,21 +19,37 @@ var (
 	goFuzzRun    = regexp.MustCompile(`\bmake fuzz\b|\bgo test\b.*\s-fuzz[= ]`)
 )
 
-func jobName(job []string) string { return strings.TrimSuffix(strings.TrimSpace(job[0]), ":") }
+// blockScalarHeader matches what jobKey reads after a block scalar's key: the
+// style, the chomping and indentation indicators in either order, an optional
+// comment.
+var blockScalarHeader = regexp.MustCompile(`^[>|](?:[+-][1-9]?|[1-9][+-]?)?\s*(?:#.*)?$`)
+
+// jobName returns the unquoted id on a job's header line. A job from splitJobs
+// always starts with one; anything else is a caller bug, so it panics rather
+// than name the job after whatever the line holds.
+func jobName(job []string) string {
+	id, ok := jobID(strings.TrimSuffix(job[0], "\r"))
+	if !ok {
+		panic("jobName: not a job header line: " + job[0])
+	}
+	return id
+}
 
 // jobKey returns a job-level key's value, with the lines of a folded or literal
-// block joined by spaces.
+// block joined by spaces. The key may be quoted; a trailing comment is dropped.
+// A block scalar's indicator may carry chomping and indentation suffixes
+// (`>+`, `|2`, `>-2`) and a comment. Tab indentation and other indicators are
+// not read here; jobKeyProblems reports them.
 func jobKey(job []string, key string) (string, bool) {
-	prefix := "    " + key + ":"
+	keyLine := regexp.MustCompile(`^    (?:` + regexp.QuoteMeta(key) + `|"` + regexp.QuoteMeta(key) + `"|'` + regexp.QuoteMeta(key) + `')\s*:(.*)$`)
 	for i, l := range job {
-		if !strings.HasPrefix(l, prefix) {
+		m := keyLine.FindStringSubmatch(strings.TrimSuffix(l, "\r"))
+		if m == nil {
 			continue
 		}
-		v := strings.TrimSpace(strings.TrimPrefix(l, prefix))
-		switch v {
-		case ">", ">-", "|", "|-":
-		default:
-			return v, true
+		v := strings.TrimSpace(m[1])
+		if !blockScalarHeader.MatchString(v) {
+			return strings.TrimSpace(stripComment(v)), true
 		}
 		var parts []string
 		for _, c := range job[i+1:] {

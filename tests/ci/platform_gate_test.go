@@ -60,12 +60,12 @@ func TestACommentIsNotAnUnsupportedPlatformCheck(t *testing.T) {
 }
 
 func jobLines(lines []string, name string) []string {
-	header := "  " + name + ":"
 	var out []string
 	in := false
 	for _, l := range lines {
 		if jobHeader.MatchString(l) {
-			in = strings.TrimRight(l, " ") == header
+			id, _ := jobID(l)
+			in = id == name
 		}
 		if in {
 			out = append(out, l)
