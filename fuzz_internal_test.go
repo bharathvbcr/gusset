@@ -587,11 +587,15 @@ func FuzzTicketReaderFakeRing(f *testing.F) {
 // which `go test -race` may report. Making it race-clean needs synchronisation inside
 // ticketReader (ticket_reader.go / drain.go), which this test-only helper does
 // not own and which would add cost to the production read path for a
-// failure-only report. It runs solely after the watchdog has already decided
-// the reader stalled and is about to t.Fatalf, so the test has failed either
-// way; under -race the extra DATA RACE report is more evidence about the same
-// stall, not a second defect. Nothing on a passing path may call it. The
-// slot/ring words above are read atomically and are race-clean.
+// failure-only report. In the fuzz target it runs solely after the watchdog has
+// already decided the reader stalled and is about to t.Fatalf, so the test has
+// failed either way; under -race the extra DATA RACE report is more evidence
+// about the same stall, not a second defect. The unit tests in
+// ring_stall_state_internal_test.go call it on passing paths, but against a
+// reader that is parked, not running, so they do not race. No caller may use
+// it against a running reader on a passing path. The waiting flag, the
+// overflow count and the slot sequences are read atomically and are
+// race-clean.
 func ringStallState(tr *ticketReader, want map[uint64][]byte) string {
 	var b strings.Builder
 	waiting := atomic.LoadUint32((*uint32)(unsafe.Add(tr.ring.Shared, ffi.RingOffWaiting)))

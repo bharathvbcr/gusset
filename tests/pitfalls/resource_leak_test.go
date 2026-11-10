@@ -803,7 +803,7 @@ func TestResourceLeak_ViolentCloseRace_CancellationAndFDZeroLeak(t *testing.T) {
 		final.rustThreads(), final.rustThreads()-base.rustThreads(),
 		final.rustLive, int64(final.rustLive)-int64(base.rustLive))
 
-	if final.fds != base.fds {
+	if fdLeaked(base.fds, final.fds) {
 		t.Errorf("File descriptor leak after violent close races: base=%d, final=%d (delta=%d)",
 			base.fds, final.fds, final.fds-base.fds)
 	}
@@ -865,7 +865,7 @@ func TestResourceLeak_KqueueNetpollerRapidChurnStress(t *testing.T) {
 		final.rustThreads(), final.rustThreads()-base.rustThreads(),
 		final.goroutines, final.goroutines-base.goroutines)
 
-	if final.fds != base.fds {
+	if fdLeaked(base.fds, final.fds) {
 		t.Errorf("FD leak after %d kqueue churn cycles: base=%d, final=%d (delta=%d)",
 			churnCycles, base.fds, final.fds, final.fds-base.fds)
 	}
@@ -1005,7 +1005,7 @@ func TestResourceLeak_ProlongedSoakWithGoroutineLeakProfileAudit(t *testing.T) {
 	}
 
 	// Check 2: exact FD delta
-	if final.fds != base.fds {
+	if fdLeaked(base.fds, final.fds) {
 		t.Errorf("FD leak detected after 100k soak: base=%d, final=%d (delta=%d)",
 			base.fds, final.fds, final.fds-base.fds)
 	}
