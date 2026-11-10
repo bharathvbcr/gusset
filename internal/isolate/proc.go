@@ -658,7 +658,11 @@ func (p *Proc) submitCounted(ctx context.Context, in []byte) (id uint64, unsent 
 		if cerr := ctx.Err(); cerr != nil {
 			return 0, false, cerr
 		}
-		if errors.Is(err, context.DeadlineExceeded) {
+		// Only a caller that set a deadline owns that error. A cancellable
+		// context without one gets the internal write bound
+		// (internalWriteDeadline); when that fires the caller's context has not
+		// ended, so the error is not its deadline and takes the path below.
+		if _, has := ctx.Deadline(); has && errors.Is(err, context.DeadlineExceeded) {
 			return 0, false, err
 		}
 		select {
@@ -692,6 +696,13 @@ func (p *Proc) send(ctx context.Context, req *request) error {
 	return p.writeLocked(ctx, req)
 }
 
+// internalWriteDeadline bounds a write whose context can be cancelled but has
+// no deadline, so cancellation has a deadline to move into the past. It is a
+// variable only so a test can shorten it; production never changes it. When it
+// fires, writeLocked still returns context.DeadlineExceeded, and submitCounted
+// declines to report that as the caller's deadline (the caller set none).
+var internalWriteDeadline = 24 * time.Hour
+
 func (p *Proc) writeLocked(ctx context.Context, req *request) error {
 	if err := ctx.Err(); err != nil {
 		// The lock was acquired after the context ended, and nothing was written.
@@ -707,7 +718,7 @@ func (p *Proc) writeLocked(ctx context.Context, req *request) error {
 		}
 		arm = true
 	} else if ctx.Done() != nil {
-		if err := p.stdin.SetWriteDeadline(time.Now().Add(24 * time.Hour)); err != nil {
+		if err := p.stdin.SetWriteDeadline(time.Now().Add(internalWriteDeadline)); err != nil {
 			return err
 		}
 		arm = true
