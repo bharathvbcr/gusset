@@ -591,8 +591,9 @@ func FuzzTicketReaderFakeRing(f *testing.F) {
 // already decided the reader stalled and is about to t.Fatalf, so the test has
 // failed either way; under -race the extra DATA RACE report is more evidence
 // about the same stall, not a second defect. The unit tests in
-// ring_stall_state_internal_test.go call it on passing paths, but against a
-// reader that is parked, not running, so they do not race. No caller may use
+// ring_stall_state_internal_test.go call it on passing paths, but on a
+// ticketReader whose read loop was never started, so nothing writes its
+// fields concurrently and they do not race. No caller may use
 // it against a running reader on a passing path. The waiting flag, the
 // overflow count and the slot sequences are read atomically and are
 // race-clean.
