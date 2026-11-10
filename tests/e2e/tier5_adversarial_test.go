@@ -233,6 +233,14 @@ type closeRaceOutcome struct {
 	err error
 }
 
+// closeRaceEchoOp reports whether op, when it recorded a nil error, is a result
+// that was received and byte-checked against the request: a Call, a Wait or a
+// WaitBuffer that was not a closed-handle result. Discard and Free returning
+// nil, and "waitbuffer-closed" (nil Bytes after Close), are not.
+func closeRaceEchoOp(op string) bool {
+	return op == "call-slow" || op == "wait" || op == "waitbuffer"
+}
+
 // closeRaceNamedError reports whether err is one of the answers an operation may
 // give when the handle is closed under it: the handle is closed, a ticket is no
 // longer there, or the caller's own timeout ended. Anything else is a bug.
@@ -254,7 +262,7 @@ func closeRaceNamedError(err error) bool {
 // error, both Closes must return nil or ErrClosed, and the buffer bytes the
 // handle held must be back at the baseline once everything has returned.
 func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
-	var echoes, namedErrors int
+	var echoes, otherOK, namedErrors int
 	for iteration := 0; iteration < 8; iteration++ {
 		baselineLive := livebytes.Quiesce(t)
 		h, err := gusset.Open(
@@ -400,8 +408,13 @@ func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 		}
 		for _, o := range outcomes {
 			switch {
-			case o.err == nil:
+			case o.err == nil && closeRaceEchoOp(o.op):
 				echoes++
+			case o.err == nil:
+				// A closed-handle WaitBuffer result (nil Bytes), a Discard or a
+				// Free that returned nil: valid, but no work completed before
+				// Close, so it must not satisfy the echoes guard below.
+				otherOK++
 			case closeRaceNamedError(o.err):
 				namedErrors++
 			default:
@@ -434,7 +447,8 @@ func TestTier5_Adversarial_HandleCloseRaces_InFlightTickets(t *testing.T) {
 			t.Fatalf("iteration %d: expected ErrClosed on post-close NewBuffer, got: %v", iteration, errBuf)
 		}
 	}
-	t.Logf("close races: %d valid results, %d named errors across 8 iterations", echoes, namedErrors)
+	t.Logf("close races: %d echoed results, %d other nil outcomes (closed WaitBuffer, discard, free), %d named errors across 8 iterations",
+		echoes, otherOK, namedErrors)
 	if echoes == 0 {
 		t.Fatalf("no operation completed before Close in any iteration; the race was never run against live work")
 	}
@@ -999,5 +1013,28 @@ func TestCloseRaceEchoVerdict(t *testing.T) {
 					len(tc.got), tc.got == nil, tc.closeStarted, closed, err, tc.wantClosed, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestCloseRaceEchoOp pins which nil-error outcomes feed the echoes guard of
+// the close-race test: only received, byte-checked results. A closed-handle
+// WaitBuffer, a Discard and the Frees return nil without any work having
+// completed before Close, so counting them would let the guard pass on a run
+// where every job lost the race.
+func TestCloseRaceEchoOp(t *testing.T) {
+	for op, want := range map[string]bool{
+		"call-slow":          true,
+		"wait":               true,
+		"waitbuffer":         true,
+		"waitbuffer-closed":  false,
+		"discard":            false,
+		"buffer-free":        false,
+		"outbuf-free":        false,
+		"newbuffer":          false,
+		"call-slow-bad-echo": false,
+	} {
+		if got := closeRaceEchoOp(op); got != want {
+			t.Errorf("closeRaceEchoOp(%q) = %v, want %v", op, got, want)
+		}
 	}
 }

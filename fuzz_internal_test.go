@@ -581,9 +581,17 @@ func FuzzTicketReaderFakeRing(f *testing.F) {
 // waiting flag still set with no slot published is a lost completion, and an
 // overflow count ahead of overflowSeen is a pipe record never read.
 //
-// The reader goroutine is still blocked inside next, so its fields are read
-// without synchronisation. This runs only on the failure path, where a race
-// report is more evidence, not a second defect.
+// DIAGNOSTIC ONLY, NOT RACE-CLEAN. The reader goroutine may still be running
+// inside next, and start, end, buf, head, overflowSeen and tokensOwed are
+// plain fields that goroutine writes, so reading them here is a data race that
+// `go test -race` reports. Making it race-clean needs synchronisation inside
+// ticketReader (ticket_reader.go / drain.go), which this test-only helper does
+// not own and which would add cost to the production read path for a
+// failure-only report. It runs solely after the watchdog has already decided
+// the reader stalled and is about to t.Fatalf, so the test has failed either
+// way; under -race the extra DATA RACE report is more evidence about the same
+// stall, not a second defect. Nothing on a passing path may call it. The
+// slot/ring words above are read atomically and are race-clean.
 func ringStallState(tr *ticketReader, want map[uint64][]byte) string {
 	var b strings.Builder
 	waiting := atomic.LoadUint32((*uint32)(unsafe.Add(tr.ring.Shared, ffi.RingOffWaiting)))
@@ -656,6 +664,9 @@ func FuzzTicketReaderRustRing(f *testing.F) {
 			select {
 			case got = <-ch:
 			case <-time.After(readerWatchdog):
+				// Diagnostic-only read of a reader that is still running: see
+				// ringStallState. Under -race it may add a DATA RACE report to
+				// a test that is failing here regardless.
 				state := ringStallState(tr, want)
 				t.Fatalf("reader stalled with %d completions outstanding\n%s\n%s",
 					len(want), state, stacksThenUnblock(stackDumpMax, unblockReader(r)))

@@ -732,6 +732,14 @@ mod tests {
         };
         assert!(live_pages > 0, "the probe cannot see a live mapping");
         assert!(disabled, "our stack was left installed");
+        // Accepted, documented flake (see `mapped_pages`): a parallel test that
+        // mmaps between the drop and the probe can land on a page of the
+        // just-freed range, and that page then reads as mapped. A lock cannot
+        // close it here: every lib test that starts a pool installs an alt
+        // stack through `install_sigaltstack`, not only the two in this module,
+        // and `mmap` placement is the kernel's. If this fails with a small
+        // `pages_left` and passes on a rerun, it is that reuse; a leak leaves
+        // all `live_pages` mapped, deterministically.
         assert_eq!(
             pages_left, 0,
             "{pages_left} of {live_pages} pages of our mapping were leaked on the normal path"
