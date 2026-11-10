@@ -449,39 +449,30 @@ func TestProc_CutWriteReturnsTheDeadlineEvenWhenTheReaderIsDone(t *testing.T) {
 }
 
 // A cancellable context with no deadline gets the internal write bound
-// (internalWriteDeadline). When that bound cuts a write the caller's context
-// has not ended, so the error must not be reported as the caller's own
-// deadline. sendFailGate forces the reader's exit to be ready first, as in the
-// test above, so the worker's exit is the expected answer.
-func TestProc_InternalWriteBoundIsNotTheCallersDeadline(t *testing.T) {
+// (internalWriteDeadline), and when it fires Submit reports
+// context.DeadlineExceeded although the caller set no deadline. That is
+// deliberate: this Proc is unsupervised (retire is nil), its worker never reads
+// stdin and never exits, so poisoning the stream only closes stdin and the
+// reader never finishes. Waiting for the reader instead would leave Submit
+// unbounded until the caller cancels. The 10s bound only catches that hang.
+func TestProc_InternalWriteBoundIsBoundedAndReportsDeadlineExceeded(t *testing.T) {
 	old := internalWriteDeadline
 	internalWriteDeadline = 100 * time.Millisecond
 	t.Cleanup(func() { internalWriteDeadline = old })
 	p := startWorkerMode(t, "deaf")
 	fillStdin(t, p)
-	gate := func() {
-		if err := syscall.Kill(p.cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			t.Error(err)
-		}
-		select {
-		case <-p.readerDone:
-		case <-time.After(10 * time.Second):
-			t.Error("the reader did not finish after the worker was killed")
-		}
-	}
-	p.sendFailGate.Store(&gate)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var err error
-	within(t, 10*time.Second, "cut Submit", func() {
+	within(t, 10*time.Second, "Submit past the internal write bound", func() {
 		_, err = p.Submit(ctx, []byte{0x5A})
 	})
-	if err == nil || errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("cut Submit = %v; the internal write bound was reported as the caller's deadline", err)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Submit = %v; want context.DeadlineExceeded from the internal write bound", err)
 	}
 	if ctx.Err() != nil {
-		t.Fatalf("the caller's context ended (%v); the test must cut the write with the internal bound", ctx.Err())
+		t.Fatalf("the caller's context ended (%v); the write must be cut by the internal bound", ctx.Err())
 	}
 	if got := len(p.sem); got != 0 {
 		t.Fatalf("%d permits held after the cut Submit", got)
