@@ -658,6 +658,12 @@ func (p *Proc) submitCounted(ctx context.Context, in []byte) (id uint64, unsent 
 		if cerr := ctx.Err(); cerr != nil {
 			return 0, false, cerr
 		}
+		// A cancellable context with no deadline gets the internal write bound
+		// (internalWriteDeadline). When it fires, Submit reports
+		// context.DeadlineExceeded although the caller set no deadline. That
+		// is deliberate: the stream is poisoned, and an unsupervised Proc whose
+		// worker stopped reading stdin does not exit, so waiting on the reader
+		// below would leave Submit unbounded until the caller cancels.
 		if errors.Is(err, context.DeadlineExceeded) {
 			return 0, false, err
 		}
@@ -692,6 +698,14 @@ func (p *Proc) send(ctx context.Context, req *request) error {
 	return p.writeLocked(ctx, req)
 }
 
+// internalWriteDeadline bounds a write whose context can be cancelled but has
+// no deadline, so cancellation has a deadline to move into the past. It is a
+// variable only so a test can shorten it; production never changes it. When it
+// fires, writeLocked returns context.DeadlineExceeded and submitCounted passes
+// it on, so a caller that set no deadline still sees DeadlineExceeded; that is
+// documented behaviour (DECISIONS 2026-11-09), not a caller's deadline.
+var internalWriteDeadline = 24 * time.Hour
+
 func (p *Proc) writeLocked(ctx context.Context, req *request) error {
 	if err := ctx.Err(); err != nil {
 		// The lock was acquired after the context ended, and nothing was written.
@@ -707,7 +721,7 @@ func (p *Proc) writeLocked(ctx context.Context, req *request) error {
 		}
 		arm = true
 	} else if ctx.Done() != nil {
-		if err := p.stdin.SetWriteDeadline(time.Now().Add(24 * time.Hour)); err != nil {
+		if err := p.stdin.SetWriteDeadline(time.Now().Add(internalWriteDeadline)); err != nil {
 			return err
 		}
 		arm = true
