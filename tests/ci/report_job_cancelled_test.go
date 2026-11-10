@@ -93,9 +93,10 @@ func mainRefGuarded(cond string) bool {
 
 // reportWithoutMainRefViolations reports every job whose job-level `if:`
 // matches on failure (a report job: it files or updates an issue) and is not
-// limited to github.ref == 'refs/heads/main'. Without the guard a failing
-// manual dispatch on a branch, or a run somebody cancelled by hand, files the
-// tracking issue for a run whose author is already watching it.
+// limited to github.ref == 'refs/heads/main'. Without the guard a manual
+// dispatch on a branch that fails or is cancelled files the tracking issue for
+// a run whose author is already watching it. (A run on main cancelled by hand
+// still reports; the guard is about the ref, not who cancelled.)
 func reportWithoutMainRefViolations(name string, lines []string) []string {
 	var out []string
 	for _, job := range splitJobs(lines) {
@@ -104,7 +105,7 @@ func reportWithoutMainRefViolations(name string, lines []string) []string {
 		if !ok || !failureCond.MatchString(trailingComment.ReplaceAllString(cond, "")) || mainRefGuarded(cond) {
 			continue
 		}
-		out = append(out, name+": job "+jobName(jl)+" reports on failure but is not limited to refs/heads/main, so a branch dispatch or a hand-cancelled run files an issue: if: "+cond)
+		out = append(out, name+": job "+jobName(jl)+" reports on failure but is not limited to refs/heads/main, so a failing or cancelled dispatch on a branch files an issue: if: "+cond)
 	}
 	return out
 }
