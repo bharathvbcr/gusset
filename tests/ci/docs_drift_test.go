@@ -93,7 +93,8 @@ func jobIDs(lines []string) []string {
 			in = false
 		}
 		if in && jobHeader.MatchString(l) {
-			ids = append(ids, strings.TrimSuffix(strings.TrimSpace(l), ":"))
+			id, _ := jobID(l)
+			ids = append(ids, id)
 		}
 	}
 	return ids

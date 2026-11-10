@@ -16,8 +16,33 @@ import (
 var (
 	usesLine   = regexp.MustCompile(`^\s*(?:- )?uses:\s*(\S+)(.*)$`)
 	pinnedUses = regexp.MustCompile(`^[\w.-]+/[\w./-]+@[0-9a-f]{40}$`)
-	jobHeader  = regexp.MustCompile(`^  [A-Za-z0-9_-]+:\s*$`)
+	// jobHeader is a job id at the 2-space indent: bare or quoted, with an
+	// optional space before the colon and an optional trailing comment. Read
+	// the id with jobID, never by trimming the line.
+	jobHeader = regexp.MustCompile(`^  (?:[A-Za-z0-9_-]+|"[A-Za-z0-9_-]+"|'[A-Za-z0-9_-]+')\s*:\s*(?:#.*)?$`)
+	// jobsKey is the top-level `jobs:` line, with an optional trailing comment.
+	jobsKey = regexp.MustCompile(`^(?:jobs|"jobs"|'jobs')\s*:\s*(?:#.*)?$`)
 )
+
+// jobID returns the id on a job header line, unquoted.
+func jobID(l string) (string, bool) {
+	if !jobHeader.MatchString(l) {
+		return "", false
+	}
+	l = strings.TrimSpace(stripComment(l))
+	l = strings.TrimSpace(strings.TrimSuffix(l, ":"))
+	return strings.Trim(l, `"'`), true
+}
+
+// splitLines splits workflow text into lines without their `\r`, so a CRLF
+// checkout reads the same as an LF one.
+func splitLines(s string) []string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimSuffix(l, "\r")
+	}
+	return lines
+}
 
 // workflowFiles lists the workflow files in dir: GitHub runs .yml and .yaml
 // alike, and a rule that read one extension would never see a workflow added
@@ -46,7 +71,7 @@ func workflows(t *testing.T) map[string][]string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		out[filepath.Base(p)] = strings.Split(string(b), "\n")
+		out[filepath.Base(p)] = splitLines(string(b))
 	}
 	return out
 }

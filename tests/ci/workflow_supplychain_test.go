@@ -441,7 +441,8 @@ func splitJobs(lines []string) []string {
 	var jobs []string
 	inJobs := false
 	for _, l := range lines {
-		if strings.TrimRight(l, " ") == "jobs:" {
+		l = strings.TrimSuffix(l, "\r")
+		if jobsKey.MatchString(l) {
 			inJobs = true
 			continue
 		}
