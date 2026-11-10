@@ -583,8 +583,8 @@ func FuzzTicketReaderFakeRing(f *testing.F) {
 //
 // DIAGNOSTIC ONLY, NOT RACE-CLEAN. The reader goroutine may still be running
 // inside next, and start, end, buf, head, overflowSeen and tokensOwed are
-// plain fields that goroutine writes, so reading them here is a data race that
-// `go test -race` reports. Making it race-clean needs synchronisation inside
+// plain fields that goroutine writes, so reading them here is a data race,
+// which `go test -race` may report. Making it race-clean needs synchronisation inside
 // ticketReader (ticket_reader.go / drain.go), which this test-only helper does
 // not own and which would add cost to the production read path for a
 // failure-only report. It runs solely after the watchdog has already decided
