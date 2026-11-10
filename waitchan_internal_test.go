@@ -761,7 +761,9 @@ func TestSerialCall_HandsOffWithoutScheduling(t *testing.T) {
 // to two Linux CPUs (taskset 0,1) the code before the fix passed it 55 times
 // out of 55, on a darwin host at load 17.5 it passed 13 of 16, and on GitHub's
 // macos-latest runners it woke 25-45 us late, inside the bound. On GitHub's
-// Linux runners it fails every run (6.3-14 ms). No tail
+// Linux runners it failed at 6.3-14 ms in the runs first recorded (the
+// budget below rests on 6.3 ms as that floor; a later 40-run probe saw
+// 1.86-15.9 ms, see the budget). No tail
 // statistic set beside the median separated the two builds on Linux either
 // (bench/results/handoff-gomaxprocs/wake-tail/). TestQuietProcs_FollowsGOMAXPROCS
 // and TestPollResult_Gates check the gate itself rather than a wake time, and
@@ -844,11 +846,30 @@ func TestSerialCall_LeavesAPForOtherGoroutines(t *testing.T) {
 	}
 
 	median := late[len(late)/2]
-	// 100 us over the baseline: 10x the median measured with a P to spare, and
-	// a third of the lowest median measured with both Ps held.
-	if limit := base + 100*time.Microsecond; median > limit {
+	// 1 ms over the baseline, set from GitHub Linux runner medians (ft-c689767b).
+	// The earlier 100 us over the baseline failed correct code: ten failing
+	// rows over three days had medians of 121.4 (two rows of one run), 180.6,
+	// 119.3, 210.8, 144.6, 109.8, 117.4, 103.5 (PR #61, Rust 1.97 floor, run
+	// 42754607690) and 167.6 us (two of the runs were on a push that changed
+	// only comments), against a baseline of 0.3-0.6 us in the same runs. They
+	// came under the full suite's load. The budget must clear the slowest
+	// correct median with margin and sit far under the broken code's: at least
+	// 2x 210.8 us = 422 us, and at most 1/5 of 6.3 ms (the earlier recorded
+	// floor of the code before the fix on these runners, above) = 1.26 ms.
+	// 1 ms is 4.7x the slowest correct median and 6.3x under that floor.
+	//
+	// Probe, test alone on ubuntu-latest and ubuntu-24.04-arm, GOMAXPROCS=2
+	// (run 42758127775): the fixed build 20 of 20 passes each (medians 1.5-6.7
+	// us); the code before the fix, quietAt(procs) = procs > 1, failed 40 of 40
+	// at 1.86-15.9 ms. The thinnest margin is ARM's 1.86 ms, about 1.9x the
+	// 1 ms budget. In an earlier probe run (42757990314, aborted by a shell
+	// error after one planted run) one planted sample in 21 passed at 81 us,
+	// which the previous budget would also have passed. Linux runners are the
+	// only hosts where this discriminates; see the passes noted above on
+	// darwin and under taskset.
+	if limit := base + time.Millisecond; median > limit {
 		t.Fatalf("a goroutine sleeping %v beside serial Calls at GOMAXPROCS=2 woke %v late "+
-			"at the median over %d wakes (max %v), want <= %v (%v with no Calls, plus 100 us): "+
+			"at the median over %d wakes (max %v), want <= %v (%v with no Calls, plus 1 ms): "+
 			"the waiter and the reader held both Ps", nap, median, len(late), late[len(late)-1], limit, base)
 	}
 	t.Logf("%d wakes beside serial Calls: median %v late (%v with none), max %v", len(late), median, base, late[len(late)-1])

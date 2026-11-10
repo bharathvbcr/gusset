@@ -236,6 +236,14 @@ fn log_ring_evicts_oldest_and_stays_bounded() {
                 .and_then(|d| d.parse::<usize>().ok())
         })
         .unwrap_or_else(|| panic!("no line-N line survived"));
+    // Scope of the front-fragment check: it catches only a cut of this test's
+    // own `line-{first_ours - 1}` line (the line evicted just before our first
+    // retained one), left at the front as a proper suffix. It cannot catch a
+    // cut foreign line: a foreign line has no known text to compare with, and a
+    // front line that does not start with `line-` is indistinguishable from a
+    // whole foreign line logged by another test in this binary. It is skipped
+    // when the front line is a `line-` line, which the loop above already
+    // judges as a whole one, and when our first retained line is `line-0`.
     if let Some(front) = text.lines().next() {
         if !front.starts_with("line-") && first_ours > 0 {
             assert!(

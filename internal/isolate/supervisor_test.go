@@ -448,6 +448,37 @@ func TestProc_CutWriteReturnsTheDeadlineEvenWhenTheReaderIsDone(t *testing.T) {
 	}
 }
 
+// A cancellable context with no deadline gets the internal write bound
+// (internalWriteDeadline), and when it fires Submit reports
+// context.DeadlineExceeded although the caller set no deadline. That is
+// deliberate: this Proc is unsupervised (retire is nil), its worker never reads
+// stdin and never exits, so poisoning the stream only closes stdin and the
+// reader never finishes. Waiting for the reader instead would leave Submit
+// unbounded until the caller cancels. The 10s bound only catches that hang.
+func TestProc_InternalWriteBoundIsBoundedAndReportsDeadlineExceeded(t *testing.T) {
+	old := internalWriteDeadline
+	internalWriteDeadline = 100 * time.Millisecond
+	t.Cleanup(func() { internalWriteDeadline = old })
+	p := startWorkerMode(t, "deaf")
+	fillStdin(t, p)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var err error
+	within(t, 10*time.Second, "Submit past the internal write bound", func() {
+		_, err = p.Submit(ctx, []byte{0x5A})
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Submit = %v; want context.DeadlineExceeded from the internal write bound", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("the caller's context ended (%v); the write must be cut by the internal bound", ctx.Err())
+	}
+	if got := len(p.sem); got != 0 {
+		t.Fatalf("%d permits held after the cut Submit", got)
+	}
+}
+
 func TestSupervisor_CutWriteRetiresOneRestart(t *testing.T) {
 	h := newHarness(t, Policy{MaxRestarts: 1, Window: time.Minute}, func(n int) string {
 		if n == 1 {
@@ -913,23 +944,34 @@ func TestSupervisor_TicketIDsStopAtTheCeiling(t *testing.T) {
 // start and handshake are not charged to anything short; only the Wait is
 // short, and it ends in the cancel whether the deadline fires before or after
 // the Wait begins, so a slow host cannot leave a permit unheld. It returns the
-// generation's Proc, taken before any permit is stranded: after a stall
-// retirement s.live is nil until the next caller starts a replacement, so the
-// proc cannot be read back from the supervisor later.
+// generation's Proc, read from the ticket the first Submit was bound to (not
+// from a separate ensure, which a replacement between the two calls would make
+// a different worker), and fails the test if a later Submit binds another one,
+// since then the returned Proc's pool is not the one stranded. It is read
+// before any permit is stranded: after a stall retirement s.live is nil until
+// the next caller starts a replacement, so the proc cannot be read back from
+// the supervisor later.
 func abandonPool(t *testing.T, h *supHarness, payload []byte) *Proc {
 	t.Helper()
-	ectx, ecancel := context.WithTimeout(context.Background(), 10*time.Second)
-	g, err := h.s.ensure(ectx)
-	ecancel()
-	if err != nil {
-		t.Fatalf("starting the worker to abandon its pool = %v", err)
-	}
+	var bound *Proc
 	for i := 0; i < workerPool; i++ {
 		sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
 		id, err := h.s.Submit(sctx, payload)
 		scancel()
 		if err != nil {
 			t.Fatalf("Submit %d while abandoning the pool = %v", i, err)
+		}
+		h.s.mu.Lock()
+		tk, ok := h.s.tickets[id]
+		h.s.mu.Unlock()
+		if !ok || tk.gen == nil {
+			t.Fatalf("Submit %d returned ticket %d, which the supervisor no longer holds", i, id)
+		}
+		got := tk.gen.proc
+		if bound == nil {
+			bound = got
+		} else if got != bound {
+			t.Fatalf("Submit %d bound a different worker than Submit 0; the pool was not stranded on one", i)
 		}
 		wctx, wcancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		_, err = h.s.Wait(wctx, id)
@@ -938,7 +980,7 @@ func abandonPool(t *testing.T, h *supHarness, payload []byte) *Proc {
 			t.Fatalf("abandoning Wait %d = %v; want DeadlineExceeded", i, err)
 		}
 	}
-	return g.proc
+	return bound
 }
 
 // stallRetiredAsUnresponsive is the A4-1 flow for a worker that is alive and

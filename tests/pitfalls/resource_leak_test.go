@@ -125,6 +125,12 @@ func rustLiveVerdict(baseline, live uint64) (delta int64, leaked bool) {
 	return int64(live) - int64(baseline), !livebytes.NotLeaked(baseline, live)
 }
 
+// fdLeaked is the one fd leak predicate for this file: exact, not "above".
+// The baseline is quiesced, so any difference in either direction is a real
+// change in open descriptors; a +1 leak that a straggler closing two fds
+// turns into -1 would be missed by final > base.
+func fdLeaked(base, final int) bool { return final != base }
+
 // takeResourceBaseline is takeResourceSample with rustLive and fds replaced
 // by quiesced readings, so a straggler's cleanup cannot push either under the
 // baseline after it is taken. The fd checks stay exact (!=): a +1 leak that a
@@ -361,7 +367,7 @@ func TestResourceLeak_GoroutinesAndPipesZeroLeakUnderSoak(t *testing.T) {
 	}
 
 	// Assertion 3: finalFDs - baseFDs == 0
-	if fdDelta != 0 {
+	if fdLeaked(base.fds, final.fds) {
 		t.Errorf("File descriptor leak detected: base=%d, final=%d (delta=%d)", base.fds, final.fds, fdDelta)
 		failed = true
 	}
@@ -500,7 +506,7 @@ func TestResourceLeak_MultiHandleChurnAndTeardownZeroLeak(t *testing.T) {
 	failed := false
 
 	// Assertion 1: Pipes and descriptors completely reclaimed
-	if fdDelta != 0 {
+	if fdLeaked(base.fds, final.fds) {
 		t.Errorf("File descriptor leak after %d handle cycles: base=%d, final=%d (delta=%d)",
 			totalHandles, base.fds, final.fds, fdDelta)
 		failed = true
@@ -653,7 +659,7 @@ func TestResourceLeak_ThreadCountingFidelityAndActiveStackVerification(t *testin
 		t.Errorf("Rust worker threads not joined after Close: base=%d, final=%d (delta=%d)",
 			base.rustThreads(), finalRustThreads, finalRustThreads-base.rustThreads())
 	}
-	if final.fds != base.fds {
+	if fdLeaked(base.fds, final.fds) {
 		t.Errorf("Pipe file descriptors leaked after Close: base=%d, final=%d (delta=%d)",
 			base.fds, final.fds, final.fds-base.fds)
 	}
@@ -685,7 +691,7 @@ func TestResourceLeak_ThreadCountingFidelityAndActiveStackVerification(t *testin
 		t.Errorf("Native thread leak after churn: base=%d, final=%d",
 			base.rustThreads(), settledAfterChurn.rustThreads())
 	}
-	if settledAfterChurn.fds != base.fds {
+	if fdLeaked(base.fds, settledAfterChurn.fds) {
 		t.Errorf("FD leak after churn: base=%d, final=%d", base.fds, settledAfterChurn.fds)
 	}
 }
@@ -797,7 +803,7 @@ func TestResourceLeak_ViolentCloseRace_CancellationAndFDZeroLeak(t *testing.T) {
 		final.rustThreads(), final.rustThreads()-base.rustThreads(),
 		final.rustLive, int64(final.rustLive)-int64(base.rustLive))
 
-	if final.fds != base.fds {
+	if fdLeaked(base.fds, final.fds) {
 		t.Errorf("File descriptor leak after violent close races: base=%d, final=%d (delta=%d)",
 			base.fds, final.fds, final.fds-base.fds)
 	}
@@ -859,7 +865,7 @@ func TestResourceLeak_KqueueNetpollerRapidChurnStress(t *testing.T) {
 		final.rustThreads(), final.rustThreads()-base.rustThreads(),
 		final.goroutines, final.goroutines-base.goroutines)
 
-	if final.fds != base.fds {
+	if fdLeaked(base.fds, final.fds) {
 		t.Errorf("FD leak after %d kqueue churn cycles: base=%d, final=%d (delta=%d)",
 			churnCycles, base.fds, final.fds, final.fds-base.fds)
 	}
@@ -999,7 +1005,7 @@ func TestResourceLeak_ProlongedSoakWithGoroutineLeakProfileAudit(t *testing.T) {
 	}
 
 	// Check 2: exact FD delta
-	if final.fds != base.fds {
+	if fdLeaked(base.fds, final.fds) {
 		t.Errorf("FD leak detected after 100k soak: base=%d, final=%d (delta=%d)",
 			base.fds, final.fds, final.fds-base.fds)
 	}

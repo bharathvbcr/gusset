@@ -211,9 +211,45 @@ impl Drop for SigAltStackGuard {
                 off.ss_flags = libc::SS_DISABLE;
                 off.ss_size = cur.ss_size;
                 if libc::sigaltstack(&off, std::ptr::null_mut()) == 0 {
-                    libc::munmap(self.map_base, self.map_len);
+                    let _rc = libc::munmap(self.map_base, self.map_len);
+                    #[cfg(test)]
+                    if _rc == 0 {
+                        unmapped_record::note(self.map_base as usize, self.map_len);
+                    }
                 }
             }
+        }
+    }
+}
+
+/// Test-only record of every `(base, len)` the guard's drop unmapped
+/// successfully. A test takes its verdict from the guard's own `munmap`, not
+/// from probing the freed address range afterwards, which a parallel test's
+/// `mmap` can reuse.
+#[cfg(test)]
+mod unmapped_record {
+    use std::sync::Mutex;
+
+    static UNMAPPED: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+    fn lock() -> std::sync::MutexGuard<'static, Vec<(usize, usize)>> {
+        // A panicking test thread poisons the lock; the record stays valid.
+        UNMAPPED.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(super) fn note(base: usize, len: usize) {
+        lock().push((base, len));
+    }
+
+    /// Removes one matching entry and reports whether there was one.
+    pub(super) fn take(base: usize, len: usize) -> bool {
+        let mut v = lock();
+        match v.iter().position(|&e| e == (base, len)) {
+            Some(i) => {
+                v.swap_remove(i);
+                true
+            }
+            None => false,
         }
     }
 }
@@ -672,69 +708,42 @@ mod tests {
         assert!(outcome, "the guard's drop clobbered a foreign sigaltstack");
     }
 
-    /// How many pages of `[base, base + len)` are mapped, asked one page at a
-    /// time with `msync(MS_ASYNC)`, which fails with ENOMEM for an unmapped
-    /// page and otherwise schedules nothing for private anonymous memory. One
-    /// call over the whole range would answer ENOMEM if ANY page were
-    /// unmapped, so a drop that unmapped only part of the range would pass.
-    ///
-    /// The test used to ask `mprotect(PROT_NONE)`, which on a range another
-    /// test's `mmap` had reused in the meantime (tests run in parallel and map
-    /// alt stacks of this very size) disabled that worker's live signal stack.
-    /// `mincore(2)` was the first candidate, but on macOS it returns 0 for an
-    /// unmapped range, so it cannot answer this. The check stays a snapshot,
-    /// and it has the old probe's race: if a parallel test's `mmap` reuses a
-    /// page of the hole between the drop and the probe, that page reads as
-    /// mapped and the test fails falsely. The window is microseconds wide, and
-    /// unlike the `mprotect` probe the check itself damages nothing.
-    fn mapped_pages(base: *mut libc::c_void, len: usize) -> usize {
-        // SAFETY: sysconf has no preconditions.
-        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
-        assert!(
-            page > 0 && len.is_multiple_of(page),
-            "range is not whole pages"
-        );
-        (0..len / page)
-            .filter(|&i| {
-                // SAFETY: msync(MS_ASYNC) does not access the page.
-                let rc = unsafe { libc::msync(base.byte_add(i * page), page, libc::MS_ASYNC) };
-                if rc == 0 {
-                    return true;
-                }
-                let errno = std::io::Error::last_os_error().raw_os_error();
-                assert_eq!(errno, Some(libc::ENOMEM), "msync failed for another reason");
-                false
-            })
-            .count()
-    }
-
     /// The ordinary path still disables and unmaps what it installed.
+    ///
+    /// The verdict comes from the guard's own `munmap` (recorded under
+    /// `cfg(test)` with its exact `(base, len)`), not from probing the freed
+    /// range afterwards: a parallel test's `mmap` can land in that range, and
+    /// every lib test that starts a pool installs an alt stack, so a probe of
+    /// the address space false-fails (CI saw 5 of 9 and 2 of 17 pages "leaked").
+    /// Parallel tests drop guards too, so the pair is matched, not a count.
     #[test]
     #[cfg_attr(miri, ignore)] // sigaltstack(2) and mmap: not Miri-runnable
     fn guard_drop_disables_and_unmaps_its_own_sigaltstack() {
         let result = std::thread::spawn(|| {
             let guard = install_or_panic();
-            let (base, len) = (guard.map_base, guard.map_len);
-            // The probe must see every page of the live mapping, or "unmapped"
-            // below proves nothing.
-            let live_pages = mapped_pages(base, len);
+            let (base, len) = (guard.map_base as usize, guard.map_len);
+            // While our guard holds this range nobody else can unmap it, so
+            // any entry for the pair now is stale (an earlier guard whose
+            // mapping sat at the same address). Drain them so the match
+            // after the drop can only be this drop's own munmap.
+            while unmapped_record::take(base, len) {}
             drop(guard);
             let cur = current_altstack();
             (
-                live_pages,
+                base,
+                len,
                 cur.ss_flags & libc::SS_DISABLE != 0,
-                mapped_pages(base, len),
+                unmapped_record::take(base, len),
             )
         })
         .join();
-        let Ok((live_pages, disabled, pages_left)) = result else {
+        let Ok((base, len, disabled, unmapped)) = result else {
             panic!("the sigaltstack thread panicked");
         };
-        assert!(live_pages > 0, "the probe cannot see a live mapping");
         assert!(disabled, "our stack was left installed");
-        assert_eq!(
-            pages_left, 0,
-            "{pages_left} of {live_pages} pages of our mapping were leaked on the normal path"
+        assert!(
+            unmapped,
+            "the guard's drop did not munmap exactly {len} bytes at {base:#x} on the normal path"
         );
     }
 

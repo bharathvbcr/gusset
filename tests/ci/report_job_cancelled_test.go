@@ -29,6 +29,9 @@ var (
 	// does not match.
 	cancelledResult = regexp.MustCompile(`(?:^|[^!\w])contains\(\s*needs\.\*\.result\s*,\s*'cancelled'\s*\)|(?:^|[^!\w.])needs\.[\w-]+\.result\s*==\s*'cancelled'`)
 	trailingComment = regexp.MustCompile(`\s#.*$`)
+	// A positive test of the main ref: `github.ref == 'refs/heads/main'`, not
+	// under `!` and not `!=`.
+	mainRefGuard = regexp.MustCompile(`(?:^|[^!\w.])github\.ref\s*==\s*'refs/heads/main'`)
 )
 
 // reportCondOK says whether a job-level `if:` that matches on failure also
@@ -57,6 +60,56 @@ func failureWithoutCancelledViolations(name string, lines []string) []string {
 	return out
 }
 
+// topLevel blanks everything inside parentheses, leaving the operators that
+// join the whole expression: `always() && github.ref == 'x' && (a || b)` keeps
+// the first two terms and loses the `||`, which is the group's own.
+func topLevel(cond string) string {
+	depth := 0
+	var sb strings.Builder
+	for _, r := range cond {
+		switch {
+		case r == '(':
+			depth++
+			sb.WriteRune(' ')
+		case r == ')':
+			depth--
+			sb.WriteRune(' ')
+		case depth > 0:
+			sb.WriteRune(' ')
+		default:
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
+}
+
+// mainRefGuarded says whether a job-level `if:` is an AND of terms one of which
+// is github.ref == 'refs/heads/main'. A guard that is one arm of a top-level
+// `||`, or sits inside a parenthesised group, does not restrict the job.
+func mainRefGuarded(cond string) bool {
+	top := topLevel(trailingComment.ReplaceAllString(cond, ""))
+	return mainRefGuard.MatchString(top) && !strings.Contains(top, "||")
+}
+
+// reportWithoutMainRefViolations reports every job whose job-level `if:`
+// matches on failure (a report job: it files or updates an issue) and is not
+// limited to github.ref == 'refs/heads/main'. Without the guard a manual
+// dispatch on a branch that fails or is cancelled files the tracking issue for
+// a run whose author is already watching it. (A run on main cancelled by hand
+// still reports; the guard is about the ref, not who cancelled.)
+func reportWithoutMainRefViolations(name string, lines []string) []string {
+	var out []string
+	for _, job := range splitJobs(lines) {
+		jl := strings.Split(job, "\n")
+		cond, ok := jobKey(jl, "if")
+		if !ok || !failureCond.MatchString(trailingComment.ReplaceAllString(cond, "")) || mainRefGuarded(cond) {
+			continue
+		}
+		out = append(out, name+": job "+jobName(jl)+" reports on failure but is not limited to refs/heads/main, so a failing or cancelled dispatch on a branch files an issue: if: "+cond)
+	}
+	return out
+}
+
 func TestEveryFailureReportJobAlsoRunsOnCancelled(t *testing.T) {
 	matched := 0
 	for name, lines := range workflows(t) {
@@ -66,6 +119,9 @@ func TestEveryFailureReportJobAlsoRunsOnCancelled(t *testing.T) {
 			}
 		}
 		for _, v := range failureWithoutCancelledViolations(name, lines) {
+			t.Error(v)
+		}
+		for _, v := range reportWithoutMainRefViolations(name, lines) {
 			t.Error(v)
 		}
 	}
@@ -112,5 +168,40 @@ func TestPlantedFailureWithoutCancelledIsCaught(t *testing.T) {
 	folded := strings.Split("jobs:\n  report:\n    if: >-\n      always() &&\n      contains(needs.*.result, 'failure')\n    steps:\n      - run: true\n", "\n")
 	if len(failureWithoutCancelledViolations("planted.yml", folded)) != 1 {
 		t.Error("a folded failure-only condition was not caught")
+	}
+}
+
+func TestPlantedReportWithoutMainRefIsCaught(t *testing.T) {
+	job := func(cond string) []string {
+		return strings.Split("jobs:\n  report:\n    needs: [a]\n    if: "+cond+"\n    timeout-minutes: 10\n    steps:\n      - run: true\n", "\n")
+	}
+	bad := []string{
+		"always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))",
+		"always() && needs.a.result == 'failure' || github.ref == 'refs/heads/main'",
+		"always() && (github.ref == 'refs/heads/main' || contains(needs.*.result, 'failure'))",
+		"always() && github.ref != 'refs/heads/main' && contains(needs.*.result, 'failure')",
+		"always() && github.ref == 'refs/heads/mainline' && contains(needs.*.result, 'failure')",
+		"always() && github.head_ref == 'refs/heads/main' && contains(needs.*.result, 'failure')",
+		"always() && contains(needs.*.result, 'failure') # github.ref == 'refs/heads/main'",
+	}
+	good := []string{
+		"always() && github.ref == 'refs/heads/main' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))",
+		"github.ref == 'refs/heads/main' && always() && contains(needs.*.result, 'failure')",
+		"${{ always() && github.ref == 'refs/heads/main' && contains(needs.*.result, 'failure') }}",
+		"success()",
+	}
+	for _, c := range bad {
+		if len(reportWithoutMainRefViolations("planted.yml", job(c))) != 1 {
+			t.Errorf("not caught: if: %s", c)
+		}
+	}
+	for _, c := range good {
+		if v := reportWithoutMainRefViolations("planted.yml", job(c)); len(v) != 0 {
+			t.Errorf("compliant form flagged: if: %s: %v", c, v)
+		}
+	}
+	folded := strings.Split("jobs:\n  report:\n    if: >-\n      always() &&\n      contains(needs.*.result, 'failure')\n    steps:\n      - run: true\n", "\n")
+	if len(reportWithoutMainRefViolations("planted.yml", folded)) != 1 {
+		t.Error("a folded report condition without the main-ref guard was not caught")
 	}
 }
