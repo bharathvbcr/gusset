@@ -128,6 +128,13 @@ test: linked-target-dir
 # recipe safe if it is ever changed to a form that caches the link. The -X
 # names no real variable, which the linker ignores; the value is only a cache
 # key. tests/ci/uniffi_link_cache_test.go holds the recipe to this.
+#
+# The recipe's -ldflags replaces any -ldflags in GOFLAGS for this one command:
+# go applies GOFLAGS first and an explicit flag after it, and the later
+# -ldflags wins whole (they are not merged). A developer's -ldflags in
+# GOFLAGS therefore does not reach this link. Everything else in GOFLAGS
+# (-race, -tags, ...) still applies. Pass extra linker flags through the
+# recipe, not GOFLAGS, if this link needs them.
 UNIFFI_UMBRELLA := examples/uniffi_bindgen_go/rust/target/debug/libgusset.a
 
 test-uniffi-link:

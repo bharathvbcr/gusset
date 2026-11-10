@@ -110,11 +110,16 @@ jobs:
   # is false for that, so a hung gotip opened no issue. The condition is the
   # one nightly's report job uses (tests/ci/report_job_cancelled_test.go
   # requires every failure report to match cancelled too).
+  #
+  # Only on main, as nightly's report job is: a manual dispatch on a branch, or
+  # a run somebody cancelled by hand, is someone already watching it, and must
+  # not file or update the tracking issue (tests/ci requires the main-ref guard
+  # of every issue-filing report job).
   report:
     name: Open a toolchain issue on failure
     needs: [gotip]
     if: >-
-      always() &&
+      always() && github.ref == 'refs/heads/main' &&
       (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
