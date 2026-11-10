@@ -962,8 +962,12 @@ func abandonPool(t *testing.T, h *supHarness, payload []byte) *Proc {
 			t.Fatalf("Submit %d while abandoning the pool = %v", i, err)
 		}
 		h.s.mu.Lock()
-		got := h.s.tickets[id].gen.proc
+		tk, ok := h.s.tickets[id]
 		h.s.mu.Unlock()
+		if !ok || tk.gen == nil {
+			t.Fatalf("Submit %d returned ticket %d, which the supervisor no longer holds", i, id)
+		}
+		got := tk.gen.proc
 		if bound == nil {
 			bound = got
 		} else if got != bound {
