@@ -21,10 +21,8 @@ func scriptedFDs(readings ...int) (func() int, *int) {
 // baseline, or the exact check reports a -1 "leak" that is a late close. A
 // count that holds still is taken as is, so a later real +1 stays visible.
 //
-// It tests the baseline helper only, from scripted readings. It does not
-// detect a leak: the exact comparison against this baseline is in the
-// ResourceLeak tests, and no test here plants a leaked fd to show that
-// comparison fails.
+// It tests the baseline helper only, from scripted readings. The exact
+// comparison against this baseline is TestFDLeakVerdict below.
 func TestResourceBaselineQuiescesFDs(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -41,6 +39,34 @@ func TestResourceBaselineQuiescesFDs(t *testing.T) {
 			base := takeResourceBaselineWith(t, read)
 			if base.fds != tc.wantBase {
 				t.Fatalf("baseline fds = %d, want %d (readings %v)", base.fds, tc.wantBase, tc.readings)
+			}
+		})
+	}
+}
+
+// TestFDLeakVerdict plants leaked fds against a baseline taken from scripted
+// readings and requires the verdict every ResourceLeak test uses to reject
+// them. The -1 case is the one a one-sided "final > base" check would pass: a
+// real +1 leak masked by a straggler closing two fds.
+func TestFDLeakVerdict(t *testing.T) {
+	cases := []struct {
+		name     string
+		readings []int
+		final    int
+		leaked   bool
+	}{
+		{"same count is clean", []int{11, 11}, 11, false},
+		{"planted +1 leak", []int{12, 11, 11}, 12, true},
+		{"planted +3 leak", []int{11, 11}, 14, true},
+		{"masked leak shows as -1", []int{11, 11}, 10, true},
+		{"uncountable on both sides is clean", []int{-1}, -1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			read, _ := scriptedFDs(tc.readings...)
+			base := takeResourceBaselineWith(t, read)
+			if got := fdLeaked(base.fds, tc.final); got != tc.leaked {
+				t.Fatalf("fdLeaked(base=%d, final=%d) = %v, want %v", base.fds, tc.final, got, tc.leaked)
 			}
 		})
 	}
