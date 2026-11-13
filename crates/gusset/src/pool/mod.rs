@@ -140,10 +140,9 @@ struct WorkUnit {
 
 /// Output produced by an engine execution.
 ///
-/// `#[non_exhaustive]` because the set of variants depends on the compiler:
-/// `Allocated` exists only with the stable `Allocator` trait (Rust 1.100+). An
-/// exhaustive `match` in an adopter's crate would otherwise compile on one
-/// toolchain and fail with E0004 on the next, with no change to either crate.
+/// `#[non_exhaustive]` so a new variant is not a breaking change for an
+/// adopter's exhaustive `match`. (`Allocated` was once compiler-dependent; it is
+/// unconditional since the 1.100 floor, and the attribute stays as public API.)
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum JobOutput {
@@ -151,15 +150,13 @@ pub enum JobOutput {
     Bytes(Vec<u8>),
     /// Pre-allocated or engine-allocated Rust buffer ID for zero-copy egress (R16).
     Buffer(u64),
-    /// Output built directly in buffer memory (Rust 1.100+, stable `Allocator`).
+    /// Output built directly in buffer memory (stable `Allocator`, Rust 1.100).
     ///
     /// Adopted as the result buffer without a copy: the bytes Go reads are the
     /// ones the engine wrote. See [`crate::alloc::BufferAlloc`].
-    #[cfg(gusset_allocator_api)]
     Allocated(Vec<u8, crate::alloc::BufferAlloc>),
 }
 
-#[cfg(gusset_allocator_api)]
 impl From<Vec<u8, crate::alloc::BufferAlloc>> for JobOutput {
     fn from(v: Vec<u8, crate::alloc::BufferAlloc>) -> Self {
         JobOutput::Allocated(v)

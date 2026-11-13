@@ -1204,11 +1204,13 @@ foreign_case() {
 	refuses "go test binary" '4242 /tmp/go-build/b001/bench.test -test.run=^$ -test.bench=. -test.count=10'
 	refuses "cargo bench binary" '4242 /w/target/release/deps/dispatch-0c4b1d947bd60981 --bench --rounds 10'
 	refuses "cargo bench binary with a toolchain path" '4242 /w/repo/target/aarch64-apple-darwin/release/deps/dispatch-0c4b1d947bd60981 --bench'
+	refuses "cargo bench binary, Rust 1.100 build-dir layout" '4242 /w/target/release/build/gusset/3f9a1c07d2b84e55/out/dispatch-0c4b1d947bd60981 --bench --rounds 10'
 	refuses "cargo bench itself" '4243 cargo bench -p gusset --bench dispatch'
 	refuses "cargo bench with a toolchain" '4243 /Users/x/.cargo/bin/cargo +nightly bench --locked'
 	allows "cargo build" '4244 cargo build --locked --release'
 	allows "cargo clippy over benches" '4244 cargo clippy --all-targets --benches'
 	allows "a bench-named editor buffer" '4245 vim /w/deps/dispatch-0c4b1d947bd60981.rs'
+	allows "a bench-named editor buffer, 1.100 layout" '4245 vim /w/build/gusset/3f9a1c07d2b84e55/out/dispatch-0c4b1d947bd60981.rs'
 	allows "this script's own cargo arm" '4246 /bin/sh bench/record.sh out.txt 1s 10 cargo:gusset/dispatch'
 	echo "ok foreign benchmarks, Go and cargo"
 }

@@ -708,7 +708,7 @@ func stepIfGuard(step []string) (string, bool) {
 // failed, and the job read as one failure instead of six unknowns.
 var independentSteps = map[string][]string{
 	"unit":          {"Go suite under GOEXPERIMENT=simd"},
-	"allocator-api": {"Go interop stress under the race detector", "Fallback path on the same compiler (GUSSET_ALLOCATOR_API=0)"},
+	"allocator-api": {"Go interop stress under the race detector"},
 	"race":          {"Aggressive GC Test"},
 	"bench":         {"Allocation gate (ChannelHop 0, cgo path bounded)"},
 }

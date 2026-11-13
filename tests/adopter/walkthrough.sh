@@ -9,16 +9,13 @@
 # the document in a way that stops it compiling fails this script. What it
 # covers:
 #
-#   steps 1-2   the umbrella crate (Cargo.toml block, build.rs block, engine block)
+#   steps 1-2   the umbrella crate (Cargo.toml block, engine block)
 #   step 3      Option B (CGO_LDFLAGS) and Option A (make install ARCHIVE=... then
 #               -tags gusset_pkgconfig), both against a copy of the module with no
 #               target/ and read-only, the way the module cache is
-#   step 5      the Allocator snippet, compiled when the umbrella's own build.rs
-#               (the document's) sets the cfg; gusset's probe printing the same
-#               line does not count. A skip is a GitHub warning, not a silent echo. A copy of the
+#   step 5      the Allocator snippet, compiled unconditionally (Rust 1.100 is the
+#               floor, so no cfg gate or build.rs is involved). A copy of the
 #               snippet with a type that does not exist must fail to compile.
-#               GUSSET_REQUIRE_STEP5=1 fails the run when the snippet was not
-#               compiled (the nightly job).
 #   installers  make install (PREFIX, DESTDIR, odd characters, tracked files) and
 #               install.sh (from a file, piped, bad ref, pinned commit, its default
 #               ref into a DESTDIR) installing the same set of files; install.sh
@@ -51,38 +48,6 @@ expect_fail() { # description command...
 	fi
 }
 
-# umbrella_sets_step5_cfg BUILD_DIR PACKAGE: whether PACKAGE's own build script
-# printed cargo::rustc-cfg=gusset_allocator_api. gusset's allocator probe prints
-# that identical line into gusset's own output under BUILD_DIR, so a grep over
-# all of BUILD_DIR reported the snippet compiled when the document's build.rs set
-# nothing. Only PACKAGE's output is read, in either cargo layout:
-#   BUILD_DIR/PACKAGE-<hash>/output       (stable 1.99)
-#   BUILD_DIR/PACKAGE/<hash>/run/stdout   (nightly-2026-10-05, the step5-snippet job)
-# Exactly one must exist: none means the check could not run, which is a
-# failure, not a skip.
-umbrella_sets_step5_cfg() {
-	local f hash found=""
-	for f in "$1/$2"-*/output "$1/$2"/*/run/stdout; do
-		[ -f "$f" ] || continue
-		case "$f" in
-		"$1/$2"-*/output)
-			hash="${f#"$1/$2"-}"
-			hash="${hash%/output}"
-			;;
-		*)
-			hash="${f#"$1/$2"/}"
-			hash="${hash%/run/stdout}"
-			;;
-		esac
-		# A bare hash only: PACKAGE-other-<hash> is another package.
-		case "$hash" in "" | *[!0-9a-f]*) continue ;; esac
-		[ -z "$found" ] || fail "two build-script outputs for $2 under $1: $found and $f"
-		found="$f"
-	done
-	[ -n "$found" ] || fail "no build-script output for the umbrella package $2 under $1; the step 5 check could not run"
-	grep -x -F -q 'cargo::rustc-cfg=gusset_allocator_api' "$found"
-}
-
 cleanup() {
 	if [ -d "$W/module" ]; then chmod -R u+w "$W/module" 2>/dev/null || true; fi
 	if [ "$OWN_WORKDIR" = 1 ] && [ -z "${KEEP:-}" ]; then rm -rf "$W"; else printf 'workdir kept: %s\n' "$W"; fi
@@ -113,12 +78,7 @@ extract() {
 CARGO_TOML="$(extract toml '[lib]')"
 ENGINE_RS="$(extract rust 'myservice_engine_init')"
 SHIM_GO="$(extract go 'registerEngine')"
-BUILD_RS="$(extract rust 'DEP_GUSSET_ALLOCATOR_API')"
 STEP5_RS="$(extract rust 'BufferAlloc, JobOutput')"
-# cargo names a build script's output directory after the [package], not the [lib].
-UMB_PACKAGE="$(printf '%s\n' "$CARGO_TOML" | sed -n '/^\[package\]/,/^\[/{s/^name = "\([^"]*\)".*/\1/p;}')"
-[ -n "$UMB_PACKAGE" ] || fail "docs/adoption.md step 1 has no [package] name for the step 5 check to read"
-
 step "no Rust block in the document names the crate 'gusset' after step 1 renamed it"
 for block in "$ENGINE_RS" "$STEP5_RS"; do
 	if printf '%s\n' "$block" | grep -E '(^|[^_A-Za-z])gusset::' >/dev/null; then
@@ -166,12 +126,10 @@ if printf '%s\n' "$CARGO_TOML" | grep -E '^\[workspace' >/dev/null; then
 	fail "docs/adoption.md step 1 now has a [workspace] table; drop the one this script appends"
 fi
 printf '\n[workspace]\n' >>"$UMB/Cargo.toml"
-printf '%s\n' "$BUILD_RS" >"$UMB/build.rs"
 {
 	printf '%s\n' "$ENGINE_RS"
 	cat <<'EOF'
 
-#[cfg(gusset_allocator_api)]
 mod step5;
 EOF
 } >"$UMB/src/lib.rs"
@@ -199,23 +157,13 @@ EOF
 cp "$UMB/Cargo.toml" "$UMB/Cargo.toml.orig"
 (cd "$UMB" && CARGO_TARGET_DIR="$UMB/target" cargo build --release 2>&1 | tail -5)
 [ -f "$UMB/target/release/libgusset.a" ] || fail "umbrella did not produce libgusset.a ([lib] name = \"gusset\")"
-# The build script always prints cargo::rustc-check-cfg=cfg(gusset_allocator_api).
-# Only cargo::rustc-cfg=gusset_allocator_api, from the umbrella's own build
-# script, means step5.rs was compiled.
-if umbrella_sets_step5_cfg "$UMB/target/release/build" "$UMB_PACKAGE"; then
-	echo "step 5 snippet compiled (compiler reports the Allocator API)"
-else
-	echo "::warning::step 5 snippet not compiled here: this compiler's allocator probe is off (gusset_core::ALLOCATOR_API)"
-	if [ "${GUSSET_REQUIRE_STEP5:-}" = 1 ]; then
-		fail "step 5 snippet was not compiled and GUSSET_REQUIRE_STEP5=1"
-	fi
-fi
+echo "step 5 snippet compiled"
 
 step "step 5: a snippet with a bad type fails to compile"
 BAD="$W/adopter/umbrella-bad"
 mkdir -p "$BAD/src"
-cp "$UMB/Cargo.toml" "$UMB/build.rs" "$BAD/"
-grep -v '^#\[cfg(gusset_allocator_api)]$' "$UMB/src/lib.rs" >"$BAD/src/lib.rs"
+cp "$UMB/Cargo.toml" "$BAD/"
+cp "$UMB/src/lib.rs" "$BAD/src/lib.rs"
 grep -q '^mod step5;$' "$BAD/src/lib.rs" || fail "could not force the step 5 module into the negative compile"
 {
 	cat <<'EOF'

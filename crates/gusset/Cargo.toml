@@ -13,8 +13,8 @@ readme = "../../README.md"
 keywords = ["cgo", "rust", "golang", "ffi", "concurrency"]
 categories = ["api-bindings", "os::unix-apis", "concurrency"]
 # Not a native library link: `links` is what lets the build script publish
-# `DEP_GUSSET_ALLOCATOR_API` to dependents, so an adopter gates its own
-# `BufferAlloc` code on exactly the answer this crate compiled with.
+# `DEP_GUSSET_ALLOCATOR_API` (always `1` since the 1.100 floor) to dependents.
+# Kept so a dependent's `build.rs` that still reads it keeps working.
 links = "gusset"
 
 [lib]

@@ -2,6 +2,7 @@
 name = "uniffi-gusset-example"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.100"
 publish = false
 
 # The umbrella crate of docs/adoption.md step 1: the staticlib holds Gusset and

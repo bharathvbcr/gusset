@@ -121,7 +121,6 @@ impl Handle {
     /// worker's outer firewall. An empty output is an empty
     /// result; one over the 1 GiB ceiling is refused (and freed) exactly as a
     /// `Vec<u8>` of that size is; memory that cannot be adopted as-is is copied.
-    #[cfg(gusset_allocator_api)]
     pub(super) fn adopt_output(&self, out: Vec<u8, crate::alloc::BufferAlloc>) -> JobResult {
         if out.is_empty() {
             return JobResult::Ok(Vec::new());

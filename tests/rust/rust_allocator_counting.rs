@@ -9,7 +9,6 @@
 //! Separate binary because it installs the global allocator. The harness and
 //! test threads allocate too, so sizes are large and bounds carry slack.
 
-#[cfg(gusset_allocator_api)]
 #[test]
 fn every_byte_is_counted_exactly_once() {
     use gusset::{get_alloc_stats, BufferAlloc, Counting};
