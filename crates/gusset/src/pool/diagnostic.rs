@@ -32,14 +32,7 @@ pub(super) fn diagnostic_allocated(ctx: &JobContext, input: &[u8]) -> Result<Job
     }
     let seed = input.get(5).copied().unwrap_or(0);
 
-    #[cfg(gusset_allocator_api)]
-    #[allow(
-        clippy::incompatible_msrv,
-        reason = "compiled only where allocator_probe.rs found the stable Allocator API"
-    )]
     let mut out: Vec<u8, crate::alloc::BufferAlloc> = Vec::new_in(crate::alloc::BufferAlloc);
-    #[cfg(not(gusset_allocator_api))]
-    let mut out: Vec<u8> = Vec::new();
 
     const CHUNK: usize = 1 << 16;
     let mut i = 0usize;

@@ -1,13 +1,11 @@
 //! With `Counting` as the `#[global_allocator]`, a Rust-owned buffer is counted
-//! exactly once, on every toolchain.
+//! exactly once.
 //!
-//! `rust_allocator_counting` proves this for `BufferAlloc`, but it is gated on
-//! `cfg(gusset_allocator_api)` (Rust 1.100+) and runs zero tests on the
-//! supported 1.97/1.98 toolchains. Buffers Go allocates (`gusset_buf_alloc`)
-//! and large results promoted on the worker exist on every toolchain, and an
-//! adopter umbrella crate that installs `Counting` is the documented setup, so
-//! the "counted once whether or not Counting is global" claim needs a test
-//! that actually runs there. A double count subtracts every buffer twice from
+//! `rust_allocator_counting` proves this for `BufferAlloc`. Buffers Go allocates
+//! (`gusset_buf_alloc`) and large results promoted on the worker are a separate
+//! path, and an adopter umbrella crate that installs `Counting` is the
+//! documented setup, so the "counted once whether or not Counting is global"
+//! claim needs a test of its own. A double count subtracts every buffer twice from
 //! the Go heap budget in `AdviseMemoryLimit`.
 //!
 //! Separate binary because it installs the global allocator.

@@ -160,7 +160,7 @@ musl leg ran whole under emulation.
 | asan-rust: Gusset and both engines `-Zsanitizer=address` | pass, exactly one `___asan_globals_registered` | n/a | n/a | ✅ | not run: as above | n/a | n/a |
 | nolto naive | links, then **fails** the isolation checks | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | nolto sealed | pass | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| skew: B on Rust 1.97, A and Gusset on 1.99 | pass | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| skew: B on Rust 1.97, A and Gusset on 1.99 (recorded run; CI keeps 1.97 for B as the adopter-skew case after the 1.100 floor, B does not depend on Gusset) | pass | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `-linkmode=internal` | fails, on `gusset_*` as well | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 All cells are *observed*, on the final code. Linux arm64 glibc ran four times,

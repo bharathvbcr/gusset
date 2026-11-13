@@ -139,11 +139,6 @@ fn reclaim_registered_buffer_after_guarded_panic(handle: *mut Handle, free_it: b
     }
 }
 
-#[cfg(gusset_allocator_api)]
-#[allow(
-    clippy::incompatible_msrv,
-    reason = "compiled only where allocator_probe.rs found the stable Allocator API"
-)]
 fn reclaim_buffer_alloc_in_guard() {
     use gusset::BufferAlloc;
 
@@ -184,7 +179,6 @@ fn guarded_panic_reclaims_counted_bytes_with_an_open_handle() {
     let opened = live();
 
     reclaim_raw_buffer_in_guard(handle);
-    #[cfg(gusset_allocator_api)]
     reclaim_buffer_alloc_in_guard();
     reclaim_registered_buffer_after_guarded_panic(handle, true);
 

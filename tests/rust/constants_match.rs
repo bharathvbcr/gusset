@@ -46,7 +46,7 @@ fn c_define(header: &str, name: &str) -> u64 {
 fn go_const(src: &str, name: &str) -> u64 {
     for line in src.lines() {
         let l = line.trim();
-        let l = l.strip_prefix("const ").unwrap_or(l);
+        let l = l.trim_prefix("const ");
         if let Some(rest) = l.strip_prefix(name) {
             let rest = rest.trim_start();
             if let Some(v) = rest.strip_prefix('=') {

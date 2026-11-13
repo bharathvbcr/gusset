@@ -21,9 +21,9 @@ Every contribution must preserve the six core runtime invariants:
 
 ## Toolchain & Prerequisites
 
-Gusset supports the latest and latest-minus-one releases of both Go and Rust:
+Gusset supports the latest and latest-minus-one releases of Go. Rust is floored at 1.100 (owner decision of 2026-11-12, see `DECISIONS.md`):
 - **Go:** `1.26+` (developed on `1.27.x`)
-- **Rust:** `1.97+` (developed on the current stable; CI uses `stable`)
+- **Rust:** `1.100+` (developed on the current stable; CI uses `stable`, plus a `rust-floor` job on 1.100)
 - **Supported Platforms:** Linux and macOS only (`linux-gnu`, `linux-musl`, `darwin/arm64`, `darwin/amd64`). Every other target, Windows and the other unix systems included, is refused by a `compile_error!` (`docs/platforms.md`).
 
 ---

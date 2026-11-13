@@ -75,8 +75,8 @@ jobs:
 
       # AGENTS.md: the suite runs in both profiles. dev has overflow checks and
       # debug_assertions; release is what adopters link. Only the nightly
-      # allocator-api job ran --release before, so the stable release path
-      # adopters on 1.97/1.98 build was never tested in release.
+      # allocator-api job ran --release before; this job now covers the release
+      # path on every platform.
       - name: Run Rust tests (release)
         run: cargo test --locked --workspace --release
 
@@ -169,15 +169,16 @@ jobs:
           go vet ./...
           go test -timeout 10m ./...
 
-  # The Rust half of the same promise. AGENTS.md lists rust-version 1.97 as a
-  # supported floor with a CI leg, and none existed: every other lane is stable,
-  # nightly or the musl job's rustup stable, so the floor was checked only by
-  # clippy's incompatible_msrv lint, which knows the std items that carry a
-  # stability version and nothing else (language features, Cargo behaviour,
-  # lints that changed). Build what adopters on 1.97 link and run both suites
-  # against it.
+  # The Rust half of the same promise. rust-version in Cargo.toml (1.100, an
+  # owner decision of 2026-11-12 that overrides the latest-minus-one floor in
+  # DECISIONS.md) is the supported floor, and it is pinned here to the manifest
+  # rather than to `stable`: once stable moves past 1.100 this lane keeps
+  # checking the floor itself (clippy's incompatible_msrv lint knows only the
+  # std items that carry a stability version, not language features, Cargo
+  # behaviour or changed lints). Build what adopters on the floor link and run
+  # both suites against it.
   rust-floor:
-    name: Rust 1.97 floor
+    name: Rust 1.100 floor
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -188,7 +189,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
-          toolchain: '1.97'
+          toolchain: '1.100'
           components: clippy, llvm-tools
 
       - name: Set up Go
@@ -211,31 +212,27 @@ jobs:
           cargo test --locked --workspace
           go test -timeout 10m ./...
 
-  # The stable Allocator trait lands in Rust 1.100. Until that is the stable
-  # channel, nightly carries it; switch `toolchain` to 1.100 once released. The
-  # build probe decides per compiler, so GUSSET_ALLOCATOR_API=1 turns a silent
-  # fallback into a build error and GUSSET_EXPECT_ALLOCATOR_API=1 makes the
-  # fallback test fail too: this lane cannot pass without exercising the path.
+  # The stable Allocator trait (Rust 1.100, the floor) is always compiled in, so
+  # the unit job already runs the Rust suites and the Go suite against it. This
+  # lane adds what only it runs: the allocator suite in a debug build and the Go
+  # interop stress under the race detector, on Linux and macOS.
   allocator-api:
-    name: Allocator API (Rust 1.100+, ${{ matrix.os }})
+    name: Allocator API (Rust 1.100, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-    env:
-      GUSSET_ALLOCATOR_API: '1'
-      GUSSET_EXPECT_ALLOCATOR_API: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Set up Rust (1.100+)
+      - name: Set up Rust (1.100)
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
-          toolchain: ${{ env.RUST_NIGHTLY }}
+          toolchain: 1.100.0
           # llvm-tools: exports_match reads the fat-LTO archive with llvm-nm;
           # Apple's nm cannot read newer-LLVM bitcode.
           components: clippy, llvm-tools
@@ -246,7 +243,7 @@ jobs:
           go-version: '1.27.x'
           cache: false
 
-      - name: Clippy with the allocator-aware surface compiled in
+      - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Build Rust static library
@@ -269,20 +266,6 @@ jobs:
       - name: Go interop stress under the race detector
         if: success() || failure()
         run: go test -race -run 'TestInterop' -count=3 -timeout 15m ./tests/pitfalls/
-
-      # Once stable reaches 1.100 no other job compiles the pre-1.100 path, so
-      # force it here on the same compiler: every cfg(not(gusset_allocator_api))
-      # branch keeps building and passing.
-      - name: Fallback path on the same compiler (GUSSET_ALLOCATOR_API=0)
-        if: success() || failure()
-        env:
-          GUSSET_ALLOCATOR_API: '0'
-          GUSSET_EXPECT_ALLOCATOR_API: '0'
-          CARGO_TARGET_DIR: target/fallback
-        run: |
-          cargo clippy --locked --workspace --all-targets -- -D warnings
-          cargo build --locked
-          cargo test --locked --workspace
 
   # Every step is one `tools/ci/lint.sh <step>`, the same pipeline `make lint`
   # runs, with the tool versions pinned in tools/ci/versions.env. Each step is
@@ -500,8 +483,13 @@ jobs:
           persist-credentials: false
 
       # Installed first so stable below stays the default; run.sh builds engine B
-      # with `cargo +1.97` for the toolchain-skew scenario.
-      - name: Set up Rust 1.97 (skew scenario)
+      # with `cargo +1.97` for the toolchain-skew scenario. Engine B is a
+      # standalone staticlib that does not depend on gusset, so it is not bound
+      # by the 1.100 floor: an older compiler is the adopter-skew case (an
+      # adopter whose other Rust archive is built by a toolchain older than
+      # Gusset's), and it is the only way to have two different compilers once
+      # the floor is the current stable.
+      - name: Set up Rust 1.97 (older-compiler skew scenario)
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: '1.97'
@@ -669,7 +657,7 @@ jobs:
       # 8 MiB on glibc and darwin, so a deep-recursion test anywhere else passes
       # whether or not Gusset set the stack size — it proves the platform, not the
       # runtime. This job is the one place the difference is in play.
-      # Alpine's packaged rust is 1.96.1, below rust-version = "1.97", so
+      # Alpine's packaged rust is 1.96.1, below rust-version = "1.100", so
       # cargo refused to build (exit 101) on every run. rustup installs the
       # develop channel instead of lowering the floor. The image digest and the
       # pinned, checksummed rustup-init are explained at the r14-musl job.

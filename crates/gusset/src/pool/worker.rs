@@ -79,7 +79,6 @@ fn execute_unit(weak: &Weak<Handle>, mut unit: WorkUnit) -> JobResult {
                 }
             ))
         }
-        #[cfg(gusset_allocator_api)]
         Ok(Ok(JobOutput::Allocated(out))) => match weak.upgrade() {
             Some(h) => h.adopt_output(out),
             None => JobResult::Err("handle is closed".to_string()),
