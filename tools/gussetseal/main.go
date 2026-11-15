@@ -3,6 +3,16 @@
 //
 //	gussetseal -prefix PREFIX -o OUT.a IN.a   seal IN.a into OUT.a
 //	gussetseal -prefix PREFIX -verify OBJ.o   check an already-sealed object
+//	gussetseal -strip-lto -o OUT.a IN.a       copy IN.a without its LTO IR sections
+//	gussetseal -strip-lto -tree DIR           the same, in place, for every .a under DIR
+//
+// -strip-lto is unrelated to sealing. Go 1.26.11 and 1.27.4 refuse a library
+// with LLVM bitcode sections in a local -L directory (GO-2026-6853), and a
+// Rust staticlib always carries them, from the prebuilt std rlibs; see
+// internal/ltostrip. The archive keeps every member and every global symbol,
+// and is written only after it re-reads clean. It needs an objcopy that
+// accepts --remove-section on this host's objects: $OBJCOPY, llvm-objcopy, the
+// llvm-tools component's rust-objcopy, or (off darwin) the system objcopy.
 //
 // Sealing partially links every member of the archive into one relocatable
 // object and makes every symbol local except the engine's own C ABI, the names
@@ -36,9 +46,10 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bharathvbcr/gusset/internal/ltostrip"
 )
 
 // toolTimeout bounds each external tool. A fat-LTO archive partially links in a
@@ -53,12 +64,23 @@ func main() {
 	prefix := flag.String("prefix", "", "the engine's C ABI prefix; the only names left global (required)")
 	out := flag.String("o", "", "output archive (seal mode)")
 	verify := flag.Bool("verify", false, "verify an already-sealed object instead of sealing an archive")
+	stripLTO := flag.Bool("strip-lto", false, "remove LTO IR sections (LLVM bitcode) from an archive instead of sealing it")
+	tree := flag.String("tree", "", "with -strip-lto: strip, in place, every .a under this directory")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: gussetseal -prefix PREFIX -o OUT.a IN.a")
 		fmt.Fprintln(os.Stderr, "       gussetseal -prefix PREFIX -verify OBJ.o")
+		fmt.Fprintln(os.Stderr, "       gussetseal -strip-lto -o OUT.a IN.a")
+		fmt.Fprintln(os.Stderr, "       gussetseal -strip-lto -tree DIR")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	if *stripLTO {
+		os.Exit(stripLTOMain(*out, *tree, flag.Args()))
+	}
+	if *tree != "" {
+		flag.Usage()
+		os.Exit(2)
+	}
 	if flag.NArg() != 1 || (*verify == (*out != "")) {
 		flag.Usage()
 		os.Exit(2)
@@ -244,43 +266,17 @@ type arMember struct {
 }
 
 // archiveMembers returns the contents of every member that is not a symbol
-// table or the GNU long-name table.
+// table or the GNU long-name table. internal/ltostrip owns the ar parser.
 func archiveMembers(archive string) ([]arMember, error) {
-	data, err := os.ReadFile(archive)
+	members, err := ltostrip.ReadArchive(archive)
 	if err != nil {
 		return nil, err
 	}
-	const magic, header = "!<arch>\n", 60
-	if !bytes.HasPrefix(data, []byte(magic)) {
-		return nil, fmt.Errorf("%s is not an ar archive", archive)
+	out := make([]arMember, len(members))
+	for i, m := range members {
+		out[i] = arMember{m.Data, m.BSD}
 	}
-	var members []arMember
-	for off := len(magic); off < len(data); {
-		if off+header > len(data) || string(data[off+58:off+60]) != "`\n" {
-			return nil, fmt.Errorf("%s: malformed member header at offset %d", archive, off)
-		}
-		name := strings.TrimSpace(string(data[off : off+16]))
-		size, err := strconv.Atoi(strings.TrimSpace(string(data[off+48 : off+58])))
-		if err != nil || size < 0 || off+header+size > len(data) {
-			return nil, fmt.Errorf("%s: bad member size at offset %d", archive, off)
-		}
-		body := data[off+header : off+header+size]
-		n, bsd := strings.CutPrefix(name, "#1/")
-		if bsd { // BSD: name precedes the data
-			nlen, err := strconv.Atoi(n)
-			if err != nil || nlen < 0 || nlen > len(body) {
-				return nil, fmt.Errorf("%s: bad BSD name length at offset %d", archive, off)
-			}
-			name, body = strings.TrimRight(string(body[:nlen]), "\x00"), body[nlen:]
-		}
-		switch name {
-		case "/", "//", "/SYM64/", "__.SYMDEF", "__.SYMDEF SORTED", "__.SYMDEF_64", "__.SYMDEF_64 SORTED":
-		default:
-			members = append(members, arMember{body, bsd})
-		}
-		off += header + size + size%2
-	}
-	return members, nil
+	return out, nil
 }
 
 // archiveArch returns the one architecture a Mach-O archive holds. A universal

@@ -87,6 +87,12 @@ jobs:
             exit 1
           fi
 
+      # Stages the archive ffi.go links from, with its LTO sections removed: the
+      # go command refuses them in a local -L directory (GO-2026-6853). Runs on
+      # tip, so a change to that check is seen here first.
+      - name: Stage the archive cgo links
+        run: go generate ./internal/ffi
+
       # The full unit and soak surface, not just `go test ./...`. A toolchain
       # change that breaks the thread-cap invariant would not show up in the
       # default run, and I4 is the property most likely to move under a scheduler

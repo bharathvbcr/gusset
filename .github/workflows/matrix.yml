@@ -384,6 +384,8 @@ jobs:
           cache: false
       - name: Build Rust release
         run: cargo build --locked --release
+      - name: Stage the archive cgo links
+        run: go generate ./internal/ffi
       # R6 and R16 name this job as their enforcer. It was absent, so both rules
       # shipped with no gate at all: nothing checked that Rust never retains Go
       # memory past a call.
@@ -407,6 +409,8 @@ jobs:
           cache: false
       - name: Build Rust release
         run: cargo build --locked --release
+      - name: Stage the archive cgo links
+        run: go generate ./internal/ffi
       - name: Allocator stats and AdviseMemoryLimit under a Go heap cap
         run: |
           GOMEMLIMIT=256MiB go test -v -count=1 \
@@ -430,6 +434,9 @@ jobs:
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
+          # llvm-tools: the staging step removes the archive's LTO sections with
+          # its llvm-objcopy, and darwin has no other objcopy.
+          components: llvm-tools
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -439,6 +446,9 @@ jobs:
 
       - name: Build Rust release
         run: cargo build --locked --release
+
+      - name: Stage the archive cgo links
+        run: go generate ./internal/ffi
 
       # Every Soak test, not one by name: the thread-cap soak, the goroutine-
       # leak profile gate (which must run, never skip, on 1.27) and the
@@ -470,6 +480,9 @@ jobs:
 
       - name: Build Rust release
         run: cargo build --locked --release
+
+      - name: Stage the archive cgo links
+        run: go generate ./internal/ffi
 
       # The root package is included: the chaos hammer and the waiter-handoff
       # and drain-exit tests live there, and race plus GOGC=1 is what found the
@@ -510,6 +523,9 @@ jobs:
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
+          # llvm-tools: the gussetseal tests below include -strip-lto, which
+          # needs an objcopy; darwin has none but this component's.
+          components: llvm-tools
 
       # asan-rust builds libgusset.a and both engines with -Zsanitizer=address.
       # run.sh reads the same RUST_NIGHTLY pin; `toolchain install` leaves the
@@ -686,6 +702,12 @@ jobs:
 
       - name: Build Rust release
         run: cargo build --locked --release
+
+      # build-base brings binutils, whose objcopy removes the archive's LTO
+      # sections. The image's Go is older than 1.27.4 today; this keeps the job
+      # working the day the pinned image moves.
+      - name: Stage the archive cgo links
+        run: go generate ./internal/ffi
 
       - name: Deep recursion and worker stack sizing
         run: |
@@ -886,11 +908,22 @@ jobs:
           fi
           echo "BENCH_BASE=$BASE_SHA" >> "$GITHUB_ENV"
           cargo build --locked --release
+          go generate ./internal/ffi
           go test -c -o "$RUNNER_TEMP/new.test" ./bench
           go test -c -o "$RUNNER_TEMP/new-root.test" .
           go test -c -o "$RUNNER_TEMP/new-isolate.test" ./internal/isolate
           git worktree add --detach "$RUNNER_TEMP/base" "$BASE_SHA"
+          # The base may predate the staging step (the first run after it landed,
+          # and any base cut before it), when its ffi.go still links from cargo's
+          # output directories and the go command walks all of them. This
+          # revision's tool strips every archive in the base's target/ in place,
+          # then the base's own `go generate` runs: it stages on a base that has
+          # the step and only hashes on one that does not. On a base with the
+          # step the strip is a no-op on archives already staged.
+          here=$PWD
           (cd "$RUNNER_TEMP/base" && cargo build --locked --release \
+            && (cd "$here" && go run ./tools/gussetseal -strip-lto -tree "$RUNNER_TEMP/base/target") \
+            && go generate ./internal/ffi \
             && go test -c -o "$RUNNER_TEMP/old.test" ./bench \
             && go test -c -o "$RUNNER_TEMP/old-root.test" . \
             && go test -c -o "$RUNNER_TEMP/old-isolate.test" ./internal/isolate)
@@ -959,6 +992,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked --release
+          go generate ./internal/ffi
           go test -run '^$' -bench . -skip '^(BenchmarkHandleChurn)$' -benchtime=1s -benchmem -count=10 ./bench/... > new.txt
           go test -run '^$' -bench '^(BenchmarkCallNoopBare|BenchmarkCallNoopTraced)$' -benchtime=1s -benchmem -count=10 . >> new.txt
 
