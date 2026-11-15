@@ -339,15 +339,37 @@ the registry is cleared and reinstalled.
 
 ## 3. Link the archive
 
-The default `#cgo LDFLAGS` point into `target/release` **inside a Gusset source
+The default `#cgo LDFLAGS` point into `target/gusset` **inside a Gusset source
 checkout**. That directory is gitignored, so it is not in the published module and
 does not exist in the module cache. Building against the module with no further
 configuration gives you:
 
 ```
-ld: warning: search path '.../internal/ffi/../../target/release' not found
+ld: warning: search path '.../internal/ffi/../../target/gusset' not found
 ld: library 'gusset' not found
 ```
+
+> **Go 1.26.11 and 1.27.4 and later refuse a Rust staticlib that sits in a
+> directory a `#cgo LDFLAGS -L…` line names.** The go command now walks every
+> *local* `-L` directory and rejects any library in it that carries LLVM bitcode
+> sections ([GO-2026-6853](https://pkg.go.dev/vuln/GO-2026-6853), no opt-out). Local
+> means a relative path, or an absolute one under the directory you run `go` from,
+> `GOMODCACHE` or `$TMPDIR`. Every Rust staticlib carries those sections whether or
+> not LTO is on, because it bundles the prebuilt std. Option A with an installed
+> prefix such as `/opt/myservice` and Option B (`CGO_LDFLAGS`) are outside that
+> check; a prefix under `/tmp` or your working directory is not. If a `#cgo` line
+> of yours, or the prefix `pkg-config` names, is local, put a stripped copy of the
+> archive there and nothing else:
+>
+> ```sh
+> go run github.com/bharathvbcr/gusset/tools/gussetseal -strip-lto \
+>     -o internal/native/libgusset.a engine/target/release/libgusset.a
+> ```
+>
+> Stripping needs an `objcopy` that accepts `--remove-section`: `llvm-objcopy`, the
+> `llvm-tools` rustup component (`rustup component add llvm-tools`), or `objcopy`
+> from binutils on Linux. Every member and every global symbol is kept, and the
+> output is written only after it re-reads clean.
 
 ```mermaid
 flowchart LR

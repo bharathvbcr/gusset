@@ -5,12 +5,20 @@ package ffi
 /*
 // Linking modes.
 //
-// The default resolves libgusset.a out of this checkout's target/ directory, which
-// is how the repository's own build and tests work. That path does not exist for
+// The default resolves libgusset.a out of this checkout's target/gusset
+// directory, which is how the repository's own build and tests work. `go
+// generate ./internal/ffi` fills it: it copies the archive cargo built (target/
+// release, else target/debug) with its LLVM bitcode sections removed, because Go
+// 1.26.11 and 1.27.4 refuse a library with those sections in any local -L
+// directory (GO-2026-6853), and cargo's own output directories hold several.
+// Run it after every cargo build: a tree never staged fails the link with
+// "library 'gusset' not found", and one staged before keeps linking the staged
+// copy until the next generate. A generate that fails removes the staged copy.
+// That path does not exist for
 // anyone consuming Gusset as a Go module: target/ is gitignored, so it is not in
 // the module zip, and the module cache is read-only anyway. An adopter building
-// against the published module gets "ld: library 'gusset' not found" plus two
-// "search path not found" warnings naming a directory they have never heard of.
+// against the published module gets "ld: library 'gusset' not found" plus a
+// "search path not found" warning naming a directory they have never heard of.
 //
 // Two supported ways out, both documented in docs/adoption.md:
 //
@@ -25,7 +33,7 @@ package ffi
 // libgusset.a whatever the package is called.
 
 #cgo CFLAGS: -I${SRCDIR}
-#cgo !gusset_pkgconfig LDFLAGS: -L${SRCDIR}/../../target/release -L${SRCDIR}/../../target/debug -lgusset -lpthread -lm -ldl
+#cgo !gusset_pkgconfig LDFLAGS: -L${SRCDIR}/../../target/gusset -lgusset -lpthread -lm -ldl
 #cgo gusset_pkgconfig pkg-config: gusset
 #cgo noescape gusset_abi_layout
 #cgo nocallback gusset_abi_layout
