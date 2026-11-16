@@ -1401,20 +1401,81 @@ func FuzzExtractCallHeaderDeadline(f *testing.F) {
 		if cancel {
 			stop()
 		}
+		// Sampled before the call, never after: a deadline a few nanoseconds
+		// away is live while the header is built and expired by the time
+		// anything looks again, and a header built from a live context is
+		// rightly a small positive timeout, not 1. Looking after the call made
+		// this target fail on offsets of 182 ns and 466 ns (nightly 2026-11-15).
+		doneBefore := ctx.Err() != nil
 		h, err := extractCallHeader(ctx, 0, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if h.TimeoutNS == 0 {
-			t.Fatalf("deadline offset %d (cancel=%v) produced timeout 0 = no deadline", offset, cancel)
-		}
-		if ctx.Err() != nil && h.TimeoutNS != 1 {
-			t.Fatalf("done context produced timeout %d, want 1", h.TimeoutNS)
-		}
-		if dl, _ := ctx.Deadline(); ctx.Err() == nil && h.TimeoutNS > uint64(dl.Sub(before)) {
-			t.Fatalf("timeout %d exceeds the %v remaining", h.TimeoutNS, dl.Sub(before))
+		if msg := deadlineHeaderViolation(ctx, before, doneBefore, h); msg != "" {
+			t.Fatalf("deadline offset %d (cancel=%v): %s", offset, cancel, msg)
 		}
 	})
+}
+
+// deadlineHeaderViolation says how h breaks the deadline rules, or returns ""
+// when it keeps them. doneBefore is whether ctx was already done when h was
+// built, and before is a time no later than that.
+//
+//   - A header never carries timeout 0, which means no deadline (I3).
+//   - A context that was already done yields timeout 1: expire at once.
+//   - A context that was live yields a positive timeout no longer than the time
+//     that remained from before, whatever has happened to ctx since.
+func deadlineHeaderViolation(ctx context.Context, before time.Time, doneBefore bool, h ffi.CallHeader) string {
+	if h.TimeoutNS == 0 {
+		return "produced timeout 0 = no deadline"
+	}
+	if doneBefore {
+		if h.TimeoutNS != 1 {
+			return fmt.Sprintf("done context produced timeout %d, want 1", h.TimeoutNS)
+		}
+		return ""
+	}
+	if dl, ok := ctx.Deadline(); ok && h.TimeoutNS > uint64(dl.Sub(before)) {
+		return fmt.Sprintf("timeout %d exceeds the %v remaining", h.TimeoutNS, dl.Sub(before))
+	}
+	return ""
+}
+
+// The failure the nightly fuzz found: the header was built while the context
+// was live (15 ns left) and the context expired before the check ran. That is
+// a correct header, so it must not be reported; the same header for a context
+// that was already done must be.
+func TestDeadlineHeaderViolation_ExpiryAfterTheHeaderIsBuiltIsNotAViolation(t *testing.T) {
+	before := time.Now()
+	expired, stop := context.WithDeadline(context.Background(), before.Add(-time.Second))
+	defer stop()
+	if expired.Err() == nil {
+		t.Fatal("setup: the context should be expired")
+	}
+	live := ffi.CallHeader{TimeoutNS: 15}
+
+	if msg := deadlineHeaderViolation(expired, before, false, live); msg != "" {
+		t.Errorf("a header built from a live context was reported, because the context expired later: %s", msg)
+	}
+	if msg := deadlineHeaderViolation(expired, before, true, live); msg == "" {
+		t.Error("timeout 15 for a context that was already done was accepted; it must be 1")
+	}
+	if msg := deadlineHeaderViolation(expired, before, true, ffi.CallHeader{TimeoutNS: 1}); msg != "" {
+		t.Errorf("timeout 1 for a done context was reported: %s", msg)
+	}
+	if msg := deadlineHeaderViolation(expired, before, false, ffi.CallHeader{}); msg == "" {
+		t.Error("timeout 0 (no deadline) was accepted")
+	}
+
+	// The upper bound still holds for a live context.
+	far, stopFar := context.WithDeadline(context.Background(), before.Add(time.Hour))
+	defer stopFar()
+	if msg := deadlineHeaderViolation(far, before, false, ffi.CallHeader{TimeoutNS: uint64(time.Hour)}); msg != "" {
+		t.Errorf("a timeout equal to the remaining time was reported: %s", msg)
+	}
+	if msg := deadlineHeaderViolation(far, before, false, ffi.CallHeader{TimeoutNS: uint64(2 * time.Hour)}); msg == "" {
+		t.Error("a timeout longer than what remained was accepted")
+	}
 }
 
 // extractCallHeader is the header submitInput builds, composed the way it
