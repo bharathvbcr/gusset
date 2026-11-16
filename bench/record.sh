@@ -382,14 +382,15 @@ cpu_idle() {
 #
 # Matches any compiled Go test binary invoked with -test.bench, which is what a
 # `go test -bench` run looks like no matter which module started it, and a
-# cargo bench: the bench binary cargo runs (target/.../deps/NAME-HASH, which it
-# hands --bench) and `cargo bench` itself while it builds. Somebody else's
+# cargo bench: the bench binary cargo runs (target/.../deps/NAME-HASH up to
+# Rust 1.99, target/.../build/PKG/HASH/out/NAME-HASH from 1.100; it is handed
+# --bench) and `cargo bench` itself while it builds. Somebody else's
 # benchmark competes for the same cores as effectively as our own, and a cargo
 # arm of this very script is one of them whenever two recordings overlap.
 foreign_benchmarks() {
 	ps -Ao pid,command |
 		grep -E -e '\.test( |$).*-test\.bench' \
-			-e '/deps/[^ /]+-[0-9a-f]{8,}( |$).*--bench( |$)' \
+			-e '/(deps|out)/[^ /]+-[0-9a-f]{8,}( |$).*--bench( |$)' \
 			-e '(^|[ /])cargo( +\+[^ ]+)? +bench( |$)' |
 		grep -v grep || true
 }

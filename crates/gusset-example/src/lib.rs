@@ -5,15 +5,14 @@
 
 #![deny(missing_docs)]
 
-#[cfg(gusset_allocator_api)]
 use gusset::BufferAlloc;
 use gusset::{set_engine_handler, JobContext, JobOutput};
 
 /// Whether opcode 13 (output built in `BufferAlloc` memory) is compiled in.
 ///
-/// Decided by `build.rs` from `DEP_GUSSET_ALLOCATOR_API`, so it must always equal
-/// [`gusset::ALLOCATOR_API`]; the adopter test asserts that it does.
-pub const ALLOCATOR_OPCODE: bool = cfg!(gusset_allocator_api);
+/// Always `true` since the 1.100 floor; it must equal [`gusset::ALLOCATOR_API`],
+/// which the adopter test asserts.
+pub const ALLOCATOR_OPCODE: bool = true;
 
 /// Initializes the example engine and registers its execution handler with Gusset.
 pub fn init_example_engine() {
@@ -62,11 +61,6 @@ pub fn init_example_engine() {
                 // hands that allocation to Go as-is: no copy on the worker, none
                 // on the cgo thread. `try_reserve` sizes it fallibly — an
                 // infallible push that cannot allocate aborts the whole process.
-                #[cfg(gusset_allocator_api)]
-                #[allow(
-                    clippy::incompatible_msrv,
-                    reason = "compiled only where gusset's build probe found the stable Allocator API"
-                )]
                 13 => {
                     let mut out: Vec<u8, BufferAlloc> = Vec::new_in(BufferAlloc);
                     out.try_reserve_exact(input.len() - 1)

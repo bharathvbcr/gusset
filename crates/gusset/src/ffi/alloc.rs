@@ -4,19 +4,17 @@
 use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-#[cfg(gusset_allocator_api)]
 use std::alloc::{AllocError, Allocator, Global, System};
-#[cfg(gusset_allocator_api)]
 use std::ptr::NonNull;
 
 /// Whether this build of Gusset implements the stable `std::alloc::Allocator`
-/// trait (Rust 1.100 and newer), making [`BufferAlloc`] usable with `Vec::new_in`
-/// and `JobOutput::Allocated` available.
+/// trait, making [`BufferAlloc`] usable with `Vec::new_in` and
+/// `JobOutput::Allocated` available.
 ///
-/// Decided at build time by probing the compiler, not by comparing versions; see
-/// `crates/gusset/allocator_probe.rs`. On older toolchains everything else in the
-/// crate is unchanged.
-pub const ALLOCATOR_API: bool = cfg!(gusset_allocator_api);
+/// Always `true`: the stable trait needs Rust 1.100, which is the crate's
+/// `rust-version`. Kept so code that reports or asserts the capability keeps
+/// compiling.
+pub const ALLOCATOR_API: bool = true;
 
 /// Alignment of every Rust-owned buffer Go can see (R16).
 ///
@@ -305,7 +303,6 @@ fn dec_live_bytes(size: usize) {
 /// Never skipped, whatever [`counting_is_active`] says: the caller knows these
 /// bytes did not pass through an installed `Counting`, so nothing else will
 /// count them.
-#[cfg(gusset_allocator_api)]
 #[inline]
 fn count_alloc_always(size: usize) {
     if size != 0 {
@@ -315,7 +312,6 @@ fn count_alloc_always(size: usize) {
 }
 
 /// Moves the live total from `old` to `new` bytes after a resize.
-#[cfg(gusset_allocator_api)]
 #[inline]
 fn count_resize(old: usize, new: usize) {
     if new > old {
@@ -387,11 +383,6 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for Counting<A> {
 
 /// Whether `A` is `std::alloc::Global`, whose allocations already pass through
 /// an installed `Counting` global allocator.
-#[cfg(gusset_allocator_api)]
-#[allow(
-    clippy::incompatible_msrv,
-    reason = "compiled only where allocator_probe.rs found the stable Allocator API"
-)]
 #[inline]
 fn is_global<A: 'static>() -> bool {
     std::any::TypeId::of::<A>() == std::any::TypeId::of::<Global>()
@@ -400,7 +391,6 @@ fn is_global<A: 'static>() -> bool {
 /// Whether `A` is [`BufferAlloc`], which counts every byte itself (by hand, or
 /// through an installed `Counting` global allocator). Wrapping it in `Counting`
 /// used to add the same bytes a second time.
-#[cfg(gusset_allocator_api)]
 #[inline]
 fn counts_itself<A: 'static>() -> bool {
     std::any::TypeId::of::<A>() == std::any::TypeId::of::<BufferAlloc>()
@@ -424,16 +414,6 @@ fn counts_itself<A: 'static>() -> bool {
 /// with a larger size than it requested (the Allocator contract allows up to the
 /// returned block length) leaves the live total low, never wrapped: the
 /// subtraction saturates.
-// The cfg is the version gate (AGENTS.md rule 6): it is set only when
-// allocator_probe.rs compiled a use of the stable `Allocator` trait with this
-// compiler, without a feature gate. clippy's MSRV lint judges each item against
-// `rust-version = "1.97"` and cannot see that gate, so it is told here, on the
-// gated items only. Ungated code stays under the lint.
-#[cfg(gusset_allocator_api)]
-#[allow(
-    clippy::incompatible_msrv,
-    reason = "compiled only where allocator_probe.rs found the stable Allocator API"
-)]
 unsafe impl<A: Allocator + 'static> Allocator for Counting<A> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let block = self.inner.allocate(layout)?;
@@ -488,7 +468,6 @@ unsafe impl<A: Allocator + 'static> Allocator for Counting<A> {
     }
 }
 
-#[cfg(gusset_allocator_api)]
 impl<A: 'static> Counting<A> {
     #[inline]
     fn forwards_to_counted_global(&self) -> bool {
@@ -551,11 +530,6 @@ impl BufferAlloc {
     }
 }
 
-#[cfg(gusset_allocator_api)]
-#[allow(
-    clippy::incompatible_msrv,
-    reason = "compiled only where allocator_probe.rs found the stable Allocator API"
-)]
 unsafe impl Allocator for BufferAlloc {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let real = Self::buffer_layout(layout).ok_or(AllocError)?;
@@ -617,11 +591,6 @@ unsafe impl Allocator for BufferAlloc {
     }
 }
 
-#[cfg(gusset_allocator_api)]
-#[allow(
-    clippy::incompatible_msrv,
-    reason = "compiled only where allocator_probe.rs found the stable Allocator API"
-)]
 impl BufferAlloc {
     #[inline]
     fn pair(old: Layout, new: Layout) -> Result<(Layout, Layout), AllocError> {

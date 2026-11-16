@@ -36,7 +36,9 @@
 # Environment:
 #   R14_TARGET            Rust target triple (default: the host's). Set GOARCH
 #                         to match when it is not the host's architecture.
-#   R14_SKEW_TOOLCHAIN    toolchain for engine B in `skew` (default 1.97)
+#   R14_SKEW_TOOLCHAIN    toolchain for engine B in `skew` (default 1.97). Engine B
+#                         is a standalone staticlib, not bound by Gusset's 1.100
+#                         floor: an older compiler is the adopter-skew case
 #   R14_ASAN_TOOLCHAIN    nightly for `asan-rust` (default: RUST_NIGHTLY from
 #                         .github/workflows/matrix.yml, so the pin has one owner)
 #   R14_NO_ASAN           a reason; reports both ASan scenarios SKIPPED with it.

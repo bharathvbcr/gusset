@@ -97,7 +97,7 @@ fn adopter_engine_runs_and_displaces_the_diagnostic_engine() {
         other => panic!("expected echo, got {:?}", other),
     }
 
-    // The dependent's gate is the runtime's answer, via DEP_GUSSET_ALLOCATOR_API.
+    // The example's capability flag must agree with the runtime's.
     assert_eq!(
         gusset_example::ALLOCATOR_OPCODE,
         gusset::ALLOCATOR_API,
@@ -106,7 +106,6 @@ fn adopter_engine_runs_and_displaces_the_diagnostic_engine() {
 
     // Opcode 13 (Rust 1.100+): reversed tail built in BufferAlloc memory and
     // adopted zero-copy as the result buffer, 64-byte aligned.
-    #[cfg(gusset_allocator_api)]
     match run(&handle, r, CallHeader::default(), &[13, 1, 2, 3, 4, 5]) {
         JobResult::Buffer(id) => {
             let (ptr, len) = match handle.buf_get(id) {
