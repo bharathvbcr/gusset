@@ -103,6 +103,7 @@ uninstall:
 test: linked-target-dir
 	cargo test --locked --workspace
 	cargo test --locked --manifest-path examples/uniffi_bindgen_go/rust/Cargo.toml --target-dir examples/uniffi_bindgen_go/rust/target
+	go generate ./internal/ffi
 	go test -v ./...
 
 # The typed Go client of examples/uniffi_bindgen_go against its compiled Rust
@@ -173,6 +174,7 @@ BENCH_RESULTS ?= bench/results/$(shell go env GOOS)-$(shell go env GOARCH)-go$(s
 
 bench: linked-target-dir
 	cargo build --locked --release
+	go generate ./internal/ffi
 	RECORD_DIR=. RECORD_PKG=./bench/... bench/record.sh $(BENCH_RESULTS) 1s $(BENCH_COUNT) .
 
 # Raw blocking cgo versus Gusset on byte-identical work.
@@ -192,6 +194,7 @@ CROSS_SUFFIX ?= $(shell go env GOOS)-$(shell go env GOARCH)-go$(shell go env GOV
 bench-crossover: linked-target-dir
 	cargo build --locked --release
 	cargo build --locked --release --manifest-path bench/seed/rs/Cargo.toml
+	go generate ./internal/ffi
 	@# Each (shape, transport) arm in its own process.
 	@#
 	@# Not tidiness: a parallel blocking-cgo arm leaves a few hundred Ms behind,
@@ -238,6 +241,7 @@ bench-crossover: linked-target-dir
 bench-scaling: linked-target-dir
 	cargo build --locked --release
 	cargo build --locked --release --manifest-path bench/seed/rs/Cargo.toml
+	go generate ./internal/ffi
 	@# Repeated, unlike the thread-pressure target's -count=1.
 	@#
 	@# Repetitions of the *same* transport in one process are safe here in a way
@@ -310,6 +314,7 @@ FUZZ_TARGETS_ROOT ?= FuzzTicketReaderPipeBytes FuzzRingSlotDecode \
 	FuzzTicketReaderRustRing FuzzOpcodeFromContext FuzzReadTraceCarrier \
 	FuzzExtractCallHeaderDeadline FuzzHandleOpSequence
 fuzz:
+	go generate ./internal/ffi
 	@for t in $(FUZZ_TARGETS); do \
 		echo "== fuzzing $$t for $(FUZZTIME)"; \
 		go test -run '^$$' -fuzz "^$$t\$$" -fuzztime $(FUZZTIME) ./tests/pitfalls/ || exit 1; \
