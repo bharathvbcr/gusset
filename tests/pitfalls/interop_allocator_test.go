@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"math/rand"
-	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -84,19 +83,11 @@ func TestInterop_AllocatorBackedOutputAllPaths(t *testing.T) {
 		if !aligned64(b) {
 			t.Fatalf("WaitBuffer %d: result not 64-byte aligned", n)
 		}
-		// Which memory carries the result depends on how the engine returned
-		// it, not on its size alone: an output adopted from BufferAlloc is the
-		// engine's own Rust buffer at every size, while the same bytes returned
-		// as a plain vector are Go memory up to 4 KiB (WaitBuffer's godoc).
-		switch os.Getenv("GUSSET_EXPECT_ALLOCATOR_API") {
-		case "1":
-			if buf.ID() == 0 {
-				t.Fatalf("WaitBuffer %d: an engine-owned output came back as Go memory (ID 0)", n)
-			}
-		case "0":
-			if wantGo := n <= 4096; wantGo != (buf.ID() == 0) {
-				t.Fatalf("WaitBuffer %d: ID() = %d, want Go memory (ID 0) = %v", n, buf.ID(), wantGo)
-			}
+		// An output adopted from BufferAlloc is the engine's own Rust buffer at
+		// every size; a plain vector would be Go memory up to 4 KiB (WaitBuffer's
+		// godoc). The diagnostic engine builds in BufferAlloc, so ID 0 is a bug.
+		if buf.ID() == 0 {
+			t.Fatalf("WaitBuffer %d: an engine-owned output came back as Go memory (ID 0)", n)
 		}
 		runtime.KeepAlive(buf)
 		if err := buf.Free(); err != nil {

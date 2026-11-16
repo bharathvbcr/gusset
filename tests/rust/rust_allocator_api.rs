@@ -7,30 +7,10 @@
 //! deltas off the process-global counters, so the checks run in sequence inside
 //! a single test.
 //!
-//! On a toolchain without the stable trait the whole surface is compiled out;
-//! the fallback test then only checks that a CI lane which requires the new path
-//! (`GUSSET_EXPECT_ALLOCATOR_API=1`) cannot silently fall back.
-
 #![allow(unsafe_code)]
 
 mod common;
 
-#[cfg(not(gusset_allocator_api))]
-#[test]
-fn allocator_api_is_absent_only_where_it_is_not_expected() {
-    const { assert!(!gusset::ALLOCATOR_API) };
-    assert_ne!(
-        std::env::var("GUSSET_EXPECT_ALLOCATOR_API").as_deref(),
-        Ok("1"),
-        "this lane requires the stable Allocator trait, but the build probe fell back"
-    );
-}
-
-#[cfg(gusset_allocator_api)]
-#[allow(
-    clippy::incompatible_msrv,
-    reason = "compiled only where allocator_probe.rs found the stable Allocator API"
-)]
 mod on {
     use gusset::header::CallHeader;
     use gusset::pool::{register_engine, Handle, JobOutput, JobResult};

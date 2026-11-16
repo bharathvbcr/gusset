@@ -1,7 +1,6 @@
 //! Low-level system interfaces: sigaltstack, pipe writing, and buffer allocation (R8, R16).
 #![allow(unsafe_code)]
 
-#[cfg(gusset_allocator_api)]
 use crate::alloc::BufferAlloc;
 use crate::alloc::{count_buffer_alloc, count_buffer_dealloc, BUFFER_ALIGN};
 use std::alloc::Layout;
@@ -104,7 +103,6 @@ impl RawBuffer {
     /// The last can only happen if unsafe engine code built the vector with
     /// `Vec::from_raw_parts_in` over foreign memory; refusing it keeps Go's
     /// alignment guarantee and keeps a mismatched layout away from `dealloc`.
-    #[cfg(gusset_allocator_api)]
     pub fn adopt(v: Vec<u8, BufferAlloc>) -> std::result::Result<Self, Vec<u8, BufferAlloc>> {
         // Capacity is capped as well as length: a 1-byte result in a 4 GiB
         // allocation would otherwise pin 4 GiB for as long as Go holds it.
@@ -767,7 +765,6 @@ mod tests {
     /// (which runs `--lib` only) checks them for UB. No accounting assertions:
     /// unit tests run in parallel and share the process-global counters;
     /// exact accounting lives in the `rust_allocator_api` binary.
-    #[cfg(gusset_allocator_api)]
     #[test]
     fn buffer_alloc_growth_shrink_and_adoption_are_sound() {
         use crate::alloc::{BufferAlloc, Counting};

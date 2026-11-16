@@ -7,7 +7,7 @@
   <a href="https://github.com/bharathvbcr/gusset/releases"><img src="https://img.shields.io/github/v/release/bharathvbcr/gusset?include_prereleases&sort=semver" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20(glibc%20%26%20musl)-lightgrey" alt="Platforms">
-  <img src="https://img.shields.io/badge/stack-Go%201.26+%20%7C%20Rust%201.97+%20%7C%20C%20ABI-orange" alt="Tech Stack">
+  <img src="https://img.shields.io/badge/stack-Go%201.26+%20%7C%20Rust%201.100+%20%7C%20C%20ABI-orange" alt="Tech Stack">
 </p>
 
 <p align="center">
