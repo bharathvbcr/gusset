@@ -18,6 +18,19 @@ on:
 permissions:
   contents: read
 
+# A new push to a PR supersedes the run in flight, so its runners stop burning
+# minutes on a commit nobody will merge. Only pull_request runs are cancelled:
+# a push to main is never cancelled, because the bench job compares against
+# github.event.before, the commit that push replaced, and a cancelled run
+# would leave that commit unmeasured. github.event_name is the only context
+# used here; head_ref and other event fields are attacker-controlled names.
+# Every other event gets its own group (run_id): a shared group would let a
+# newer pending run replace an older pending one even without
+# cancel-in-progress, silently skipping CI for a main commit.
+concurrency:
+  group: matrix-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Pinned by date per AGENTS.md; bump together with RUST_NIGHTLY in nightly.yml.
 env:
   RUST_NIGHTLY: nightly-2026-10-05
@@ -839,6 +852,14 @@ jobs:
     # twenty of the two isolate round trips, and four more test-binary builds.
     # That would be past half of 45, so the limit is 60 and the expected
     # runtime (about 27 min) stays under half of it.
+    #
+    # The interleaved loop now runs each row for 500 ms (-test.benchtime in
+    # bench_side), which takes a run from about 25 to about 13 min. Measured
+    # 2026-11-15 with an A/A comparison (identical code on both sides) on
+    # ubuntu-latest, two runs per setting: mean worst-case dispersion per row
+    # 5.1% and 3.7% at 1s against 5.0% and 6.0% at 500ms, largest A/A delta
+    # 2.5% against 3.2%, gate green in all four. The gate still needs both
+    # >10% and non-overlapping intervals. Keep 10 rounds: -min-samples is 10.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -960,7 +981,7 @@ jobs:
           # OUT. Each binary runs from its own package directory.
           bench_side() {
             local tag=$1 dir=$2 out=$3
-            local common=(-test.run '^$' -test.benchtime=1s -test.count=1 -test.benchmem)
+            local common=(-test.run '^$' -test.benchtime=500ms -test.count=1 -test.benchmem)
             {
               (cd "$dir/bench" && "$RUNNER_TEMP/$tag.test" "${common[@]}" -test.bench . -test.skip '^(BenchmarkHandleChurn)$')
               (cd "$dir" && "$RUNNER_TEMP/$tag-root.test" "${common[@]}" -test.bench "$ROOT_BENCH")

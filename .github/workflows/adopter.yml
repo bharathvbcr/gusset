@@ -16,6 +16,12 @@ on:
 permissions:
   contents: read
 
+# Superseded PR runs are cancelled; pushes to main and manual runs never are
+# (their group is the run_id, so a pending run is never replaced either).
+concurrency:
+  group: adopter-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: never
 
