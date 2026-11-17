@@ -232,6 +232,47 @@ make install
 ```
 By default, this installs into `~/.local` (or `/usr/local` if run with write permissions or as root). Custom prefix can be provided via `PREFIX=/path/to/prefix make install`; `DESTDIR` stages for packagers. `./install.sh` from a checkout installs the same files. The installed archive is Gusset's own; a Go binary links the archive built from its umbrella crate, installed with `make install ARCHIVE=...` (see [`docs/adoption.md`](docs/adoption.md)).
 
+### Dependencies
+
+Building and testing Gusset needs the tools below. `make` installs none of them; check each with the command shown.
+
+| Tool | Version | Needed for | Check |
+| :--- | :--- | :--- | :--- |
+| **Go** | 1.27 or later (`go` line in `go.mod`) | the Go side and every Go test | `go version` |
+| **Rust**, via [rustup](https://rustup.rs) | 1.100 or later (`rust-version` in `Cargo.toml`) | building `libgusset.a` | `rustc --version` |
+| **An `objcopy` that runs** | `llvm-objcopy`, the `llvm-tools` rustup component, or on Linux binutils `objcopy` | `go generate ./internal/ffi`, which strips LLVM bitcode from the archive (see below) | `rustup component add llvm-tools` |
+| **A C compiler and `ar`** | whatever cgo accepts | cgo, and the Go tests that compile small C objects | `command -v cc ar` |
+| **`make` and `git`** | any | `make build`, `make test`, cloning | `command -v make git` |
+| **`pkg-config`** | any | only `-tags gusset_pkgconfig` (an installed prefix) | `pkg-config --version` |
+
+macOS and Linux (glibc and musl) are supported; Windows and other targets fail with a named error ([`docs/platforms.md`](docs/platforms.md)). macOS has no system `objcopy`, so add the `llvm-tools` component (or have `llvm-objcopy` from a Homebrew LLVM on `PATH`). On Alpine, `apk add build-base musl-dev binutils bash git make` and install Rust with rustup: the packaged Rust has lagged the floor.
+
+**Why an objcopy.** A Rust staticlib always carries LLVM bitcode, from the prebuilt standard library. Go 1.26.11, 1.27.4 and later refuse a library with those sections in a local `-L` directory ([GO-2026-6853](https://pkg.go.dev/vuln/GO-2026-6853), no opt-out). The checkout therefore links from `target/gusset`, and `go generate ./internal/ffi` fills it with the cargo-built archive minus those sections. Run it after every `cargo build`; `make build` does. Details and the failure signatures are in [`AGENTS.md`](AGENTS.md).
+
+Contributors only, none of it needed to build or test: `tools/ci/lint.sh install` installs the pinned `staticcheck`, `govulncheck` and `cargo-deny`; `python3` is used by `bench/record_test.sh`; the nightly sanity jobs (Miri, AddressSanitizer) use a pinned nightly toolchain.
+
+### Set Up with a Coding Agent
+
+Paste this into Claude Code, Codex, Cursor or any agent with shell access, from the directory where you want the checkout. It checks the dependencies above, builds, and proves the build works, without installing anything or committing anything unasked.
+
+```text
+Set up Gusset (https://github.com/bharathvbcr/gusset) on this machine and prove it works. Work step by step and report what you actually ran, not what you expect.
+
+1. Check the dependencies. Run: go version; rustc --version; cargo --version; command -v cc ar make git. Then check for an objcopy: on macOS run command -v llvm-objcopy and rustup component list --installed | grep llvm-tools; on Linux run command -v objcopy llvm-objcopy. Required: Go 1.27+, Rust 1.100+ via rustup, a C compiler and ar, make, git, and an objcopy that runs. If anything is missing, stop and tell me the exact command that fixes it. Ask me before you install a system package, run anything with sudo, add a rustup component, change a Rust or Go version, or let Go download a toolchain (GOTOOLCHAIN=auto does that silently when the local Go is too old). Never pin Go to an older patch release to get past an error.
+2. Clone and read. Run: git clone https://github.com/bharathvbcr/gusset.git && cd gusset. Read AGENTS.md and CONTRIBUTING.md before changing anything.
+3. Build. Make sure CARGO_TARGET_DIR is unset (make build refuses any target directory but ./target). Run: make build. That is cargo build --locked --release, then go generate ./internal/ffi, then go build ./... . Expect a "gen.go: staged" line. If it fails, report the exact error and what you think caused it; do not modify tracked files or set GOFLAGS or GOTOOLCHAIN to get past it. Do not skip go generate: without it the link fails with "library 'gusset' not found", and the go command refuses the unstripped cargo archive.
+4. Verify. Run: go test -count=1 ./internal/ffi ./tests/e2e/... ./tests/panic_zoo/... (about ten seconds). Then ask me whether to run the full suite, make test, which takes several minutes.
+5. Report the versions you found, each command and whether it passed, and anything you could not verify.
+
+Rules: after any cargo build, run go generate ./internal/ffi again. Do not modify tracked files, and do not edit .env files, credentials or CI settings. Do not commit or push unless I ask.
+```
+
+To use Gusset from your own Go service rather than build this checkout, give the agent this instead:
+
+```text
+Integrate Gusset (https://github.com/bharathvbcr/gusset) into this Go service by following https://github.com/bharathvbcr/gusset/blob/main/docs/adoption.md step by step, and report each step as you finish it. Build one umbrella crate that depends on my engine and on gusset (not on crates.io: a git dependency pinned to a release tag, renamed, as the guide shows), with [lib] name = "gusset" and crate-type = ["staticlib"], and register the engine with set_engine_handler. Link it with the installed-prefix route (make install ARCHIVE=... PREFIX=..., run in a Gusset checkout at the tag I depend on, then PKG_CONFIG_PATH=<prefix>/lib/pkgconfig go build -tags gusset_pkgconfig) or with CGO_LDFLAGS=-L<dir>. Important: Go 1.26.11 and 1.27.4 and later refuse a Rust archive that carries LLVM bitcode (every one does) when it sits in a "local" -L directory: a relative path, or an absolute one under the directory you run go from, under GOMODCACHE or under $TMPDIR, whether it comes from a #cgo line or from the prefix pkg-config names. make install installs the archive unstripped. So pick a prefix outside those places (such as /opt/<name> or ~/.local), or, if the directory has to be local, put a copy of the archive there with its bitcode removed (go run github.com/bharathvbcr/gusset/tools/gussetseal -strip-lto -o OUT.a IN.a) and nothing else in that directory. Ask me before you install a system package, use sudo, add a rustup component, change a Rust or Go version, or let Go download a toolchain, and do not commit or push unless I ask.
+```
+
 ---
 
 ## The Public Surface
@@ -418,7 +459,8 @@ required before the snippet below returns a result, and both are easy to miss â€
    `no engine handler registered` â€” deliberately, rather than falling back to a
    built-in engine that picks its behaviour from the first input byte.
 2. **Make the archive linkable.** The default `#cgo LDFLAGS` resolve
-   `libgusset.a` from a Gusset *source checkout*'s `target/` directory, which does
+   `libgusset.a` from a Gusset *source checkout*'s `target/gusset` directory (filled by
+   `go generate ./internal/ffi`), which does
    not exist in the Go module cache. Build with `-tags gusset_pkgconfig` after
    `make install`, or pass `CGO_LDFLAGS="-L/path/to/lib"`.
 
