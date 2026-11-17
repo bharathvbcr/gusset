@@ -31,19 +31,20 @@ GUSSET_VERSION = $(shell cargo pkgid -p gusset 2>/dev/null | sed 's/.*[$(HASH)@]
 
 all: build
 
-# The directory cgo links from. internal/ffi/ffi.go names
-# ${SRCDIR}/../../target/release and then target/debug in its default LDFLAGS,
-# and internal/ffi/gen.go hashes the first libgusset.a it finds there, in the
-# same order. A target that runs `cargo build` and then links Go against the
-# result is only honest when cargo wrote into this directory: with
-# CARGO_TARGET_DIR=/x, cargo builds /x/release/libgusset.a, cgo links whatever
-# ./target still holds (an old archive, or nothing), and the hash describes
-# that old archive. Those targets refuse instead, naming both archives.
+# The directory cargo must write into. internal/ffi/gen.go reads the first
+# libgusset.a it finds in ./target/release, then ./target/debug, and stages a
+# copy with its LLVM bitcode removed in ./target/gusset, the only directory
+# internal/ffi/ffi.go links from (the go command refuses the bitcode in a local
+# -L directory, GO-2026-6853). A target that runs `cargo build` and then links Go
+# against the result is only honest when cargo wrote into ./target: with
+# CARGO_TARGET_DIR=/x, cargo builds /x/release/libgusset.a, gen.go stages
+# whatever ./target still holds (an old archive, or nothing), and the hash
+# describes that old archive. Those targets refuse instead, naming both archives.
 # `install` honours CARGO_TARGET_DIR (ARCHIVE above) and does not link Go
 # against the archive, so it does not take this check.
 LINKED_TARGET_DIR := $(CURDIR)/target
 TARGET_DIR_REFUSAL = cargo builds $(abspath $(TARGET_DIR))/release/libgusset.a \
-	but internal/ffi links and gen.go hashes $(LINKED_TARGET_DIR)/release/libgusset.a \
+	but gen.go reads $(LINKED_TARGET_DIR)/release/libgusset.a (then debug) and stages it for internal/ffi to link \
 	(CARGO_TARGET_DIR=$(CARGO_TARGET_DIR)). Unset CARGO_TARGET_DIR for this target \
 	or set it to $(LINKED_TARGET_DIR)
 
