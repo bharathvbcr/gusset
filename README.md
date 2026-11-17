@@ -238,7 +238,7 @@ Building and testing Gusset needs the tools below. `make` installs none of them;
 
 | Tool | Version | Needed for | Check |
 | :--- | :--- | :--- | :--- |
-| **Go** | 1.26 or later (developed on 1.27.x) | the Go side and every Go test | `go version` |
+| **Go** | 1.27 or later (`go` line in `go.mod`) | the Go side and every Go test | `go version` |
 | **Rust**, via [rustup](https://rustup.rs) | 1.100 or later (`rust-version` in `Cargo.toml`) | building `libgusset.a` | `rustc --version` |
 | **An `objcopy` that runs** | `llvm-objcopy`, the `llvm-tools` rustup component, or on Linux binutils `objcopy` | `go generate ./internal/ffi`, which strips LLVM bitcode from the archive (see below) | `rustup component add llvm-tools` |
 | **A C compiler and `ar`** | whatever cgo accepts | cgo, and the Go tests that compile small C objects | `command -v cc ar` |
@@ -258,7 +258,7 @@ Paste this into Claude Code, Codex, Cursor or any agent with shell access, from 
 ```text
 Set up Gusset (https://github.com/bharathvbcr/gusset) on this machine and prove it works. Work step by step and report what you actually ran, not what you expect.
 
-1. Check the dependencies. Run: go version; rustc --version; cargo --version; command -v cc ar make git. Then check for an objcopy: on macOS run command -v llvm-objcopy and rustup component list --installed | grep llvm-tools; on Linux run command -v objcopy llvm-objcopy. Required: Go 1.26+, Rust 1.100+ via rustup, a C compiler and ar, make, git, and an objcopy that runs. If anything is missing, stop and tell me the exact command that fixes it. Ask me before you install a system package, run anything with sudo, add a rustup component, change a Rust or Go version, or let Go download a toolchain (GOTOOLCHAIN=auto does that silently when the local Go is too old). Never pin Go to an older patch release to get past an error.
+1. Check the dependencies. Run: go version; rustc --version; cargo --version; command -v cc ar make git. Then check for an objcopy: on macOS run command -v llvm-objcopy and rustup component list --installed | grep llvm-tools; on Linux run command -v objcopy llvm-objcopy. Required: Go 1.27+, Rust 1.100+ via rustup, a C compiler and ar, make, git, and an objcopy that runs. If anything is missing, stop and tell me the exact command that fixes it. Ask me before you install a system package, run anything with sudo, add a rustup component, change a Rust or Go version, or let Go download a toolchain (GOTOOLCHAIN=auto does that silently when the local Go is too old). Never pin Go to an older patch release to get past an error.
 2. Clone and read. Run: git clone https://github.com/bharathvbcr/gusset.git && cd gusset. Read AGENTS.md and CONTRIBUTING.md before changing anything.
 3. Build. Make sure CARGO_TARGET_DIR is unset (make build refuses any target directory but ./target). Run: make build. That is cargo build --locked --release, then go generate ./internal/ffi, then go build ./... . Expect a "gen.go: staged" line. If it fails, report the exact error and what you think caused it; do not modify tracked files or set GOFLAGS or GOTOOLCHAIN to get past it. Do not skip go generate: without it the link fails with "library 'gusset' not found", and the go command refuses the unstripped cargo archive.
 4. Verify. Run: go test -count=1 ./internal/ffi ./tests/e2e/... ./tests/panic_zoo/... (about ten seconds). Then ask me whether to run the full suite, make test, which takes several minutes.
