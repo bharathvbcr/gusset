@@ -146,11 +146,13 @@ jobs:
         if: success() || failure()
         run: sh bench/record_test.sh
 
-  # go.mod declares Go 1.26 (latest minus one, per DECISIONS), and nothing
-  # else here runs it: every other lane is 1.27. Build, vet and test on the
-  # floor so a 1.27-only API or behaviour cannot slip in unnoticed.
+  # go.mod declares Go 1.27 (owner override of latest-minus-one, 2026-11-16,
+  # DECISIONS). Every other lane floats on the newest 1.27.x patch; this one
+  # pins the floor patch, 1.27.0, so behaviour that changed in a later patch
+  # (a runtime fix, a new go command check such as the LTO-section refusal of
+  # 1.27.4) is not mistaken for something the floor has.
   go-floor:
-    name: Go 1.26 floor
+    name: Go 1.27 floor
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -166,7 +168,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.0'
           cache: false
 
       - name: Build Rust static library

@@ -51,7 +51,7 @@ func genTree(t *testing.T) (root, pkg string) {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(root, "internal", "ltostrip", "ltostrip.go"), strip)
-	writeFile(t, filepath.Join(root, "go.mod"), []byte("module github.com/bharathvbcr/gusset\n\ngo 1.26\n"))
+	writeFile(t, filepath.Join(root, "go.mod"), []byte("module github.com/bharathvbcr/gusset\n\ngo 1.27\n"))
 	return root, pkg
 }
 

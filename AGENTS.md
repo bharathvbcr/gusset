@@ -35,12 +35,12 @@ How an agent works in this repo:
 
 ## Toolchain policy
 
-Develop on the latest stable of both languages; support latest and latest-minus-one; use nightly and tip only for gates, never for shipped code. The workflows track Go `1.27.x` (`setup-go`) and Rust `stable` (`dtolnay/rust-toolchain`), so no patch version is typed here; the pair a committed benchmark was recorded with is in its file name and in the generated block of `README.md`.
+Develop on the latest stable of both languages; support latest and latest-minus-one, except where the owner has raised a floor to latest (Go 1.27 and Rust 1.100, `DECISIONS.md`); use nightly and tip only for gates, never for shipped code. The workflows track Go `1.27.x` (`setup-go`) and Rust `stable` (`dtolnay/rust-toolchain`), so no patch version is typed here; the pair a committed benchmark was recorded with is in its file name and in the generated block of `README.md`.
 
 | Channel | Go | Rust | Used for |
 | --- | --- | --- | --- |
-| Develop and release | 1.27.x | stable | Everything shipped; `go.mod` says `go 1.26`, `rust-version = "1.97"` |
-| Supported floor | 1.26 | 1.97 | CI leg; a floor bump is a minor release with a changelog line |
+| Develop and release | 1.27.x | stable | Everything shipped; `go.mod` says `go 1.27`, `rust-version = "1.100"` |
+| Supported floor | 1.27 | 1.100 | CI leg; a floor bump is a minor release with a changelog line |
 | Gates only | gotip (weekly job), bootstrapped from Go 1.27.x because tip requires >= 1.26.0 | nightly (pinned by date, bumped monthly) | Go tip catches boundary changes early; nightly runs Miri, `-Zsanitizer=address`, `cargo-fuzz` |
 | Never | anything below 1.22 | anything below 1.81 | 1.22 introduced `#cgo noescape`/`nocallback`; 1.81 made panics escaping `extern "C"` abort |
 
@@ -297,8 +297,8 @@ Four workflows: `matrix.yml` on every PR and push, `adopter.yml` (walks `docs/ad
 | Job | Workflow | Platform | Command / setting | Must contain | Status |
 | --- | --- | --- | --- | --- | --- |
 | `unit` | matrix | linux x86-64, linux arm64, macos | `cargo clippy --all-targets`, `cargo test --workspace` in dev and `--release`, clippy and `cargo test` on the `examples/uniffi_bindgen_go/rust` crate (its own workspace), `make test-uniffi-link` (the typed client against that crate's umbrella `libgusset.a`), `go test ./...` (and under `GOEXPERIMENT=simd`) | Panic zoo, ABI drift, poison, deadline, cancel, thread migration, completion drain, runtime hardening suite, shutdown drain, adopter engine, header signature diff | live. The test counts are in the job log, not here; they changed on every merge |
-| `go-floor` | matrix | linux | `go vet ./...` and `go test ./...` on Go 1.26 with `GOTOOLCHAIN=local`, against the stable-built archive | The Go floor `go.mod` declares compiles and passes | live |
-| `rust-floor` | matrix | linux | `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` and `go test ./...` on Rust 1.97 | The Rust floor `rust-version` declares builds the archive adopters link and passes both suites | live. Clippy's `incompatible_msrv` alone sees only std items that carry a stability version |
+| `go-floor` | matrix | linux | `go vet ./...` and `go test ./...` on Go 1.27.0 with `GOTOOLCHAIN=local`, against the stable-built archive | The Go floor `go.mod` declares compiles and passes | live |
+| `rust-floor` | matrix | linux | `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace` and `go test ./...` on Rust 1.100 | The Rust floor `rust-version` declares builds the archive adopters link and passes both suites | live. Clippy's `incompatible_msrv` alone sees only std items that carry a stability version |
 | `allocator-api` | matrix | linux, macos | On Rust 1.100+: clippy, `cargo test --workspace --release`, `cargo test -p gusset --test rust_allocator_api`, the Go suite against the allocator-backed archive, `go test -race -run TestInterop -count=3 ./tests/pitfalls/`, then a fallback build on the same compiler with `GUSSET_ALLOCATOR_API=0` | `BufferAlloc`, `Counting` as an `Allocator` and the zero-copy adoption path; the fallback path stays green on a compiler that has the API | live. No `cgocheck2` leg |
 | `walkthrough` | adopter (`adopter.yml`) | linux, macos | `tests/adopter/walkthrough.sh`, which extracts and runs the code blocks of `docs/adoption.md` | The adoption recipe compiles, links and runs as written, including `make install` and `install.sh` | live. The step 5 `Allocator` snippet is compiled only when the toolchain supports it, and required by `step5-snippet` below |
 | `cgocheck2` | matrix | linux | `GOEXPERIMENT=cgocheck2 go test ./...` | A retained-pointer violation that must be caught (the gate test below); no Pinner test exists because submit copies and nothing pins (`TestR6_SubmitCopiesTheInputBeforeItReturns` checks the copy) | live. `TestGate_CgoCheck2IsArmedWhenRequested` stores a Go pointer into C memory in a subprocess and asserts it is caught *with* the experiment and allowed *without* it |
