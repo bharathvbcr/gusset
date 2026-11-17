@@ -1,0 +1,32 @@
+AArch64 GussetParkWakeDekkerV80LLSC
+"ARMv8.0 LL/SC (`LDAXR`/`STLXR`) companion to `park_wake_dekker.litmus`
+ (`crates/gusset/src/pool/ring.rs::try_publish` + `take_waiter` vs
+ `ticket_reader.go::waitRing` on ARMv8.0 cores without LSE atomics).
+
+ P0 (Rust worker): publishes slot sequence `seq = 1` with `STLR`, executes
+ `DMB ISH`, reads `waiting` (`LDR`), and claims `waiting` via LL/SC if non-zero.
+
+ P1 (Go reader `waitRing` on ARMv8.0 LL/SC): announces parking via exclusive
+ `LDAXR`/`STLXR` loop (`waiting = 1`) and re-checks `seq` with `LDAR` (`R & A`).
+ Because `[Exp & W & L]; po; [Exp & R & A]` is in `bob` (`aarch64hwreqs.cat`),
+ `STLXR` -> `LDAR` prevents StoreLoad reordering even without LSE `SWPAL`.
+
+ Expected `herd7` verdict under `aarch64.cat`: `Never` (`0:X2=0 /\ 1:X4=0` unreachable)."
+{
+  uint64_t seq = 0;
+  uint32_t waiting = 0;
+  0:X0=1; 0:X1=seq; 0:X3=waiting; 0:X4=0;
+  1:X0=1; 1:X1=waiting; 1:X3=seq;
+}
+ P0                       | P1                       ;
+ STLR X0, [X1]            | LDAXR W2, [X1]           ;
+ DMB ISH                  | STLXR W5, W0, [X1]       ;
+ LDR W2, [X3]             | CBNZ W5, L_abort         ;
+ CBNZ W2, L_claim         | LDAR X4, [X3]            ;
+ B L_done                 | L_abort:                 ;
+L_claim:                  |                          ;
+ LDAXR W5, [X3]           |                          ;
+ STLXR W6, W4, [X3]       |                          ;
+L_done:                   |                          ;
+filter (1:X5=0)
+exists (0:X2=0 /\ 1:X4=0)

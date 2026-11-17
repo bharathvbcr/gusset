@@ -1,0 +1,19 @@
+AArch64 GussetParkWakeDekkerDisproofNoFence
+"Disproof companion (`Sometimes`) to `park_wake_dekker.litmus`:
+ omits the worker's `DMB ISH` (`fence(Ordering::SeqCst)`) between publishing
+ `STLR X0, [seq]` and reading `LDR W2, [waiting]`.
+
+ Without `DMB ISH`, `[Exp & W & L]; po; [Exp & R]` has no `bob` edge in
+ `aarch64hwreqs.cat`, permitting StoreLoad reordering and lost wake (`0:X2=0 /\ 1:X4=0`).
+
+ Expected `herd7` verdict under `aarch64.cat`: `Sometimes`."
+{
+  uint64_t seq = 0;
+  uint32_t waiting = 0;
+  0:X0=1; 0:X1=seq; 0:X3=waiting;
+  1:X0=1; 1:X1=waiting; 1:X3=seq;
+}
+ P0                       | P1                       ;
+ STLR X0, [X1]            | SWPAL W0, W2, [X1]       ;
+ LDR W2, [X3]             | LDAR X4, [X3]            ;
+exists (0:X2=0 /\ 1:X4=0)

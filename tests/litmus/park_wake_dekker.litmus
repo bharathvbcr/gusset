@@ -1,0 +1,45 @@
+AArch64 GussetParkWakeDekker
+"AArch64 litmus specification of Gusset's shared-memory completion ring
+ park/wake Dekker protocol (`crates/gusset/src/pool/ring.rs::try_publish` +
+ `take_waiter` vs `ticket_reader.go::waitRing`).
+
+ Verification note: verified under `herd7` (`aarch64.cat`, verdict `Never`) in
+ the nightly `formal` CI job, and mirrored by `crates/gusset/tests/aarch64_litmus_model.rs`
+ which executes the `aarch64.cat` / `aarch64hwreqs.cat` relational consistency
+ check over all candidate `(rf, co)` executions under `cargo test` and asserts
+ syntactic parity with this file.
+
+ P0 (Rust worker): publishes slot sequence `seq = 1` with STLR, executes
+ `fence(SeqCst)` (`DMB ISH`), reads `waiting` (`LDR`), and when non-zero swaps
+ `waiting` to 0 (`SWPAL`).
+
+ P1 (Go reader `waitRing` on LSE / ARMv8.1+): announces parking via
+ `atomic.SwapUint32(&waiting, 1)` (`SWPAL W0, W2, [X1]`, with `X1 = waiting`) and
+ re-checks `ringReady()` via `atomic.LoadUint64(&seq)` (`LDAR X4, [X3]`, with `X3 = seq`).
+
+ Safety condition (`Never` under `aarch64.cat`):
+   0:X2=0 (worker observed waiting == 0 and skipped writing pipe wake token)
+   /\ 1:X4=0 (reader observed seq == 0 and parked on the pipe)
+
+ Companion disproof variants exercised in `crates/gusset/tests/aarch64_litmus_model.rs`:
+   1. `STLRW` + `LDAPR` (FEAT_LRCPC RCpc acquire-pc load): `[W & L]; po; [R & Q]`
+      is NOT in `bob` (`aarch64hwreqs.cat` line 134 only covers `[W & L]; po; [R & A]`),
+      yielding a consistent `ob`-acyclic lost-wake execution (`Sometimes`).
+   2. `STR` + `LDAR` (missing release on `waiting = 1`): `Sometimes`.
+   3. Worker omitting `DMB ISH` before `LDR W2, [waiting]`: `Sometimes`."
+{
+  uint64_t seq = 0;
+  uint32_t waiting = 0;
+  0:X0=1; 0:X1=seq; 0:X3=waiting; 0:X4=0;
+  1:X0=1; 1:X1=waiting; 1:X3=seq;
+}
+ P0                       | P1                       ;
+ STLR X0, [X1]            | SWPAL W0, W2, [X1]       ;
+ DMB ISH                  | LDAR X4, [X3]            ;
+ LDR W2, [X3]             |                          ;
+ CBNZ W2, L_claim         |                          ;
+ B L_done                 |                          ;
+L_claim:                  |                          ;
+ SWPAL W4, W5, [X3]       |                          ;
+L_done:                   |                          ;
+exists (0:X2=0 /\ 1:X4=0)

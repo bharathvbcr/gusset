@@ -203,7 +203,8 @@ jobs:
             --test rust_deadline --test rust_counting_flip \
             --test engine_registry_recovery --test boundary_props \
             --test log_ring_props --test log_ring_contention \
-            --test take_ownership
+            --test take_ownership --test aarch64_litmus_model \
+            --test ffi_formal_verification
 
       # These two compare /proc/self/{fd,task} with a baseline and hold under
       # ASan. resource_hygiene is not here: it counts glibc malloc arenas and
@@ -485,6 +486,78 @@ jobs:
             testdata/fuzz/
             tests/pitfalls/testdata/fuzz/
 
+  # Bit-precise CBMC bounded model checking (`cargo kani`) over every
+  # `#[kani::proof]` harness in crates/gusset, plus real `herd7` (`aarch64.cat`)
+  # axiomatic memory-model verification over the production LSE / ARMv8.0 LL/SC
+  # park/wake Dekker specs (`Never`) and disproof companions (`Sometimes`).
+  formal:
+    name: Formal verification (Kani + herd7)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+
+      - name: Install Kani CBMC model checker
+        run: |
+          set -euo pipefail
+          . tools/ci/versions.env
+          cargo install kani-verifier --locked --version "$KANI_VERSION"
+          cargo kani setup
+
+      - name: Kani bounded model checking
+        run: |
+          set -euo pipefail
+          kani_log="$(mktemp)"
+          trap 'rm -f "$kani_log"' EXIT
+          cargo kani --manifest-path crates/gusset/Cargo.toml --tests 2>&1 | tee "$kani_log"
+          grep -q 'VERIFICATION:- SUCCESSFUL' "$kani_log"
+          grep -Eq 'Complete - [1-9][0-9]* successfully verified harnesses, 0 failures' "$kani_log"
+          if grep -q 'VERIFICATION:- FAILED' "$kani_log"; then exit 1; fi
+
+      - name: Build herd7 from pinned commit
+        run: |
+          set -euo pipefail
+          . tools/ci/versions.env
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ocaml ocaml-dune ocaml-findlib menhir libmenhir-ocaml-dev libzarith-ocaml-dev
+          git init /tmp/herdtools7
+          git -C /tmp/herdtools7 remote add origin https://github.com/herd/herdtools7.git
+          git -C /tmp/herdtools7 fetch --depth 1 origin "$HERDTOOLS7_COMMIT"
+          git -C /tmp/herdtools7 checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/herdtools7 rev-parse HEAD)" = "$HERDTOOLS7_COMMIT"
+          (
+            cd /tmp/herdtools7
+            sh ./version-gen.sh /tmp/herdtools7/herd/libdir
+            dune build herd/herd.exe
+          )
+
+      - name: Verify AArch64 litmus specifications under herd7
+        run: |
+          set -euo pipefail
+          HERD7=/tmp/herdtools7/_build/default/herd/herd.exe
+          LIBDIR=/tmp/herdtools7/herd/libdir
+          herd_log="$(mktemp)"
+          trap 'rm -f "$herd_log"' EXIT
+          "$HERD7" -version
+          for f in tests/litmus/park_wake_dekker.litmus tests/litmus/park_wake_dekker_v80_llsc.litmus; do
+            echo "== $f (expect Never)"
+            "$HERD7" -I "$LIBDIR" "$f" 2>&1 | tee "$herd_log"
+            grep -Eq '^Observation [A-Za-z0-9_]+ Never 0 [1-9][0-9]*$' "$herd_log"
+            if grep -qi 'unrolling limit exceeded' "$herd_log"; then exit 1; fi
+          done
+          for f in tests/litmus/park_wake_dekker_disproof_ldapr.litmus tests/litmus/park_wake_dekker_disproof_nofence.litmus; do
+            echo "== $f (expect Sometimes)"
+            "$HERD7" -I "$LIBDIR" "$f" 2>&1 | tee "$herd_log"
+            grep -Eq '^Observation [A-Za-z0-9_]+ Sometimes [1-9][0-9]* [0-9]+$' "$herd_log"
+          done
+
   # AGENTS.md: "nightly and tip failures open an issue automatically". tip did;
   # nightly did not, and on 2026-09-30 the chaos hammer took the test process
   # down with a SIGSEGV inside gusset_take that nobody was told about. Only on
@@ -496,7 +569,7 @@ jobs:
   # cancelled, this job skipped).
   report:
     name: Open an issue on failure
-    needs: [miri, sanitizer, hammer, hammer-heap, step5-snippet, cargo-fuzz, go-fuzz]
+    needs: [miri, sanitizer, hammer, hammer-heap, step5-snippet, cargo-fuzz, go-fuzz, formal]
     if: >-
       always() && github.ref == 'refs/heads/main' &&
       (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped'))

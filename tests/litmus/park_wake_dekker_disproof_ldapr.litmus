@@ -1,0 +1,21 @@
+AArch64 GussetParkWakeDekkerDisproofLDAPR
+"Disproof companion (`Sometimes`) to `park_wake_dekker.litmus`:
+ replaces the reader's `SWPAL` + `LDAR` with `STLR` (`W & L`) + FEAT_LRCPC
+ `LDAPR` (`R & Q`, RCpc acquire-pc).
+
+ Under `aarch64hwreqs.cat`, `bob` orders `[Exp & W & L]; po; [Exp & R & A]`
+ (`STLR` -> `LDAR`), NOT `[Exp & W & L]; po; [Exp & R & Q]` (`STLR` -> `LDAPR`).
+ Consequently, `0:X2=0 /\ 1:X4=0` (lost wake) is architecturally permitted!
+
+ Expected `herd7` verdict under `aarch64.cat`: `Sometimes`."
+{
+  uint64_t seq = 0;
+  uint32_t waiting = 0;
+  0:X0=1; 0:X1=seq; 0:X3=waiting;
+  1:X0=1; 1:X1=waiting; 1:X3=seq;
+}
+ P0                       | P1                       ;
+ STLR X0, [X1]            | STLR W0, [X1]            ;
+ DMB ISH                  | LDAPR X4, [X3]           ;
+ LDR W2, [X3]             |                          ;
+exists (0:X2=0 /\ 1:X4=0)
