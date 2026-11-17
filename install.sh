@@ -62,7 +62,7 @@ error() {
 # 1. Toolchain
 info "Checking toolchain prerequisites..."
 for tool in cargo go make; do
-	command -v "$tool" >/dev/null 2>&1 || error "$tool is required to build Gusset (Rust: https://rustup.rs, Go >= 1.26: https://go.dev)"
+	command -v "$tool" >/dev/null 2>&1 || error "$tool is required to build Gusset (Rust: https://rustup.rs, Go >= 1.27: https://go.dev)"
 done
 
 # 2. Source
