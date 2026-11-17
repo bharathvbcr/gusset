@@ -1,6 +1,6 @@
 module r14host
 
-go 1.26
+go 1.27
 
 // Spike-only module. It links two engine archives next to Gusset's, which is
 // why it is a module of its own: neither engine belongs in the main build.

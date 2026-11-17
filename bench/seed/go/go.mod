@@ -1,6 +1,6 @@
 module ffibench
 
-go 1.26
+go 1.27
 
 // Benchmark-only module. It links libffibench.a for the raw-cgo baseline and
 // imports Gusset for the other half of the same measurement, which is why it is

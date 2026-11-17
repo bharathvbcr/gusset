@@ -202,7 +202,7 @@ printf '%s\n' "$SHIM_GO" >"$APP/shim.go"
 cat >"$APP/go.mod" <<EOF
 module example.com/toy
 
-go 1.26
+go 1.27
 
 require github.com/bharathvbcr/gusset v0.0.0
 
