@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.png" alt="Gusset Logo" width="144" height="144" />
+</p>
+
 # Gusset
 
 <p align="center">
