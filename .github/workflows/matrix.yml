@@ -644,7 +644,15 @@ jobs:
           echo "$RUSTUP_INIT_SHA256_X86_64_MUSL  /tmp/rustup-init" | sha256sum -c -
           chmod +x /tmp/rustup-init
           /tmp/rustup-init -y --default-toolchain stable --profile minimal
-          "$HOME/.cargo/bin/rustup" toolchain install 1.97 --profile minimal
+          for attempt in 1 2 3; do
+            if "$HOME/.cargo/bin/rustup" toolchain install 1.97 --profile minimal; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 5
+          done
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: gussetseal tests
