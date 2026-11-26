@@ -6,7 +6,7 @@ Use `.devcouncil/repo_map.json` as the primary file index for this workspace.
 Repo map: `.devcouncil/repo_map.json`
 Code graph: `.devcouncil/graph/code_graph.json` (symbol-level; query with `devmap`).
 
-Before you change anything, ask GitPulse Insights what else is live in this repository. `gitpulse_insights` names the other worktrees, the running agent sessions, uncommitted work, contended files and index health in one call. Then `gitpulse_collision_risk` before touching a file another worktree may hold, `gitpulse_active_changes` for what is in flight, `gitpulse_change_context` / `gitpulse_provenance` for what changed and why, and `gitpulse_ledger_events` for the recorded history. Its facets fail independently — check each `ok`, because a facet that could not scan is not a facet that came back clean.
+Before you change anything, ask Waylode Insights what else is live in this repository. `waylode_insights` names the other worktrees, the running agent sessions, uncommitted work, contended files and index health in one call. Then `waylode_collision_risk` before touching a file another worktree may hold, `waylode_active_changes` for what is in flight, `waylode_change_context` / `waylode_provenance` for what changed and why, and `waylode_ledger_events` for the recorded history. Its facets fail independently — check each `ok`, because a facet that could not scan is not a facet that came back clean.
 
 Workflow for agents:
 1. Run `devmap paths --json` and `devmap status --json` first. Generated state is per-worktree and is not copied by Git. Read `.devcouncil/repo_map.json` when present; if its location differs in this checkout, use the resolved `repo_map` path. If the store or map is missing, run `devmap build --manifest` from this worktree's root, then check status again. Never copy a sibling worktree's database.
@@ -20,7 +20,7 @@ Workflow for agents:
 9. The store (`.devcouncil/codeintel/devmap.sqlite`) is canonical — prefer `devmap` commands when `.devcouncil/graph/code_graph.json` is missing or a size-capped stub. `devmap preview` asks what an unsaved edit would break before it is written.
 10. Run `devmap build --manifest` after large refactors to refresh the database and exported maps, or `devmap serve` to keep the index warm; `devmap status` reports generation, counts and freshness.
 
-This binds every agent working here, not only the one reading this file. When you delegate — a subagent, a worktree lane, a handoff plan — name DevMap and GitPulse Insights in the prompt with the same precedence, rather than leaving that agent to grep its way in. When either tool cannot answer (truncated, `walk_incomplete`, empty on a built index, or a capability it does not have), record the gap and say so; do not silently fall back to grep and report the result as if the graph had confirmed it.
+This binds every agent working here, not only the one reading this file. When you delegate — a subagent, a worktree lane, a handoff plan — name DevMap and Waylode Insights in the prompt with the same precedence, rather than leaving that agent to grep its way in. When either tool cannot answer (truncated, `walk_incomplete`, empty on a built index, or a capability it does not have), record the gap and say so; do not silently fall back to grep and report the result as if the graph had confirmed it.
 
 Important surfaces:
 1. `crates/gusset-example/src/` — crates/gusset-example/src: 1 file, rust

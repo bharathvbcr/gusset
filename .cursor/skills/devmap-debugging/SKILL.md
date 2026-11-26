@@ -8,7 +8,7 @@ description: Use DevMap when tracing a bug, locating an error source, or investi
 
 Resolve this checkout with `devmap paths --json`, then check `devmap status --json`. Read the returned `repo_map` path; do not assume `.devcouncil` rather than `.devmap`. A missing, stale, or partially parsed index is not complete evidence. Rebuild with `devmap build --manifest` when needed and authorized, then recheck status.
 
-Use the connected DevMap MCP tools if they target this checkout; otherwise use the CLI from its root. Always pass `repo_path` (the absolute repository path) on every `devmap_*` and `gitpulse_codeintel_*` call, and check `repository.root` in the envelope before trusting the answer — Cursor shares one `devmap mcp` process across tabs. Discover the actual tool names and schemas; a host need not expose every CLI capability.
+Use the connected DevMap MCP tools if they target this checkout; otherwise use the CLI from its root. Always pass `repo_path` (the absolute repository path) on every `devmap_*` and `waylode_codeintel_*` call, and check `repository.root` in the envelope before trusting the answer — Cursor shares one `devmap mcp` process across tabs. Discover the actual tool names and schemas; a host need not expose every CLI capability.
 
 1. Reproduce the symptom with a bounded command or existing test and record the actual failure.
 2. Use `devmap search <name> --json` and `devmap explore <name> --json` to locate suspect symbols and callers. When the symptom names a behaviour rather than a symbol, `devmap ask --evidence "<behaviour>" --json` returns the likely code with its source and the tests that reach it. For literal error text that is not a symbol, search the source.

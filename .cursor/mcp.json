@@ -17,9 +17,9 @@
       "command": "devmap",
       "type": "stdio"
     },
-    "gitpulse": {
+    "waylode": {
       "args": [],
-      "command": "gitpulse-mcp",
+      "command": "waylode-mcp",
       "type": "stdio"
     }
   }
