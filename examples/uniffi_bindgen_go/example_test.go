@@ -176,6 +176,11 @@ func (t *referenceEngineTransport) Call(ctx context.Context, payload []byte) ([]
 		} else {
 			select {
 			case <-time.After(delay):
+				// Go's select picks pseudo-randomly when both timers are ready
+				// (e.g. after a scheduler stall); expired callers must never win.
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
@@ -389,13 +394,31 @@ func TestGussetUniFFI_ContextDeadlineCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 
-	// Request job holding 200ms
-	_, err := client.ExecuteSlowJob(ctx, 200*time.Millisecond)
+	// Request job holding well past the 20ms context deadline so a VM stall
+	// cannot let the job timer expire first.
+	_, err := client.ExecuteSlowJob(ctx, 5*time.Second)
 	if err == nil {
 		t.Fatal("expected context deadline error, got nil")
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+}
+
+func TestGussetUniFFI_ContextDeadlineAlreadyExpiredWinsOverZeroDelay(t *testing.T) {
+	transport := newReferenceEngineTransport()
+	client := uniffi.NewClient(transport)
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	// With delay=0 both select cases are immediately ready; every call must
+	// still observe ctx.Err() rather than succeeding ~50% of the time.
+	for i := 0; i < 200; i++ {
+		_, err := client.ExecuteSlowJob(ctx, 0)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("iteration %d: expected context.DeadlineExceeded, got %v", i, err)
+		}
 	}
 }
 
