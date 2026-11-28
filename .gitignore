@@ -124,3 +124,7 @@ bench/r14/host/zz_archives.go
 # dot-named temporary file; the tracked stub internal/ffi/archive_hash.go explains.
 internal/ffi/zz_archive_hash.go
 internal/ffi/.zz_archive_hash.go.*
+
+# Social-media launch copy and images are local-only: untracked 2026-11-28;
+# history up to abc8ec8 still has them.
+/docs/img/linkedin/
