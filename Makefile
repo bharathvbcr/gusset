@@ -1,4 +1,4 @@
-.PHONY: all linked-target-dir build test test-uniffi-link bench bench-crossover bench-scaling bench-dispatch bench-alloc-counters lint alloc-gate ci-local docs docs-check cross fuzz clean install install-build uninstall
+.PHONY: all linked-target-dir build test test-uniffi-link bench bench-crossover bench-scaling bench-dispatch bench-alloc-counters lint alloc-gate check-specs ci-local docs docs-check cross fuzz clean install install-build uninstall
 
 export PATH := $(PATH):$(shell go env GOPATH)/bin
 
@@ -350,7 +350,11 @@ ALLOC_BOUNDS ?= -max ChannelHop=0 -max GussetCallNoop=1 -max GussetSubmitWait=1 
 alloc-gate:
 	go run ./tools/ci/benchgate allocs $(ALLOC_BOUNDS) $(ALLOC_FILE)
 
-ci-local: build test test-uniffi-link lint docs-check
+# Every specs/NNN-* directory must validate; fails when the devcouncil binary is missing.
+check-specs:
+	devcouncil spec validate --all --strict
+
+ci-local: build test test-uniffi-link lint docs-check check-specs
 	go test -run '^$$' -bench . -skip '^(BenchmarkHandleChurn)$$' -benchtime=100ms -benchmem ./bench/... > $(ALLOC_FILE) || { cat $(ALLOC_FILE); exit 1; }
 	go test -run '^$$' -bench '^(BenchmarkCallNoopBare|BenchmarkCallNoopTraced)$$' -benchtime=100ms -benchmem . >> $(ALLOC_FILE) || { cat $(ALLOC_FILE); exit 1; }
 	@cat $(ALLOC_FILE)

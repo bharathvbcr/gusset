@@ -1,0 +1,37 @@
+# Contract: isolate worker process protocol (internal, protocol version 1)
+# Source of truth: internal/isolate/wire.go (frames, bounds, errors) and
+# internal/isolate/proc.go (handshake, EnvProtocolFD). Spike only: not public API.
+transport:
+  framing: "4-byte big-endian length, then a JSON body; byte fields are base64"
+  requests: "worker stdin"
+  responses: "inherited protocol pipe, descriptor 3 when the caller passed no other ExtraFiles"
+  env: GUSSET_ISOLATE_PROTOCOL_FD   # replaced if already present in the command environment
+  worker_stdout: "belongs to the engine; never used for framing"
+bounds:
+  request_frame_bytes: 65536                       # maxRequestFrame, 64 KiB
+  response_frame_bytes: "gusset.MaxBufferBytes/3*4 + 65536"   # base64 inflates 4/3
+  inline_input_bytes: 4096                          # maxInlineInput, equals the in-process copy limit (R16)
+handshake:
+  first_frame_from_worker: {op: hello, version: 1, pool_size: "worker's pool size, used by the host as its semaphore"}
+  on_mismatch: "host refuses to start the worker (version or op differs)"
+request:
+  op: {enum: [hello, submit, cancel]}
+  id: "uint64 ticket"
+  in: "bytes, at most inline_input_bytes"
+  timeout_ns: "uint64, relative to the moment the host stamped it; 0 none, 1 already expired"
+  opcode: "optional uint32"
+  trace: "optional 24 bytes: trace id then span id"
+response:
+  op: "optional"
+  id: "uint64 ticket"
+  out: "bytes"
+  err:
+    code: int
+    msg: string
+    file: "optional"
+    line: "optional int"
+    kind: {enum: ["", closed, shutdown, deadline, canceled, other]}   # "" means a *gusset.Error crossing by code
+host_methods: [Call, Submit, Wait, Discard, Close]   # same names and error semantics as *gusset.Handle
+refused:
+  - "*gusset.Buffer as Submit input -> isolate.ErrBufferUnsupported"
+  - "zero Policy, negative MaxRestarts, non-positive Window, negative timeouts -> refused by Supervise"
